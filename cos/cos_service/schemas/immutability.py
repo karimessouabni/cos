@@ -1,0 +1,31 @@
+from enum import Enum
+
+
+class Immutability(str, Enum):
+    RETENTION = "retention"             # rétrocompat, à supprimer quand plus utilisé
+    RETENTION_DAILY = "retention_daily"
+    RETENTION_YEARLY = "retention_yearly"
+    OBJECT_LOCK = "object_lock"   # rétrocompat, à supprimer quand plus utilisé
+    OBJECT_LOCK_DAILY = "object_lock_daily"
+    OBJECT_LOCK_YEARLY = "object_lock_yearly"
+    NONE = "none"
+
+    @property
+    def is_retention(self) -> bool:
+        return self.value.startswith("retention")
+
+    @property
+    def is_object_lock(self) -> bool:
+        return self.value.startswith("object_lock")
+
+    @property
+    def is_yearly(self) -> bool:
+        return self.value.endswith("_yearly")
+
+    @property
+    def is_daily(self) -> bool:
+        return self.value.endswith("_daily")
+
+    @property
+    def has_explicit_unit(self) -> bool:
+        return self.is_daily or self.is_yearly
