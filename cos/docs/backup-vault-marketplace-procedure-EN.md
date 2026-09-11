@@ -91,23 +91,45 @@ The policy is configured from the existing **bucket creation / update form**. Tw
 
 ---
 
-## 5. Verification
+## 5. Step 3 — Refresh the recovery ranges
+
+Recovery ranges are not displayed automatically: they must be fetched explicitly.
+
+1. Once the backup policy exists on the bucket, a **Refresh recovery ranges** button is shown next to the bucket name.
+2. Click it. An operation is triggered to retrieve the latest recovery ranges for that bucket.
+3. The retrieved ranges are then displayed in the **bucket information** panel, with their start and end times.
+
+> ⚠️ Nothing appears until the **initial sync** of the policy has completed (see §4). If the list comes back empty, wait and refresh again.
+>
+> ℹ️ Refresh again whenever you need an up-to-date view: the end time of a range moves forward continuously as new data is synced.
+
+---
+
+## 6. Step 4 — Restore from a recovery range
+
+Once a recovery range is displayed for the bucket, a restore can be launched from it via the dedicated button.
+
+- **Target**: the restore can be performed **on the same bucket** or **on another bucket**.
+- **Input**: the recovery range to restore from, and the point in time to restore to (must fall between the start and end times of that range).
+- **Result**: only the object versions that were **current** at the requested point in time are written to the target bucket. Noncurrent versions are not restored.
+- Duration depends on the volume to transfer; progress (%) is reported while the operation runs.
+
+> ⚠️ The target bucket must be **versioned** and free of any retention policy (see §2.3). Restoring onto the source bucket adds new versions — it does not erase what is already there.
+
+---
+
+## 7. Verification
 
 | Check | Where | Expected |
 |---|---|---|
 | Vault created | COS instance → Backup Vault section | Vault listed, active |
 | Policy active | Bucket → configuration | Vault selected, retention days set, status active (100 % after initial sync) |
-| Coverage | Vault → Recovery ranges | One range per policy, with start/end times moving forward |
+| Coverage | Bucket information, after **Refresh recovery ranges** | At least one range, with start/end times moving forward |
+| Restore | Target bucket | Objects present, matching the requested point in time |
 
 ---
 
-## 6. Restore (reference)
-
-Restore is not done from the bucket form: it is triggered **from the vault** towards a **versioned target bucket**, at a chosen point in time within the recovery range. Only the object versions that were **current** at that time are restored — noncurrent versions are not. See *Backup Vault — Restore*.
-
----
-
-## 7. FAQ
+## 8. FAQ
 
 **Can I attach a bucket to a vault in another COS instance?**
 Not through the Marketplace — the dropdown only shows vaults of the bucket's instance.
