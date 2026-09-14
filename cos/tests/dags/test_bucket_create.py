@@ -374,28 +374,13 @@ class TestCreateTfWorkspace:
         assert variables["cos_instance_crn"] == "crn:cos"
         assert variables["cos_instance_name"] == "cos-a"
         assert variables["wklapp_account_id"] == "wk-123"
-        assert variables["target_backup_vault_crn"] is None
+        assert variables["target_backup_vault_crn"] == "crn:bv"
         assert variables["kms_key_crn"] == "crn:kms"
         assert variables["cloud_type"] == "3"
         assert isinstance(variables["vault_read_token"], TerraformVar)
         happy_services.vault_service.get_vault_secrets.assert_called_once_with(
             realm="realm-a", apcode="AP1", vault="vault"
         )
-
-    def test_first_apply_variables_never_carry_the_backup(self, dag, happy_services, make_payload, state_manager):
-        """La policy de backup est indexée sur le nom du bucket, inconnu au 1er plan."""
-        happy_services.bucketService.get_bucket_by_sub_id.return_value = {"workspace": {"workspace_id": None}}
-        happy_services.schematics_service.create_or_update_ws.return_value = {"id": "ws-1"}
-        immutability = fresh_immutability(versioning=True)
-        immutability["backup"] = {"backup_enabled": True, "backup_vault_sub_id": "bv-sub", "backup_retention_days": 7}
-
-        self.run(dag, make_payload(), state_manager, immutability=immutability, backup_vault=BACKUP_VAULT)
-
-        variables = happy_services.schematics_service.create_or_update_ws.call_args.kwargs["variables"]
-        assert variables["backup_enabled"] is False
-        assert variables["target_backup_vault_crn"] is None
-        assert variables["initial_delete_after_days"] is None
-        assert variables["object_versioning_enabled"] is True
 
     def test_no_realm_or_vault_query_is_repeated(self, dag, happy_services, make_payload, state_manager):
         happy_services.bucketService.get_bucket_by_sub_id.return_value = {"workspace": {"workspace_id": "ws-1"}}
@@ -460,12 +445,12 @@ class TestCreateTfWorkspace:
 # --- apply_tf_workspace ---------------------------------------------------------------
 
 class TestApplyTfWorkspace:
-    def run(self, dag, payload, state_manager, backup_vault=None, immutability=None):
+    def run(self, dag, payload, state_manager, backup_vault=None):
         return dag.steps["apply_tf_workspace"](
             validated=validated(backup_vault),
             workspace_id="ws-1",
             account_instances_crn=ACCOUNT_CRNS,
-            immutability=immutability or fresh_immutability(),
+            immutability=fresh_immutability(),
             tf="tf",
             state_manager=state_manager,
             session="session",
@@ -473,7 +458,7 @@ class TestApplyTfWorkspace:
             vault="vault",
         )
 
-    def test_updates_the_workspace_then_runs_it_once_without_backup(self, dag, happy_services, make_payload, state_manager):
+    def test_updates_the_workspace_then_runs_it(self, dag, happy_services, make_payload, state_manager):
         happy_services.schematics_service.run_workspace.return_value = TF_OUTPUTS
 
         result = self.run(dag, make_payload(), state_manager, backup_vault=BACKUP_VAULT)
@@ -486,38 +471,9 @@ class TestApplyTfWorkspace:
         )
         details = happy_services.workspaceService.build_bucket_workspace_details.call_args.kwargs
         assert details["cos_instance_crn"] == "crn:cos"
-        assert details["backup_vault_crn"] is None
-        assert details["immutability"]["backup"]["backup_enabled"] is False
+        assert details["backup_vault_crn"] == "crn:bv"
         assert details["description"] == "my bucket"
         happy_services.cosService.get_cos_instance_by_name.assert_not_called()
-
-    def test_backup_is_enabled_by_a_second_apply(self, dag, happy_services, make_payload, state_manager):
-        first_outputs = {"bucket_name": {"value": "bucket-a"}, "bucket_crn": {"value": "crn:first"}}
-        happy_services.schematics_service.run_workspace.side_effect = [first_outputs, TF_OUTPUTS]
-        immutability = fresh_immutability(versioning=True)
-        immutability["backup"] = {"backup_enabled": True, "backup_vault_sub_id": "bv-sub", "backup_retention_days": 7}
-
-        result = self.run(dag, make_payload(), state_manager, backup_vault=BACKUP_VAULT, immutability=immutability)
-
-        assert result == TF_OUTPUTS
-        assert happy_services.schematics_service.run_workspace.call_count == 2
-        first, second = [c.kwargs for c in happy_services.workspaceService.build_bucket_workspace_details.call_args_list]
-        assert first["immutability"]["backup"]["backup_enabled"] is False
-        assert first["backup_vault_crn"] is None
-        assert first["immutability"]["object_versioning_enabled"] is True
-        assert second["immutability"]["backup"] == immutability["backup"]
-        assert second["backup_vault_crn"] == "crn:bv"
-        assert happy_services.workspaceService.update_bucket_workspace.call_count == 2
-
-    def test_failed_second_apply_locks_the_bucket(self, dag, happy_services, make_payload, state_manager):
-        happy_services.schematics_service.run_workspace.side_effect = [TF_OUTPUTS, RuntimeError("policy failed")]
-        immutability = fresh_immutability(versioning=True)
-        immutability["backup"] = {"backup_enabled": True, "backup_vault_sub_id": "bv-sub", "backup_retention_days": 7}
-
-        with pytest.raises(RuntimeError, match="policy failed"):
-            self.run(dag, make_payload(), state_manager, backup_vault=BACKUP_VAULT, immutability=immutability)
-
-        happy_services.bucketService.update_bucket_status.assert_called_with("sub-1", SubscriptionStatus.LOCKED, "session")
 
     def test_failed_apply_locks_the_bucket_and_reraises(self, dag, happy_services, make_payload, state_manager):
         happy_services.schematics_service.run_workspace.side_effect = RuntimeError("apply failed")

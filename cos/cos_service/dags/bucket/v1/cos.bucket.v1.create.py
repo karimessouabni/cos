@@ -200,19 +200,14 @@ def bucket_create():
         from cos_service.services.cosService import get_cos_instance_by_name
         from cos_service.services.vault_service import get_vault_secrets
         from cos_service.services.backup_vault_service import get_backup_vault_by_sub_id
-        from cos_service.services.immutability_service import without_backup
 
         realm = validated["realm"]
         cos_instance = validated["cos_instance"]
+        backup_vault = validated["backup_vault"]
 
         secrets = get_vault_secrets(realm=realm.get("name", None), apcode=payload.apcode, vault=vault)
         ws_name = f"ws_bucket_{payload.subscription_id}"
         tf_directory = f"terraform/v{TERRAFORM_VERSION}/bucket"
-
-        # Premier apply toujours sans backup (voir without_backup) : le backup
-        # est activé par un second apply dans apply_tf_workspace. La base, elle,
-        # reçoit la configuration finale.
-        first_pass = without_backup(immutability)
 
         variables = {
             "region": payload.region,
@@ -236,9 +231,9 @@ def bucket_create():
             "object_versioning_enabled": immutability["object_versioning_enabled"],
             "object_lock_duration_days": immutability["object_lock_duration_days"],
             "object_lock_duration_years": immutability["object_lock_duration_years"],
-            "backup_enabled": first_pass["backup"]["backup_enabled"],
-            "target_backup_vault_crn": None,
-            "initial_delete_after_days": first_pass["backup"]["backup_retention_days"],
+            "backup_enabled": immutability["backup"]["backup_enabled"],
+            "target_backup_vault_crn": backup_vault["crn"] if backup_vault is not None else None,
+            "initial_delete_after_days": immutability["backup"]["backup_retention_days"],
             "cloud_type": "3" if payload.region == "eu-de" else "2",
         }
 
@@ -310,52 +305,35 @@ def bucket_create():
             update_bucket_status,
         )
         from cos_service.services.schematics_service import run_workspace
-        from cos_service.services.immutability_service import without_backup
 
         cos_instance = validated["cos_instance"]
         backup_vault = validated["backup_vault"]
-        description = state_manager.get_subscription().description
 
-        def workspace_details(immutability_pass: dict, backup_vault_crn: str | None) -> dict:
-            return build_bucket_workspace_details(
-                workspace_id=workspace_id,
-                realm=payload.realm,
-                app_code=payload.apcode,
-                region=payload.region,
-                storage_class=payload.storage_class,
-                cos_instance_crn=cos_instance["crn"],
-                cos_instance_name=cos_instance["name"],
-                activity_tracker_crn=account_instances_crn.get("cloudlogs", None),
-                kms_crn=account_instances_crn.get("encryption_key", None),
-                monitoring_crn=account_instances_crn.get("cloudlogs", None),
-                management_endpoint_type="direct",
-                immutability=immutability_pass,
-                enable_custom_permissions=payload.enable_custom_permissions,
-                description=description,
-                backup_vault_crn=backup_vault_crn,
-            )
-
-        def apply(immutability_pass: dict, backup_vault_crn: str | None) -> dict:
-            update_bucket_workspace(
-                payload=payload, workspace_details=workspace_details(immutability_pass, backup_vault_crn), vault=vault, tf=tf
-            )
-            return run_workspace(tf, workspace_id)
+        workspace_details = build_bucket_workspace_details(
+            workspace_id=workspace_id,
+            realm=payload.realm,
+            app_code=payload.apcode,
+            region=payload.region,
+            storage_class=payload.storage_class,
+            cos_instance_crn=cos_instance["crn"],
+            cos_instance_name=cos_instance["name"],
+            activity_tracker_crn=account_instances_crn.get("cloudlogs", None),
+            kms_crn=account_instances_crn.get("encryption_key", None),
+            monitoring_crn=account_instances_crn.get("cloudlogs", None),
+            management_endpoint_type="direct",
+            immutability=immutability,
+            enable_custom_permissions=payload.enable_custom_permissions,
+            description=state_manager.get_subscription().description,
+            backup_vault_crn=backup_vault["crn"] if backup_vault is not None else None
+        )
 
         try:
             update_bucket_status(payload.subscription_id, SubscriptionStatus.CREATING, session)
             update_bucket_workspace_status(payload.subscription_id, Status.INPROGRESS, session)
 
-            # 1er apply sans backup : la policy de backup Terraform est indexée
-            # sur le nom du bucket, inconnu tant qu'il n'existe pas.
-            outputs = apply(without_backup(immutability), None)
+            update_bucket_workspace(payload=payload, workspace_details=workspace_details, vault=vault, tf=tf)
 
-            if immutability["backup"]["backup_enabled"]:
-                # 2e apply : le bucket est dans le state, son nom est connu, la
-                # policy peut être posée. Même clé que sur un update.
-                logger.info("bucket created, enabling its backup with a second apply")
-                outputs = apply(immutability, backup_vault["crn"] if backup_vault is not None else None)
-
-            return outputs
+            return run_workspace(tf, workspace_id)
         except Exception:
             update_bucket_status(payload.subscription_id, SubscriptionStatus.LOCKED, session)
             update_bucket_workspace_status(payload.subscription_id, Status.FAILED, session)
