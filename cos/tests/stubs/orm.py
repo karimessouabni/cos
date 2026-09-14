@@ -58,9 +58,10 @@ def _model(name: str, *columns: str) -> type:
 
 
 Bucket = _model(
-    "Bucket", "subscription_id", "name", "has_expiration_rule", "expiration_rule_created_at", "cos"
+    "Bucket", "subscription_id", "name", "has_expiration_rule", "expiration_rule_created_at",
+    "cos", "workspace", "backup_vault",
 )
-Cos = _model("Cos", "subscription_id", "context")
+Cos = _model("Cos", "subscription_id", "context", "workspace")
 Workspace = _model("Workspace", "bucket_subscription_id", "workspace_id")
 
 

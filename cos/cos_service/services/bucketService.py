@@ -64,14 +64,31 @@ CLEAN_BUCKET_LIFECYCLE_CONFIGURATION = """
 
 # --- lecture ------------------------------------------------------------------
 
+def _bucket_relations():
+    """Relations que ``to_dict()`` doit trouver chargées.
+
+    Les DAGs lisent ``bucket["workspace"]["workspace_id"]``, ``bucket["cos"]["crn"]``
+    et ``bucket["backup_vault"]`` sur le dict renvoyé : les relations doivent être
+    chargées AVANT ``to_dict()``. L'original le faisait par effet de bord avec
+    cinq ``logger.info(bucket.workspace)`` ; ici c'est explicite.
+    """
+    return (
+        joinedload(Bucket.workspace),
+        joinedload(Bucket.cos).joinedload(Cos.workspace),
+        joinedload(Bucket.cos).joinedload(Cos.context),
+        joinedload(Bucket.backup_vault),
+    )
+
+
 def get_bucket_by_sub_id(session: SASession, subscription_id: str) -> Optional[dict]:
-    """Bucket par subscription_id, en correspondance exacte.
+    """Bucket par subscription_id, en correspondance exacte, relations chargées.
 
     L'original faisait ``contains(subscription_id)`` + ``first()`` : un id qui
     est une sous-chaîne d'un autre pouvait renvoyer le mauvais bucket.
     """
     bucket = (
         session.query(Bucket)
+        .options(*_bucket_relations())
         .filter(Bucket.subscription_id == subscription_id)
         .one_or_none()
     )
@@ -79,7 +96,12 @@ def get_bucket_by_sub_id(session: SASession, subscription_id: str) -> Optional[d
 
 
 def get_bucket_by_name(session: SASession, name: str) -> Optional[dict]:
-    bucket = session.query(Bucket).filter(Bucket.name == name).one_or_none()
+    bucket = (
+        session.query(Bucket)
+        .options(*_bucket_relations())
+        .filter(Bucket.name == name)
+        .one_or_none()
+    )
     return bucket.to_dict() if bucket else None
 
 

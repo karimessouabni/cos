@@ -41,16 +41,31 @@ def executed(session) -> list:
 # --- lecture ------------------------------------------------------------------
 
 class TestGetBucketBySubId:
+    def query(self, session):
+        return session.query.return_value.options.return_value
+
     def test_exact_match_returns_a_dict(self, session):
         row = Bucket(subscription_id="sub-1", name="bucket-a")
-        session.query.return_value.filter.return_value.one_or_none.return_value = row
+        self.query(session).filter.return_value.one_or_none.return_value = row
 
         assert svc.get_bucket_by_sub_id(session, "sub-1") == {"subscription_id": "sub-1", "name": "bucket-a"}
-        condition = session.query.return_value.filter.call_args.args[0]
+        condition = self.query(session).filter.call_args.args[0]
         assert condition == ("==", "subscription_id", "sub-1")
 
+    def test_relations_read_by_the_dags_are_eager_loaded(self, session):
+        self.query(session).filter.return_value.one_or_none.return_value = None
+
+        svc.get_bucket_by_sub_id(session, "sub-1")
+
+        loads = session.query.return_value.options.call_args.args
+        chains = [[column.name for column in load.chain] for load in loads]
+        assert ["workspace"] in chains
+        assert ["cos", "workspace"] in chains
+        assert ["cos", "context"] in chains
+        assert ["backup_vault"] in chains
+
     def test_missing_bucket_is_none(self, session):
-        session.query.return_value.filter.return_value.one_or_none.return_value = None
+        self.query(session).filter.return_value.one_or_none.return_value = None
 
         assert svc.get_bucket_by_sub_id(session, "sub-1") is None
 
