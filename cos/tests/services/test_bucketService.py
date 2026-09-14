@@ -70,6 +70,22 @@ class TestGetBucketBySubId:
         assert svc.get_bucket_by_sub_id(session, "sub-1") is None
 
 
+class TestGetBucketWorkspace:
+    def test_reads_the_workspace_table_by_bucket_subscription_id(self, session):
+        row = Workspace(workspace_id="ws-1", bucket_subscription_id="sub-1")
+        session.query.return_value.filter.return_value.one_or_none.return_value = row
+
+        assert svc.get_bucket_workspace(session, "sub-1") == {"workspace_id": "ws-1", "bucket_subscription_id": "sub-1"}
+        session.query.assert_called_once_with(Workspace)
+        condition = session.query.return_value.filter.call_args.args[0]
+        assert condition == ("==", "bucket_subscription_id", "sub-1")
+
+    def test_missing_workspace_is_none(self, session):
+        session.query.return_value.filter.return_value.one_or_none.return_value = None
+
+        assert svc.get_bucket_workspace(session, "sub-1") is None
+
+
 # --- appels S3 ---------------------------------------------------------------------
 
 class TestCheckBucketHasContents:

@@ -79,6 +79,7 @@ def bucket_delete():
         from cos_service.services.bucketService import (
             check_bucket_has_contents,
             get_bucket_by_sub_id,
+            get_bucket_workspace,
             update_bucket_status,
         )
         from cos_service.services.ibm_iam_service import get_iam_access_token
@@ -106,9 +107,15 @@ def bucket_delete():
             errors.append(f"the bucket is not fully created for the sub id {payload.subscription_id} (no name)")
         if not bucket["virtual_server_endpoint"]:
             errors.append("the bucket has no endpoint, its contents cannot be checked")
+        # Le workspace est relu dans sa table quand to_dict() ne l'a pas fourni,
+        # pour ne pas dépendre de la sérialisation des relations du modèle.
         workspace = bucket.get("workspace")
         if workspace is None:
-            errors.append("the bucket row carries no workspace (relation not loaded or never created)")
+            workspace = get_bucket_workspace(session, payload.subscription_id)
+            logger.info("workspace read from its table for %s: %r", payload.subscription_id, workspace)
+            bucket["workspace"] = workspace
+        if workspace is None:
+            errors.append("no workspace row is attached to this bucket, its resources cannot be destroyed")
         elif workspace.get("workspace_id") is None:
             errors.append("the bucket workspace has no Schematics id, its resources cannot be destroyed")
         if not bucket.get("cos"):

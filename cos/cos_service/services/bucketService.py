@@ -105,6 +105,20 @@ def get_bucket_by_name(session: SASession, name: str) -> Optional[dict]:
     return bucket.to_dict() if bucket else None
 
 
+def get_bucket_workspace(session: SASession, subscription_id: str) -> Optional[dict]:
+    """Workspace d'un bucket, lu directement dans sa table.
+
+    Indépendant de la façon dont ``Bucket.to_dict()`` sérialise la relation :
+    None signifie qu'aucune ligne workspace n'est rattachée à ce bucket.
+    """
+    workspace = (
+        session.query(Workspace)
+        .filter(Workspace.bucket_subscription_id == subscription_id)
+        .one_or_none()
+    )
+    return workspace.to_dict() if workspace else None
+
+
 def get_buckets_with_expired_clean_policy(session: SASession) -> list:
     now = datetime.now()
     bucket_list = (
