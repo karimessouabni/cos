@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tests.stubs import bp2i, schemas as schema_stubs  # noqa: E402
+from tests.stubs import bp2i, orm as orm_stubs, schemas as schema_stubs  # noqa: E402
 
 DAG_PATH = ROOT / "cos_service" / "dags" / "bucket" / "v1" / "cos.bucket.v1.create.py"
 
@@ -65,6 +65,25 @@ _utils = _schema_module("cos_service.utils", constants=_constants)
 _utils.__path__ = []  # package, so that "from cos_service.utils import constants" resolves
 _install_if_missing("cos_service.utils", _utils)
 _install_if_missing("cos_service.utils.constants", _constants)
+_sqlalchemy = _schema_module("sqlalchemy", update=orm_stubs.update)
+_sqlalchemy.__path__ = []
+_sqlalchemy_orm = _schema_module("sqlalchemy.orm", joinedload=orm_stubs.joinedload)
+_sqlalchemy.orm = _sqlalchemy_orm
+_install_if_missing("sqlalchemy", _sqlalchemy)
+_install_if_missing("sqlalchemy.orm", _sqlalchemy_orm)
+
+_models = _schema_module("cos_service.models")
+_models.__path__ = []
+_install_if_missing("cos_service.models", _models)
+for _model_name, _model_cls in (("Bucket", orm_stubs.Bucket), ("Cos", orm_stubs.Cos), ("Workspace", orm_stubs.Workspace)):
+    _install_if_missing(
+        f"cos_service.models.{_model_name}",
+        _schema_module(f"cos_service.models.{_model_name}", **{_model_name: _model_cls}),
+    )
+_install_if_missing(
+    "cos_service.schemas.action",
+    _schema_module("cos_service.schemas.action", Action=orm_stubs.Action),
+)
 _install_if_missing(
     "cos_service.schemas.bucket_backup",
     _schema_module("cos_service.schemas.bucket_backup", BucketBackup=schema_stubs.BucketBackup),

@@ -199,6 +199,7 @@ def bucket_create():
         )
         from cos_service.services.cosService import get_cos_instance_by_name
         from cos_service.services.vault_service import get_vault_secrets
+        from cos_service.services.backup_vault_service import get_backup_vault_by_sub_id
 
         realm = validated["realm"]
         cos_instance = validated["cos_instance"]
@@ -241,13 +242,19 @@ def bucket_create():
         try:
             bucket = get_bucket_by_sub_id(session, payload.subscription_id)
             if bucket is None:
-                # process_bucket_creation was always given the ORM row, not the
-                # dict carried in `validated`; this is the one remaining
-                # re-fetch, to drop once bucketService is confirmed to read the
-                # instance by key.
+                # process_bucket_creation assigns `bucket.cos` and
+                # `bucket.backup_vault` (SQLAlchemy relationships): it needs the
+                # ORM rows, not the serialised dicts carried in `validated`.
                 cos_instance_row = get_cos_instance_by_name(payload.cos_instance, session)
+                backup_vault_sub_id = immutability["backup"]["backup_vault_sub_id"]
+                backup_vault_row = (
+                    get_backup_vault_by_sub_id(backup_vault_sub_id, session)
+                    if backup_vault_sub_id is not None
+                    else None
+                )
                 bucket = process_bucket_creation(
-                    payload, realm, immutability, account_instances_crn, description, cos_instance_row, backup_vault, session
+                    payload, realm, immutability, account_instances_crn, description,
+                    cos_instance_row, backup_vault_row, session,
                 )
 
             if bucket["workspace"]["workspace_id"] is None:

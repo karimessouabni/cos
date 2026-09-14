@@ -39,7 +39,7 @@ cos/
 │   │   └── subscription_status.py    (déduit)  SubscriptionStatus
 │   ├── services/
 │   │   ├── backup_vault_service.py   (déduit)  get_backup_vault_by_name, get_backup_vault_by_sub_id
-│   │   ├── bucketService.py          (déduit)  get_bucket_by_sub_id, process_bucket_creation, update_bucket_*, complete_bucket_create
+│   │   ├── bucketService.py                     ← reconstitué + corrigé (lecture, appels S3, process_bucket_creation, update_bucket_*, complete_bucket_create)
 │   │   ├── contextService.py         (déduit)  get_realm, get_apcodes, get_account_instances_crn
 │   │   ├── cosService.py             (déduit)  get_cos_instance_by_name, get_cos_instance_status
 │   │   ├── immutability_service.py              ← reconstitué

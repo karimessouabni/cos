@@ -1,5 +1,6 @@
 """Tests du service d'immutabilité : logique pure, sans Airflow ni base."""
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -334,7 +335,7 @@ class TestComputeBucketImmutabilityForUpdate:
 
     def test_backup_resolves_the_vault_by_sub_id(self, monkeypatch):
         vault_service = MagicMock()
-        vault_service.get_backup_vault_by_sub_id.return_value = {"subscription_id": "bv-sub", "crn": "crn:bv"}
+        vault_service.get_backup_vault_by_sub_id.return_value = SimpleNamespace(subscription_id="bv-sub", crn="crn:bv")
         monkeypatch.setitem(sys.modules, "cos_service.services.backup_vault_service", vault_service)
         row = bucket_row(backup_enabled=True, backup_vault_subscription_id="bv-sub", backup_retention_days=7)
 

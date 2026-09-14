@@ -552,10 +552,13 @@ def _backup_from_bucket(bucket: dict, session) -> dict:
 
     from cos_service.services.backup_vault_service import get_backup_vault_by_sub_id
 
+    # get_backup_vault_by_sub_id renvoie la ligne ORM (accès par attribut,
+    # comme dans bucketService.process_bucket_update) ; seule
+    # get_backup_vault_by_name renvoie un dict.
     backup_vault = get_backup_vault_by_sub_id(bucket["backup_vault_subscription_id"], session)
     return {
         "backup_enabled": True,
-        "backup_vault_sub_id": backup_vault["subscription_id"],
+        "backup_vault_sub_id": backup_vault.subscription_id,
         "backup_retention_days": bucket["backup_retention_days"],
     }
 

@@ -343,6 +343,21 @@ class TestCreateTfWorkspace:
         )
         state_manager.push_state.assert_called_once_with({"workspace_name": "ws_bucket_sub-1"})
 
+    def test_bucket_row_gets_the_orm_cos_and_vault_rows(self, dag, happy_services, make_payload, state_manager):
+        happy_services.bucketService.get_bucket_by_sub_id.return_value = None
+        happy_services.bucketService.process_bucket_creation.return_value = {"workspace": {"workspace_id": "ws-1"}}
+        vault_row = object()
+        happy_services.backup_vault_service.get_backup_vault_by_sub_id.return_value = vault_row
+        immutability = fresh_immutability(versioning=True)
+        immutability["backup"] = {"backup_enabled": True, "backup_vault_sub_id": "bv-sub", "backup_retention_days": 7}
+
+        self.run(dag, make_payload(), state_manager, immutability=immutability, backup_vault=BACKUP_VAULT)
+
+        happy_services.backup_vault_service.get_backup_vault_by_sub_id.assert_called_once_with("bv-sub", "session")
+        args = happy_services.bucketService.process_bucket_creation.call_args.args
+        assert args[5] is COS_INSTANCE  # ligne ORM, pas le dict de `validated`
+        assert args[6] is vault_row
+
     def test_terraform_variables_come_from_validated_data(self, dag, happy_services, make_payload, state_manager):
         happy_services.bucketService.get_bucket_by_sub_id.return_value = {"workspace": {"workspace_id": None}}
         happy_services.schematics_service.create_or_update_ws.return_value = {"id": "ws-1"}
