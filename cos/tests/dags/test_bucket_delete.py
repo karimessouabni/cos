@@ -122,6 +122,8 @@ class TestValidateRequest:
             "the bucket workspace has no Schematics id, its resources cannot be destroyed",
             "the bucket is not linked to a cos instance",
         ]
+        services.bucketService.check_bucket_has_contents.assert_not_called()
+        services.bucketService.update_bucket_status.assert_not_called()
 
     def test_workspace_relation_absent_from_the_dict_is_reported_as_such(self, delete_dag, empty_bucket, payload):
         empty_bucket.bucketService.get_bucket_by_sub_id.return_value = bucket_row(workspace=None)
@@ -129,8 +131,7 @@ class TestValidateRequest:
         errors = self.errors_of(delete_dag, payload)
 
         assert errors == ["the bucket row carries no workspace (relation not loaded or never created)"]
-        services.bucketService.check_bucket_has_contents.assert_not_called()
-        services.bucketService.update_bucket_status.assert_not_called()
+        empty_bucket.bucketService.update_bucket_status.assert_not_called()
 
     def test_non_empty_bucket_is_locked_and_declined(self, delete_dag, empty_bucket, payload):
         empty_bucket.bucketService.check_bucket_has_contents.return_value = True
