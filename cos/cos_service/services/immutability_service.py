@@ -332,6 +332,19 @@ def validate_immutability_for_update_bucket(
 
 
 
+def without_backup(immutability: dict) -> dict:
+    """Copie du bloc avec le backup désactivé, le reste inchangé.
+
+    Sert au premier apply d'un create : la policy de backup Terraform est
+    indexée sur le nom du bucket, inconnu tant que le bucket n'existe pas
+    (``for_each`` refusé au plan). Le backup est posé par un second apply.
+    """
+    return {
+        **immutability,
+        "backup": {"backup_enabled": False, "backup_vault_sub_id": None, "backup_retention_days": None},
+    }
+
+
 def raise_on_errors(errors) -> None:
     if errors:
         global_message = " | ".join(errors)

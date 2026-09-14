@@ -239,6 +239,25 @@ class TestNewImmutabilityBackup:
             compute(versioning=False, backup=disabled)
 
 
+class TestWithoutBackup:
+    def test_disables_the_backup_and_keeps_the_rest(self):
+        immutability = compute(days=30, versioning=True, backup=backup_enabled(sub_id="bv-sub", retention_days=7))
+
+        first_pass = svc.without_backup(immutability)
+
+        assert first_pass["backup"] == {"backup_enabled": False, "backup_vault_sub_id": None, "backup_retention_days": None}
+        assert first_pass["object_locking_enabled"] is True
+        assert first_pass["object_versioning_enabled"] is True
+        assert first_pass["immutability_choice"] == Immutability.OBJECT_LOCK.value
+
+    def test_does_not_mutate_the_original(self):
+        immutability = compute(versioning=True, backup=backup_enabled())
+
+        svc.without_backup(immutability)
+
+        assert immutability["backup"]["backup_enabled"] is True
+
+
 # --- validations unitaires -----------------------------------------------------------
 
 class TestCheckRetentionBounds:
