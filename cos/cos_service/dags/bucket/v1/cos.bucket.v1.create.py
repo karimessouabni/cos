@@ -61,13 +61,18 @@ class BucketCreatePayload(ProductCreatePayload):
 @product_action(Path(__file__).stem, tags=["cos"], payload=BucketCreatePayload)
 def bucket_create():
     @step
-    def validate_realm_apcode_and_cos_instance(
+    def validate_request(
         payload: BucketCreatePayload = depends(payload_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
         state_manager: StateManager = depends(state_manager_dependency),
     ) -> dict:
+        """Checks everything the demand refers to and declines with all the errors at once.
+
+        Returns {"cos_instance": <dict>, "backup_vault": <dict | None>}.
+        """
         from cos_service.services.contextService import get_realm, get_apcodes
         from cos_service.services.cosService import get_cos_instance_by_name, get_cos_instance_status
+        from cos_service.services.backup_vault_service import get_backup_vault_by_name
 
         errors = []
 
@@ -87,41 +92,49 @@ def bucket_create():
         state_manager.push_state({"cos_instance": payload.cos_instance})
         cos_instance = get_cos_instance_by_name(payload.cos_instance, session)
         if cos_instance is None:
-            # Nothing else can be checked without the instance: decline now.
             errors.append(f"the cos instance {payload.cos_instance} doesn't exist")
-            raise DeclineDemandException(" | ".join(errors))
+        else:
+            cos_instance_status = get_cos_instance_status(cos_instance.subscription_id)
+            if cos_instance_status != SubscriptionStatus.ACTIVE.value:
+                errors.append(f"Bad cos instance status : {cos_instance_status}")
 
-        cos_instance_status = get_cos_instance_status(cos_instance.subscription_id)
-        if cos_instance_status != SubscriptionStatus.ACTIVE.value:
-            errors.append(f"Bad cos instance status : {cos_instance_status}")
+            # --- bucket context must match cos instance context ---------------
+            cos_instance = dict(cos_instance)
+            context = cos_instance["context"]
+            if context["realm"] != payload.realm or context["app_code"] != payload.apcode:
+                errors.append(
+                    f"The context of bucket is different from context of cos, "
+                    f"realm cos {context['realm']} , apcode cos {context['app_code']}"
+                )
+            if cos_instance["environment"] != payload.environment:
+                errors.append(
+                    f"Bucket environment : {payload.environment} is different from "
+                    f"cos environment : {cos_instance['environment']}"
+                )
 
-        # --- bucket context must match cos instance context -------------------
-        cos_instance = dict(cos_instance)
-        context = cos_instance["context"]
-        if context["realm"] != payload.realm or context["app_code"] != payload.apcode:
-            errors.append(
-                f"The context of bucket is different from context of cos, "
-                f"realm cos {context['realm']} , apcode cos {context['app_code']}"
-            )
-        if cos_instance["environment"] != payload.environment:
-            errors.append(
-                f"Bucket environment : {payload.environment} is different from "
-                f"cos environment : {cos_instance['environment']}"
-            )
+        # --- backup vault (only when a backup is requested) -------------------
+        backup_vault = None
+        if payload.backup is not None and payload.backup.backup_enabled is True:
+            if not payload.backup.backup_vault_name:
+                errors.append("The Backup Vault name is required to enable bucket backup")
+            else:
+                backup_vault = get_backup_vault_by_name(payload.backup.backup_vault_name, session)
+                if backup_vault is None:
+                    errors.append(
+                        f"The Backup Vault doesn't exist for the name : {payload.backup.backup_vault_name}"
+                    )
 
         if errors:
             raise DeclineDemandException(" | ".join(errors))
 
-        return cos_instance
+        return {"cos_instance": cos_instance, "backup_vault": backup_vault}
 
     @step
     def process_protection_configuration(
-        cos_instance: dict,  # unused, keeps this step ordered after the validation
+        validated: dict,
         payload: BucketCreatePayload = depends(payload_dependency),
-        session: SASession = depends(sqlalchemy_session_dependency),
     ) -> dict:
         from cos_service.services.immutability_service import compute_bucket_new_immutability
-        from cos_service.services.backup_vault_service import get_backup_vault_by_name
 
         enable_versioning = payload.enable_versioning if payload.enable_versioning is not None else False
 
@@ -129,17 +142,10 @@ def bucket_create():
         # thing: no backup. Only an enabled backup is handed to the service,
         # otherwise compute_bucket_backup would decline the demand on its
         # "disable backup" branch (which requires versioning) for a bucket that
-        # never had a backup.
+        # never had a backup. The vault itself was resolved by validate_request.
         backup = payload.backup if payload.backup is not None and payload.backup.backup_enabled is True else None
         if backup is not None:
-            if backup.backup_vault_name is None:
-                raise DeclineDemandException("The Backup Vault name is required to enable bucket backup")
-            backup_vault = get_backup_vault_by_name(backup.backup_vault_name, session)
-            if backup_vault is None:
-                raise DeclineDemandException(
-                    f"The Backup Vault doesn't exist for the name : {backup.backup_vault_name}"
-                )
-            backup.backup_vault_sub_id = backup_vault["subscription_id"]
+            backup.backup_vault_sub_id = validated["backup_vault"]["subscription_id"]
         logger.info("backup requested : %s", backup)
 
         immutability = {
@@ -165,10 +171,10 @@ def bucket_create():
         )
 
     @step
-    def get_account_instances_crn(cos_instance: dict) -> dict:
+    def get_account_instances_crn(validated: dict) -> dict:
         from cos_service.services.contextService import get_account_instances_crn
 
-        context = cos_instance["context"]
+        context = validated["cos_instance"]["context"]
         wklapp_account_name = context["wklapp_account_name"]
         account_instances_crn = get_account_instances_crn(wklapp_account_name)
         return account_instances_crn
@@ -420,9 +426,9 @@ def bucket_create():
         complete_bucket_create(payload.subscription_id, vip, apply_tf_result, session)
         return {"subscription_id": payload.subscription_id}
 
-    cos_instance = validate_realm_apcode_and_cos_instance()
-    immutability = process_protection_configuration(cos_instance=cos_instance)
-    account_instances_crn = get_account_instances_crn(cos_instance=cos_instance)
+    validated = validate_request()
+    immutability = process_protection_configuration(validated=validated)
+    account_instances_crn = get_account_instances_crn(validated=validated)
     workspace_id = create_tf_workspace(account_instances_crn=account_instances_crn, immutability=immutability)
     apply_tf_result = apply_tf_workspace(workspace_id=workspace_id, account_instances_crn=account_instances_crn, immutability=immutability)
     save_bucket_in_db(apply_tf_result=apply_tf_result, immutability=immutability)
