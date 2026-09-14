@@ -106,7 +106,7 @@ def apply_choice_unit(
 
 
 def compute_bucket_new_immutability(
-        immutability_choice: Immutability,
+        immutability_choice: Immutability | None,
         payload_retention: BucketRetention,
         object_lock_duration_days: int,
         object_lock_duration_years: int,
@@ -119,8 +119,11 @@ def compute_bucket_new_immutability(
     Sans choix explicite dans le payload, le choix est déduit de ce qui est
     saisi : rétention -> RETENTION, durée d'object-lock -> OBJECT_LOCK, sinon
     NONE (seule la bascule de versioning est appliquée).
+
+    Un choix absent (None) est traité comme NONE : c'est le seul endroit où
+    la valeur est normalisée, tout ce qui est appelé en dessous reçoit un enum.
     """
-    if immutability_choice is Immutability.NONE:
+    if immutability_choice is None or immutability_choice is Immutability.NONE:
         immutability_choice = _infer_immutability_choice(
             payload_retention, object_lock_duration_days, object_lock_duration_years
         )
