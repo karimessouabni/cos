@@ -547,7 +547,7 @@ def _backup_from_bucket(bucket: dict, session) -> dict:
     backup_vault = get_backup_vault_by_sub_id(bucket["backup_vault_subscription_id"], session)
     return {
         "backup_enabled": True,
-        "backup_vault_sub_id": backup_vault.subscription_id,
+        "backup_vault_sub_id": backup_vault["subscription_id"],
         "backup_retention_days": bucket["backup_retention_days"],
     }
 

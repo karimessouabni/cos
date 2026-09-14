@@ -53,7 +53,7 @@ class BucketCreatePayload(ProductCreatePayload):
     object_lock_duration_days: Optional[int] | None = Field(updatable=True)
     object_lock_duration_years: Optional[int] | None = Field(updatable=True)
     enable_custom_permissions: Optional[bool] = Field(default=False, updatable=True)
-    immutability_choice: Immutability | None = Field(updatable=True)
+    immutability_choice: Immutability = Field(default=Immutability.NONE, updatable=True)
     enable_versioning: Optional[bool] | None = Field(default=None, updatable=True)
     backup: BucketBackup | None = Field(updatable=True)
 
@@ -70,118 +70,77 @@ def bucket_create():
         from cos_service.services.cosService import get_cos_instance_by_name, get_cos_instance_status
 
         errors = []
-        cos_instance = {}
 
-        realm = get_realm(payload.realm)
-        if realm is None or not payload.realm:
-            errors.append(f"the realm {payload.realm} doesn't exist or is empty")
+        # --- realm / apcode ---------------------------------------------------
+        if not payload.realm:
+            errors.append("the realm is empty")
         else:
-            raw_status = realm.get("status", 0)
-            logger.info(" raw_status " + str(raw_status))
-
-            if str(raw_status) == "404":
-                errors.append(f"the realm {payload.realm} is not found")
-
-            if realm["realm_apcode_details"] is None:
+            realm = get_realm(payload.realm)
+            if realm is None or str(realm.get("status", "")) == "404":
+                errors.append(f"the realm {payload.realm} doesn't exist")
+            elif not realm.get("realm_apcode_details"):
                 errors.append(f"there is no apcodes on this realm {payload.realm}")
-            else:
-                apcodes = get_apcodes(realm)
-                if payload.apcode not in apcodes:
-                    errors.append(f"appCode doesn't belong to this realm {payload.realm}")
+            elif payload.apcode not in get_apcodes(realm):
+                errors.append(f"appCode {payload.apcode} doesn't belong to this realm {payload.realm}")
 
+        # --- cos instance -----------------------------------------------------
         state_manager.push_state({"cos_instance": payload.cos_instance})
         cos_instance = get_cos_instance_by_name(payload.cos_instance, session)
         if cos_instance is None:
+            # Nothing else can be checked without the instance: decline now.
             errors.append(f"the cos instance {payload.cos_instance} doesn't exist")
+            raise DeclineDemandException(" | ".join(errors))
 
         cos_instance_status = get_cos_instance_status(cos_instance.subscription_id)
-
         if cos_instance_status != SubscriptionStatus.ACTIVE.value:
             errors.append(f"Bad cos instance status : {cos_instance_status}")
 
-        if errors:
-            global_message = " | ".join(errors)
-            raise DeclineDemandException(global_message)
-
-        return dict(cos_instance)
-
-    """@step
-    def validate_cos_instance(
-            payload: BucketCreatePayload = depends(payload_dependency),
-            session: SASession = depends(sqlalchemy_session_dependency),
-            state_manager: StateManager = depends(state_manager_dependency),
-    ) -> dict:
-        from cos_service.services.cosService import (
-            get_cos_instance_by_name,
-            get_cos_instance_status,
-        )
-
-        state_manager.push_state({"cos_instance": payload.cos_instance})
-
-        cos_instance = get_cos_instance_by_name(payload.cos_instance, session)
-        if cos_instance is None:
-            raise DeclineDemandException(f"the cos instance {payload.cos_instance} doesn't exist")
-
-        cos_instance_status = get_cos_instance_status(cos_instance.subscription_id)
-
-        if cos_instance_status != SubscriptionStatus.ACTIVE.value:
-            raise DeclineDemandException(f"Bad cos instance status : {cos_instance_status}")
-
-        return dict(cos_instance)"""
-
-    """@step
-    def validate_equals_context_cos_bucket(
-        cos_instance: dict,
-        payload: BucketCreatePayload = depends(payload_dependency)
-    ) -> bool:
+        # --- bucket context must match cos instance context -------------------
+        cos_instance = dict(cos_instance)
         context = cos_instance["context"]
         if context["realm"] != payload.realm or context["app_code"] != payload.apcode:
-            raise DeclineDemandException(
-                f"The context of bucket is different from context of cos, realm cos {context['realm']} , apcode cos {context['app_code']}"
+            errors.append(
+                f"The context of bucket is different from context of cos, "
+                f"realm cos {context['realm']} , apcode cos {context['app_code']}"
             )
-
         if cos_instance["environment"] != payload.environment:
-            raise DeclineDemandException(
-                f"bucket environment : {payload.environment} is different from cos environment : {cos_instance['environment']}"
+            errors.append(
+                f"Bucket environment : {payload.environment} is different from "
+                f"cos environment : {cos_instance['environment']}"
             )
 
-        return True"""
+        if errors:
+            raise DeclineDemandException(" | ".join(errors))
+
+        return cos_instance
 
     @step
-    def validate_context_and_process_protection_configuration(
-        cos_instance: dict,
+    def process_protection_configuration(
+        cos_instance: dict,  # unused, keeps this step ordered after the validation
         payload: BucketCreatePayload = depends(payload_dependency),
-        session: SASession = depends(sqlalchemy_session_dependency)
-
+        session: SASession = depends(sqlalchemy_session_dependency),
     ) -> dict:
         from cos_service.services.immutability_service import compute_bucket_new_immutability
         from cos_service.services.backup_vault_service import get_backup_vault_by_name
 
-        errors = []
-
-        context = cos_instance["context"]
-        if context["realm"] != payload.realm or context["app_code"] != payload.apcode:
-            errors.append(f"The context of bucket is different from context of cos, realm cos {context['realm']} , apcode cos {context['app_code']}")
-
-        if cos_instance["environment"] != payload.environment:
-            errors.append(f"Bucket environment : {payload.environment} is different from cos environment : {cos_instance['environment']}")
-
-        if errors:
-            global_message = " | ".join(errors)
-            raise DeclineDemandException(global_message)
-
         enable_versioning = payload.enable_versioning if payload.enable_versioning is not None else False
-        if payload.backup is not None and payload.backup.backup_enabled is True:
-            backup_vault = (
-                get_backup_vault_by_name(payload.backup.backup_vault_name,
-                                         session) if payload.backup.backup_vault_name is not None
-                else None
-            )
+
+        # On a create, a backup that is absent or explicitly disabled is the same
+        # thing: no backup. Only an enabled backup is handed to the service,
+        # otherwise compute_bucket_backup would decline the demand on its
+        # "disable backup" branch (which requires versioning) for a bucket that
+        # never had a backup.
+        backup = payload.backup if payload.backup is not None and payload.backup.backup_enabled is True else None
+        if backup is not None:
+            if backup.backup_vault_name is None:
+                raise DeclineDemandException("The Backup Vault name is required to enable bucket backup")
+            backup_vault = get_backup_vault_by_name(backup.backup_vault_name, session)
             if backup_vault is None:
                 raise DeclineDemandException(
-                    f"The Backup Vault doesn't exist for the name : {payload.backup.backup_vault_name}")
-            payload.backup.backup_vault_sub_id = backup_vault["subscription_id"]
-        logger.info("payload.backup : %s", payload.backup)
+                    f"The Backup Vault doesn't exist for the name : {backup.backup_vault_name}"
+                )
+            backup.backup_vault_sub_id = backup_vault["subscription_id"]
+        logger.info("backup requested : %s", backup)
 
         immutability = {
             "object_locking_enabled": False,
@@ -202,7 +161,7 @@ def bucket_create():
             payload.object_lock_duration_years,
             enable_versioning,
             immutability,
-            payload.backup,
+            backup,
         )
 
     @step
@@ -272,20 +231,20 @@ def bucket_create():
             "object_lock_duration_days": immutability["object_lock_duration_days"],
             "object_lock_duration_years": immutability["object_lock_duration_years"],
             "backup_enabled": immutability["backup"]["backup_enabled"],
-            "target_backup_vault_crn": backup_vault.crn if backup_vault is not None else None,
+            "target_backup_vault_crn": backup_vault["crn"] if backup_vault is not None else None,
             "initial_delete_after_days": immutability["backup"]["backup_retention_days"],
             "cloud_type": "3" if payload.region == "eu-de" else "2",
         }
 
-        bucket = get_bucket_by_sub_id(session, payload.subscription_id)
         description = state_manager.get_subscription().description
 
-        if bucket is None:
-            bucket = process_bucket_creation(
-                payload, realm, immutability, account_instances_crn, description, cos_instance, backup_vault, session
-            )
-
         try:
+            bucket = get_bucket_by_sub_id(session, payload.subscription_id)
+            if bucket is None:
+                bucket = process_bucket_creation(
+                    payload, realm, immutability, account_instances_crn, description, cos_instance, backup_vault, session
+                )
+
             if bucket["workspace"]["workspace_id"] is None:
                 logger.info("Terraform create workspace")
                 create_ws_result = create_or_update_ws(
@@ -308,10 +267,10 @@ def bucket_create():
                 workspace = bucket['workspace']
                 return workspace['workspace_id']
 
-        except Exception as e:
+        except Exception:
             update_bucket_status(payload.subscription_id, SubscriptionStatus.LOCKED, session)
             update_bucket_workspace_status(payload.subscription_id, Status.FAILED, session)
-            raise e
+            raise
 
     @step
     def apply_tf_workspace(
@@ -356,7 +315,7 @@ def bucket_create():
             immutability=immutability,
             enable_custom_permissions=payload.enable_custom_permissions,
             description=state_manager.get_subscription().description,
-            backup_vault_crn=backup_vault.crn if backup_vault is not None else None
+            backup_vault_crn=backup_vault["crn"] if backup_vault is not None else None
         )
 
         try:
@@ -373,10 +332,10 @@ def bucket_create():
                 print(template_id, template_activity_logs, sep="\n")
             outputs_tf = tf_workspace.get_outputs()[0]
             return dict(outputs_tf.output_values[0])
-        except Exception as e:
+        except Exception:
             update_bucket_status(payload.subscription_id, SubscriptionStatus.LOCKED, session)
             update_bucket_workspace_status(payload.subscription_id, Status.FAILED, session)
-            raise e
+            raise
 
     @step
     def save_bucket_in_db(
@@ -462,9 +421,7 @@ def bucket_create():
         return {"subscription_id": payload.subscription_id}
 
     cos_instance = validate_realm_apcode_and_cos_instance()
-    #cos_instance = validate_cos_instance()
-    #is_check_valid = validate_equals_context_cos_bucket(cos_instance=cos_instance)
-    immutability = validate_context_and_process_protection_configuration(cos_instance=cos_instance)
+    immutability = process_protection_configuration(cos_instance=cos_instance)
     account_instances_crn = get_account_instances_crn(cos_instance=cos_instance)
     workspace_id = create_tf_workspace(account_instances_crn=account_instances_crn, immutability=immutability)
     apply_tf_result = apply_tf_workspace(workspace_id=workspace_id, account_instances_crn=account_instances_crn, immutability=immutability)
