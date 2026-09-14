@@ -63,9 +63,7 @@ def tf():
 
 def test_dag_declares_the_expected_steps_in_order(delete_dag):
     assert list(delete_dag.steps) == [
-        "validate_bucket_and_workspace",
-        "get_cos_api_key",
-        "validate_bucket_is_empty",
+        "validate_request",
         "destroy_tf_resources",
         "update_db_for_resources",
         "destroy_tf_workspace",
@@ -73,60 +71,91 @@ def test_dag_declares_the_expected_steps_in_order(delete_dag):
     ]
 
 
-class TestValidateBucketAndWorkspace:
+class TestValidateRequest:
     def run(self, delete_dag, payload):
-        return delete_dag.steps["validate_bucket_and_workspace"](session="session", payload=payload)
+        return delete_dag.steps["validate_request"](session="session", payload=payload, vault="vault")
 
-    def test_returns_the_bucket(self, delete_dag, services, payload):
+    def errors_of(self, delete_dag, payload) -> list[str]:
+        with pytest.raises(DeclineDemandException) as excinfo:
+            self.run(delete_dag, payload)
+        return str(excinfo.value).split(" | ")
+
+    @pytest.fixture
+    def empty_bucket(self, services):
         services.bucketService.get_bucket_by_sub_id.return_value = bucket_row()
-
-        assert self.run(delete_dag, payload)["name"] == "bucket-a"
-        services.bucketService.get_bucket_by_sub_id.assert_called_once_with("session", "sub-1")
-
-    def test_missing_bucket_is_declined(self, delete_dag, services, payload):
-        services.bucketService.get_bucket_by_sub_id.return_value = None
-
-        with pytest.raises(DeclineDemandException, match="doesn't exist or not fully created"):
-            self.run(delete_dag, payload)
-
-    def test_bucket_without_name_is_declined(self, delete_dag, services, payload):
-        services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(name=None)
-
-        with pytest.raises(DeclineDemandException):
-            self.run(delete_dag, payload)
-
-
-class TestValidateBucketIsEmpty:
-    def run(self, delete_dag, bucket):
-        return delete_dag.steps["validate_bucket_is_empty"](bucket=bucket, api_key="key", session="session")
-
-    def test_bucket_without_endpoint_is_skipped(self, delete_dag, services):
-        assert self.run(delete_dag, bucket_row(virtual_server_endpoint=None)) is True
-        services.bucketService.check_bucket_has_contents.assert_not_called()
-
-    def test_empty_bucket_moves_to_terminating(self, delete_dag, services):
+        services.vault_service.get_cos_api_key.return_value = "api-key"
         services.ibm_iam_service.get_iam_access_token.return_value = "tok"
         services.bucketService.check_bucket_has_contents.return_value = False
+        return services
 
-        assert self.run(delete_dag, bucket_row()) is True
-        services.bucketService.update_bucket_status.assert_called_once_with(
+    def test_valid_request_returns_the_bucket_and_moves_it_to_terminating(self, delete_dag, empty_bucket, payload):
+        result = self.run(delete_dag, payload)
+
+        assert result == bucket_row()
+        empty_bucket.bucketService.get_bucket_by_sub_id.assert_called_once_with("session", "sub-1")
+        empty_bucket.vault_service.get_cos_api_key.assert_called_once_with(bucket_row(), "vault")
+        empty_bucket.ibm_iam_service.get_iam_access_token.assert_called_once_with("api-key")
+        empty_bucket.bucketService.check_bucket_has_contents.assert_called_once_with("tok", bucket_row())
+        empty_bucket.bucketService.update_bucket_status.assert_called_once_with(
             "sub-1", SubscriptionStatus.TERMINATING, "session"
         )
-        services.bucketService.check_bucket_has_contents.assert_called_once_with("tok", bucket_row())
 
-    def test_non_empty_bucket_is_locked_and_declined(self, delete_dag, services):
-        services.bucketService.check_bucket_has_contents.return_value = True
+    def test_missing_bucket_is_declined_immediately(self, delete_dag, services, payload):
+        services.bucketService.get_bucket_by_sub_id.return_value = None
 
-        with pytest.raises(DeclineDemandException, match="is not empty"):
-            self.run(delete_dag, bucket_row())
+        with pytest.raises(DeclineDemandException, match="doesn't exist for the sub id sub-1"):
+            self.run(delete_dag, payload)
 
-        services.bucketService.update_bucket_status.assert_called_with("sub-1", SubscriptionStatus.LOCKED, "session")
+        services.vault_service.get_cos_api_key.assert_not_called()
+        services.bucketService.update_bucket_status.assert_not_called()
+
+    def test_not_fully_created_bucket_reports_every_missing_piece(self, delete_dag, services, payload):
+        services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(
+            name=None, virtual_server_endpoint=None, workspace={"workspace_id": None}, cos=None
+        )
+
+        errors = self.errors_of(delete_dag, payload)
+
+        assert errors == [
+            "the bucket is not fully created for the sub id sub-1 (no name)",
+            "the bucket has no endpoint, its contents cannot be checked",
+            "the bucket has no Terraform workspace, its resources cannot be destroyed",
+            "the bucket is not linked to a cos instance",
+        ]
+        services.bucketService.check_bucket_has_contents.assert_not_called()
+        services.bucketService.update_bucket_status.assert_not_called()
+
+    def test_non_empty_bucket_is_locked_and_declined(self, delete_dag, empty_bucket, payload):
+        empty_bucket.bucketService.check_bucket_has_contents.return_value = True
+
+        assert self.errors_of(delete_dag, payload) == ["The bucket bucket-a is not empty"]
+        empty_bucket.bucketService.update_bucket_status.assert_called_once_with(
+            "sub-1", SubscriptionStatus.LOCKED, "session"
+        )
+
+    def test_non_empty_bucket_without_workspace_reports_both(self, delete_dag, empty_bucket, payload):
+        empty_bucket.bucketService.get_bucket_by_sub_id.return_value = bucket_row(workspace={"workspace_id": None})
+        empty_bucket.bucketService.check_bucket_has_contents.return_value = True
+
+        errors = self.errors_of(delete_dag, payload)
+
+        assert errors == [
+            "the bucket has no Terraform workspace, its resources cannot be destroyed",
+            "The bucket bucket-a is not empty",
+        ]
+
+    def test_missing_workspace_alone_does_not_lock_the_bucket(self, delete_dag, empty_bucket, payload):
+        empty_bucket.bucketService.get_bucket_by_sub_id.return_value = bucket_row(workspace={"workspace_id": None})
+
+        self.errors_of(delete_dag, payload)
+
+        empty_bucket.bucketService.update_bucket_status.assert_not_called()
 
 
 class TestDestroyTfResources:
     def run(self, delete_dag, payload, tf, bucket=None):
         return delete_dag.steps["destroy_tf_resources"](
-            bucket=bucket or bucket_row(), bucket_empty=True, tf=tf, payload=payload, session="session", vault="vault"
+            bucket=bucket or bucket_row(), tf=tf, payload=payload, session="session", vault="vault"
         )
 
     def test_updates_the_workspace_then_destroys_its_resources(self, delete_dag, services, payload, tf):
@@ -162,10 +191,6 @@ class TestDestroyTfResources:
         assert details["backup_vault_crn"] == "crn:bv"
         assert details["immutability"]["backup"]["backup_vault_sub_id"] == "bv-sub"
 
-    def test_bucket_without_endpoint_is_skipped(self, delete_dag, services, payload, tf):
-        assert self.run(delete_dag, payload, tf, bucket_row(virtual_server_endpoint=None)) is True
-        tf.workspaces.delete_workspace_resources.assert_not_called()
-
     def test_missing_workspace_counts_as_destroyed(self, delete_dag, services, payload, tf):
         tf.workspaces.get_by_id.side_effect = SchematicsError(404)
 
@@ -198,10 +223,6 @@ class TestDestroyTfWorkspace:
         tf.workspaces.get_by_id.assert_called_once_with(workspace_id="ws-1")
         tf.workspaces.get_by_id.return_value.delete.assert_called_once()
         services.bucketService.update_bucket_workspace_status.assert_called_once_with("sub-1", Status.INPROGRESS, "session")
-
-    def test_no_workspace_id_is_skipped(self, delete_dag, services, tf):
-        assert self.run(delete_dag, tf, bucket_row(workspace={"workspace_id": None})) is True
-        tf.workspaces.get_by_id.assert_not_called()
 
     def test_already_deleted_workspace_is_fine(self, delete_dag, services, tf):
         tf.workspaces.get_by_id.side_effect = SchematicsError(404)

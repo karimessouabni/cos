@@ -1,10 +1,11 @@
 """DAG cos.bucket.v1.delete : détruit les ressources Terraform, puis le workspace.
 
 [RECONSTITUTION] Reconstitué depuis les captures PyCharm (273 lignes, toutes
-visibles). Corrections par rapport à l'original, voir le commit : l'immutabilité
-est relue par le service au lieu d'être recomposée à la main, la tolérance au
-404 Schematics est factorisée, plus de SQL brut dans le DAG, statuts posés une
-fois, ``raise`` nu.
+visibles). Corrections par rapport à l'original, voir les commits : une seule
+étape de validation en tête (bucket, workspace, instance, contenu) qui décline
+avec toutes les erreurs à la fois, l'immutabilité relue par le service au lieu
+d'être recomposée à la main, la tolérance au 404 Schematics factorisée, plus de
+SQL brut dans le DAG, statuts posés une fois, ``raise`` nu.
 """
 from bp2i_airflow_library import add_project_to_path
 
@@ -65,50 +66,60 @@ def _mark_failed(subscription_id: str, session: SASession) -> None:
 )
 def bucket_delete():
     @step
-    def validate_bucket_and_workspace(
+    def validate_request(
         session: SASession = depends(sqlalchemy_session_dependency),
         payload: BucketDeletePayload = depends(payload_dependency),
+        vault: Vault = depends(vault_dependency),
     ) -> dict:
-        from cos_service.services.bucketService import get_bucket_by_sub_id
+        """Checks everything the deletion needs and declines with all the errors at once.
+
+        Returns the bucket row (relations included) the next steps work on.
+        The bucket moves to TERMINATING only once every check has passed.
+        """
+        from cos_service.services.bucketService import (
+            check_bucket_has_contents,
+            get_bucket_by_sub_id,
+            update_bucket_status,
+        )
+        from cos_service.services.ibm_iam_service import get_iam_access_token
+        from cos_service.services.vault_service import get_cos_api_key
 
         bucket = get_bucket_by_sub_id(session, payload.subscription_id)
-        if bucket is None or not bucket["name"]:
-            raise DeclineDemandException(
-                f"the bucket doesn't exist or not fully created for the sub id ,{payload.subscription_id}"
-            )
+        if bucket is None:
+            raise DeclineDemandException(f"the bucket doesn't exist for the sub id {payload.subscription_id}")
+
+        errors = []
+
+        # --- the bucket must have been fully created --------------------------
+        if not bucket["name"]:
+            errors.append(f"the bucket is not fully created for the sub id {payload.subscription_id} (no name)")
+        if not bucket["virtual_server_endpoint"]:
+            errors.append("the bucket has no endpoint, its contents cannot be checked")
+        if not bucket.get("workspace") or bucket["workspace"].get("workspace_id") is None:
+            errors.append("the bucket has no Terraform workspace, its resources cannot be destroyed")
+        if not bucket.get("cos"):
+            errors.append("the bucket is not linked to a cos instance")
+
+        # --- the bucket must be empty (only reachable through its endpoint) ----
+        has_contents = False
+        if bucket["virtual_server_endpoint"]:
+            access_token = get_iam_access_token(get_cos_api_key(bucket, vault))
+            has_contents = check_bucket_has_contents(access_token, bucket)
+            if has_contents:
+                errors.append(f"The bucket {bucket['name']} is not empty")
+
+        if errors:
+            if has_contents:
+                update_bucket_status(bucket["subscription_id"], SubscriptionStatus.LOCKED, session)
+            raise DeclineDemandException(" | ".join(errors))
+
+        update_bucket_status(bucket["subscription_id"], SubscriptionStatus.TERMINATING, session)
         logger.info("deleting bucket %s (subscription %s)", bucket["name"], payload.subscription_id)
         return bucket
 
     @step
-    def get_cos_api_key(bucket: dict, vault: Vault = depends(vault_dependency)) -> str | None:
-        from cos_service.services.vault_service import get_cos_api_key
-
-        return get_cos_api_key(bucket, vault)
-
-    @step
-    def validate_bucket_is_empty(
-        bucket: dict,
-        api_key: str,
-        session: SASession = depends(sqlalchemy_session_dependency),
-    ) -> bool:
-        from cos_service.services.ibm_iam_service import get_iam_access_token
-        from cos_service.services.bucketService import check_bucket_has_contents, update_bucket_status
-
-        if bucket["virtual_server_endpoint"] is None:
-            return True
-
-        update_bucket_status(bucket["subscription_id"], SubscriptionStatus.TERMINATING, session)
-        access_token = get_iam_access_token(api_key)
-        if check_bucket_has_contents(access_token, bucket):
-            update_bucket_status(bucket["subscription_id"], SubscriptionStatus.LOCKED, session)
-            raise DeclineDemandException(f"The bucket {bucket['name']} is not empty")
-
-        return True
-
-    @step
     def destroy_tf_resources(
         bucket: dict,
-        bucket_empty: bool,
         tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
         payload: BucketDeletePayload = depends(payload_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
@@ -117,9 +128,6 @@ def bucket_delete():
         from cos_service.services.workspaceService import update_bucket_workspace, build_bucket_workspace_details
         from cos_service.services.bucketService import update_bucket_on_destroy, update_bucket_workspace_status
         from cos_service.services.immutability_service import compute_bucket_immutability_for_update_bucket
-
-        if bucket["virtual_server_endpoint"] is None:
-            return True
 
         update_bucket_on_destroy(payload.subscription_id, session)
 
@@ -188,9 +196,6 @@ def bucket_delete():
         from cos_service.services.bucketService import update_bucket_workspace_status
 
         workspace_id = bucket["workspace"]["workspace_id"]
-        if workspace_id is None:
-            return True
-
         try:
             update_bucket_workspace_status(bucket["subscription_id"], Status.INPROGRESS, session)
             tf.workspaces.get_by_id(workspace_id=workspace_id).delete()
@@ -216,10 +221,8 @@ def bucket_delete():
         update_bucket_workspace_status(bucket["subscription_id"], Status.SUCCESS, session)
         return True
 
-    bucket = validate_bucket_and_workspace()
-    api_key = get_cos_api_key(bucket=bucket)
-    bucket_empty = validate_bucket_is_empty(bucket=bucket, api_key=api_key)
-    destroyed_resources = destroy_tf_resources(bucket=bucket, bucket_empty=bucket_empty)
+    bucket = validate_request()
+    destroyed_resources = destroy_tf_resources(bucket=bucket)
     update_db_resources_task = update_db_for_resources(bucket=bucket, destroyed_resources=destroyed_resources)
     destroyed_workspace = destroy_tf_workspace(bucket=bucket, update_db_resources_task=update_db_resources_task)
     update_db_for_workspace(bucket=bucket, destroyed_workspace=destroyed_workspace)
