@@ -1,0 +1,120 @@
+"""Configuration pytest commune.
+
+* met la racine ``cos/`` dans ``sys.path`` pour importer ``cos_service`` ;
+* installe les doublures de ``tests/stubs`` pour chaque module externe ou
+  déduit qui n'est pas importable dans l'environnement courant. Sur le projet
+  complet, rien n'est remplacé et les tests tournent contre le vrai code.
+
+Lancement :
+
+    python -m pytest tests
+"""
+import importlib
+import importlib.util
+import sys
+import types
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tests.stubs import bp2i, schemas as schema_stubs  # noqa: E402
+
+DAG_PATH = ROOT / "cos_service" / "dags" / "bucket" / "v1" / "cos.bucket.v1.create.py"
+
+
+def _install_if_missing(name: str, module: types.ModuleType) -> None:
+    try:
+        importlib.import_module(name)
+    except ImportError:
+        sys.modules[name] = module
+
+
+def _schema_module(name: str, **attrs) -> types.ModuleType:
+    module = types.ModuleType(name)
+    for key, value in attrs.items():
+        setattr(module, key, value)
+    return module
+
+
+for _name, _module in bp2i.build_modules().items():
+    _install_if_missing(_name, _module)
+
+_install_if_missing(
+    "cos_service.schemas.bucket_retention",
+    _schema_module(
+        "cos_service.schemas.bucket_retention",
+        DAYS=schema_stubs.DAYS,
+        YEARS=schema_stubs.YEARS,
+        MAX_RETENTION_YEARS=schema_stubs.MAX_RETENTION_YEARS,
+        _RETENTION_KEYS=schema_stubs._RETENTION_KEYS,
+        max_retention=schema_stubs.max_retention,
+        BucketRetention=schema_stubs.BucketRetention,
+    ),
+)
+_install_if_missing(
+    "cos_service.schemas.bucket_backup",
+    _schema_module("cos_service.schemas.bucket_backup", BucketBackup=schema_stubs.BucketBackup),
+)
+_install_if_missing(
+    "cos_service.schemas.status",
+    _schema_module("cos_service.schemas.status", Status=schema_stubs.Status),
+)
+_install_if_missing(
+    "cos_service.schemas.subscription_status",
+    _schema_module(
+        "cos_service.schemas.subscription_status",
+        SubscriptionStatus=schema_stubs.SubscriptionStatus,
+    ),
+)
+
+
+# --- fixtures partagées -----------------------------------------------------
+
+SERVICE_MODULES = (
+    "contextService",
+    "cosService",
+    "backup_vault_service",
+    "bucketService",
+    "schematics_service",
+    "vault_service",
+    "workspaceService",
+)
+
+
+@pytest.fixture
+def services(monkeypatch):
+    """Remplace chaque module ``cos_service.services.*`` importé dans les étapes
+    par un ``MagicMock``. ``immutability_service`` reste le vrai module."""
+    mocks = {}
+    for name in SERVICE_MODULES:
+        mock = MagicMock(name=name)
+        monkeypatch.setitem(sys.modules, f"cos_service.services.{name}", mock)
+        mocks[name] = mock
+    return SimpleNamespace(**mocks)
+
+
+@pytest.fixture
+def dag(monkeypatch):
+    """Importe le DAG de création avec ``step`` remplacé par un enregistreur.
+
+    Renvoie ``module`` (le module du DAG) et ``steps`` (nom -> fonction brute).
+    Les dépendances ``depends(...)`` valent ``None`` : les tests passent
+    explicitement ``payload``, ``session``, ``state_manager``, ``tf``, ``vault``.
+    """
+    modules = bp2i.build_modules()
+    for name in bp2i.DAG_OVERRIDES:
+        monkeypatch.setitem(sys.modules, name, modules[name])
+    registry = modules["bp2i_airflow_library.dag"].registry
+
+    spec = importlib.util.spec_from_file_location("cos_bucket_v1_create_dag", DAG_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    steps = {name: step.fn for name, step in registry.items()}
+    return SimpleNamespace(module=module, steps=steps)
