@@ -43,7 +43,7 @@ cos/
 │   │   ├── contextService.py         (déduit)  get_realm, get_apcodes, get_account_instances_crn
 │   │   ├── cosService.py             (déduit)  get_cos_instance_by_name, get_cos_instance_status
 │   │   ├── immutability_service.py              ← reconstitué
-│   │   ├── schematics_service.py     (déduit)  create_or_update_ws
+│   │   ├── schematics_service.py                ← reconstitué + corrigé (create_or_update_ws, update_ws, update_ws_variables, run_workspace)
 │   │   ├── vault_service.py          (déduit)  get_vault_secrets
 │   │   └── workspaceService.py       (déduit)  update_bucket_workspace, build_bucket_workspace_details
 │   ├── sql/                                     ← scripts SQL gérés à la main (cible Alembic)

@@ -34,10 +34,6 @@ from cos_service.schemas.immutability import Immutability
 from cos_service.schemas.status import Status
 from cos_service.schemas.subscription_status import SubscriptionStatus
 
-TERRAFORM_REPOSITORY = (
-    "https://gitlab-dogen.group.echonet/market-place/ap43584/orchestrator/products/cos/cos.git"
-)
-
 logger = logging.getLogger(__name__)
 
 class BucketCreatePayload(ProductCreatePayload):
@@ -193,7 +189,7 @@ def bucket_create():
         vault: Vault = depends(vault_dependency),
     ) -> str:
         from bp2i_terraform.backends.schematics import TerraformVar
-        from cos_service.services.schematics_service import create_or_update_ws
+        from cos_service.services.schematics_service import TERRAFORM_VERSION, create_or_update_ws
         from cos_service.services.bucketService import (
             get_bucket_by_sub_id,
             process_bucket_creation,
@@ -210,7 +206,7 @@ def bucket_create():
 
         secrets = get_vault_secrets(realm=realm.get("name", None), apcode=payload.apcode, vault=vault)
         ws_name = f"ws_bucket_{payload.subscription_id}"
-        tf_directory = "terraform/v1.12/bucket"
+        tf_directory = f"terraform/v{TERRAFORM_VERSION}/bucket"
 
         variables = {
             "region": payload.region,
@@ -258,12 +254,12 @@ def bucket_create():
                 logger.info("Terraform create workspace")
                 create_ws_result = create_or_update_ws(
                     tf,
-                    ws_name,
-                    ENVIRONMENT,
-                    tf_directory,
-                    variables,
-                    description,
-                    secrets["gitlab_token"],
+                    workspace_name=ws_name,
+                    orchestrator_env=ENVIRONMENT,
+                    tf_directory=tf_directory,
+                    variables=variables,
+                    description=description,
+                    gitlab_token=secrets["gitlab_token"],
                 )
 
                 update_bucket_status(payload.subscription_id, SubscriptionStatus.CREATING, session)
@@ -301,6 +297,7 @@ def bucket_create():
             update_bucket_workspace_status,
             update_bucket_status,
         )
+        from cos_service.services.schematics_service import run_workspace
 
         cos_instance = validated["cos_instance"]
         backup_vault = validated["backup_vault"]
@@ -329,14 +326,7 @@ def bucket_create():
 
             update_bucket_workspace(payload=payload, workspace_details=workspace_details, vault=vault, tf=tf)
 
-            tf_workspace = tf.workspaces.get_by_id(workspace_id)
-            plan_activity = tf_workspace.plan()
-            apply_activity = tf_workspace.apply()
-
-            for template_id, template_activity_logs in apply_activity.get_logs().items():
-                print(template_id, template_activity_logs, sep="\n")
-            outputs_tf = tf_workspace.get_outputs()[0]
-            return dict(outputs_tf.output_values[0])
+            return run_workspace(tf, workspace_id)
         except Exception:
             update_bucket_status(payload.subscription_id, SubscriptionStatus.LOCKED, session)
             update_bucket_workspace_status(payload.subscription_id, Status.FAILED, session)

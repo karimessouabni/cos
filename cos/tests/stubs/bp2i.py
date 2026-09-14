@@ -14,6 +14,7 @@ Deux usages :
 que les ``pytest.raises`` fonctionnent quel que soit le module qui lève.
 """
 import types
+from enum import Enum
 
 try:  # vraie lib présente : on réutilise ses exceptions
     from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
@@ -82,6 +83,20 @@ class TerraformVar:
         self.sensitive = sensitive
 
 
+class VCS:
+    def __init__(self, repository, branch, oauth_token_id, directory):
+        self.repository = repository
+        self.branch = branch
+        self.oauth_token_id = oauth_token_id
+        self.directory = directory
+
+
+class OrchestratorEnvironment(str, Enum):
+    INT = "int"
+    PREPROD = "preprod"
+    PROD = "prod"
+
+
 class SASession: ...
 
 
@@ -120,7 +135,8 @@ def build_modules() -> dict[str, types.ModuleType]:
     root.add_project_to_path = lambda: None
 
     config = types.ModuleType("bp2i_airflow_library.config")
-    config.ENVIRONMENT = "test"
+    config.ENVIRONMENT = OrchestratorEnvironment.INT.value
+    config.OrchestratorEnvironment = OrchestratorEnvironment
 
     dag = types.ModuleType("bp2i_airflow_library.dag")
     dag.step = step
@@ -156,6 +172,7 @@ def build_modules() -> dict[str, types.ModuleType]:
     backends = types.ModuleType("bp2i_terraform.backends")
     schematics = types.ModuleType("bp2i_terraform.backends.schematics")
     schematics.TerraformVar = TerraformVar
+    schematics.VCS = VCS
 
     return {
         "bp2i_airflow_library": root,

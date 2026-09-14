@@ -57,6 +57,14 @@ _install_if_missing(
         BucketRetention=schema_stubs.BucketRetention,
     ),
 )
+_constants = _schema_module(
+    "cos_service.utils.constants",
+    TERRAFORM_REPOSITORY="https://gitlab.example/cos/cos.git",
+)
+_utils = _schema_module("cos_service.utils", constants=_constants)
+_utils.__path__ = []  # package, so that "from cos_service.utils import constants" resolves
+_install_if_missing("cos_service.utils", _utils)
+_install_if_missing("cos_service.utils.constants", _constants)
 _install_if_missing(
     "cos_service.schemas.bucket_backup",
     _schema_module("cos_service.schemas.bucket_backup", BucketBackup=schema_stubs.BucketBackup),
@@ -96,6 +104,7 @@ def services(monkeypatch):
         mock = MagicMock(name=name)
         monkeypatch.setitem(sys.modules, f"cos_service.services.{name}", mock)
         mocks[name] = mock
+    mocks["schematics_service"].TERRAFORM_VERSION = "1.12"
     return SimpleNamespace(**mocks)
 
 

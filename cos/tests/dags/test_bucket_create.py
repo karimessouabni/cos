@@ -349,9 +349,13 @@ class TestCreateTfWorkspace:
 
         self.run(dag, make_payload(region="eu-de"), state_manager, backup_vault=BACKUP_VAULT)
 
-        args = happy_services.schematics_service.create_or_update_ws.call_args.args
-        assert args[1] == "ws_bucket_sub-1"
-        variables = args[4]
+        call = happy_services.schematics_service.create_or_update_ws.call_args
+        assert call.args == ("tf",)
+        assert call.kwargs["workspace_name"] == "ws_bucket_sub-1"
+        assert call.kwargs["tf_directory"] == "terraform/v1.12/bucket"
+        assert call.kwargs["description"] == "my bucket"
+        assert call.kwargs["gitlab_token"] == "gl"
+        variables = call.kwargs["variables"]
         assert variables["cos_instance_crn"] == "crn:cos"
         assert variables["cos_instance_name"] == "cos-a"
         assert variables["wklapp_account_id"] == "wk-123"
@@ -359,7 +363,6 @@ class TestCreateTfWorkspace:
         assert variables["kms_key_crn"] == "crn:kms"
         assert variables["cloud_type"] == "3"
         assert isinstance(variables["vault_read_token"], TerraformVar)
-        assert args[6] == "gl"
         happy_services.vault_service.get_vault_secrets.assert_called_once_with(
             realm="realm-a", apcode="AP1", vault="vault"
         )
@@ -379,7 +382,7 @@ class TestCreateTfWorkspace:
 
         self.run(dag, make_payload(region="eu-fr2"), state_manager)
 
-        variables = happy_services.schematics_service.create_or_update_ws.call_args.args[4]
+        variables = happy_services.schematics_service.create_or_update_ws.call_args.kwargs["variables"]
         assert variables["cloud_type"] == "2"
         assert variables["target_backup_vault_crn"] is None
 
@@ -421,35 +424,27 @@ class TestCreateTfWorkspace:
 # --- apply_tf_workspace ---------------------------------------------------------------
 
 class TestApplyTfWorkspace:
-    @pytest.fixture
-    def tf(self):
-        backend = MagicMock(name="tf")
-        workspace = backend.workspaces.get_by_id.return_value
-        workspace.apply.return_value.get_logs.return_value = {"tpl": "logs"}
-        workspace.get_outputs.return_value = [MagicMock(output_values=[TF_OUTPUTS])]
-        return backend
-
-    def run(self, dag, payload, state_manager, tf, backup_vault=None):
+    def run(self, dag, payload, state_manager, backup_vault=None):
         return dag.steps["apply_tf_workspace"](
             validated=validated(backup_vault),
             workspace_id="ws-1",
             account_instances_crn=ACCOUNT_CRNS,
             immutability=fresh_immutability(),
-            tf=tf,
+            tf="tf",
             state_manager=state_manager,
             session="session",
             payload=payload,
             vault="vault",
         )
 
-    def test_plans_applies_and_returns_outputs(self, dag, happy_services, make_payload, state_manager, tf):
-        result = self.run(dag, make_payload(), state_manager, tf, backup_vault=BACKUP_VAULT)
+    def test_updates_the_workspace_then_runs_it(self, dag, happy_services, make_payload, state_manager):
+        happy_services.schematics_service.run_workspace.return_value = TF_OUTPUTS
+
+        result = self.run(dag, make_payload(), state_manager, backup_vault=BACKUP_VAULT)
 
         assert result == TF_OUTPUTS
-        workspace = tf.workspaces.get_by_id.return_value
-        tf.workspaces.get_by_id.assert_called_once_with("ws-1")
-        workspace.plan.assert_called_once()
-        workspace.apply.assert_called_once()
+        happy_services.schematics_service.run_workspace.assert_called_once_with("tf", "ws-1")
+        happy_services.workspaceService.update_bucket_workspace.assert_called_once()
         happy_services.bucketService.update_bucket_workspace_status.assert_called_once_with(
             "sub-1", Status.INPROGRESS, "session"
         )
@@ -459,11 +454,11 @@ class TestApplyTfWorkspace:
         assert details["description"] == "my bucket"
         happy_services.cosService.get_cos_instance_by_name.assert_not_called()
 
-    def test_failed_apply_locks_the_bucket_and_reraises(self, dag, happy_services, make_payload, state_manager, tf):
-        tf.workspaces.get_by_id.return_value.apply.side_effect = RuntimeError("apply failed")
+    def test_failed_apply_locks_the_bucket_and_reraises(self, dag, happy_services, make_payload, state_manager):
+        happy_services.schematics_service.run_workspace.side_effect = RuntimeError("apply failed")
 
         with pytest.raises(RuntimeError, match="apply failed"):
-            self.run(dag, make_payload(), state_manager, tf)
+            self.run(dag, make_payload(), state_manager)
 
         happy_services.bucketService.update_bucket_status.assert_called_with(
             "sub-1", SubscriptionStatus.LOCKED, "session"
