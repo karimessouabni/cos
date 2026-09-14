@@ -68,13 +68,15 @@ def bucket_create():
     ) -> dict:
         """Checks everything the demand refers to and declines with all the errors at once.
 
-        Returns {"cos_instance": <dict>, "backup_vault": <dict | None>}.
+        Returns {"realm": <dict>, "cos_instance": <dict>, "backup_vault": <dict | None>}
+        so the following steps reuse what was fetched here instead of querying again.
         """
         from cos_service.services.contextService import get_realm, get_apcodes
         from cos_service.services.cosService import get_cos_instance_by_name, get_cos_instance_status
         from cos_service.services.backup_vault_service import get_backup_vault_by_name
 
         errors = []
+        realm = None
 
         # --- realm / apcode ---------------------------------------------------
         if not payload.realm:
@@ -127,7 +129,7 @@ def bucket_create():
         if errors:
             raise DeclineDemandException(" | ".join(errors))
 
-        return {"cos_instance": cos_instance, "backup_vault": backup_vault}
+        return {"realm": realm, "cos_instance": cos_instance, "backup_vault": backup_vault}
 
     @step
     def process_protection_configuration(
@@ -181,6 +183,7 @@ def bucket_create():
 
     @step
     def create_tf_workspace(
+        validated: dict,
         account_instances_crn: dict,
         immutability: dict,
         tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
@@ -200,25 +203,20 @@ def bucket_create():
         )
         from cos_service.services.cosService import get_cos_instance_by_name
         from cos_service.services.vault_service import get_vault_secrets
-        from cos_service.services.backup_vault_service import get_backup_vault_by_sub_id
-        from cos_service.services.contextService import get_realm
 
-        realm = get_realm(payload.realm)
+        realm = validated["realm"]
+        cos_instance = validated["cos_instance"]
+        backup_vault = validated["backup_vault"]
+
         secrets = get_vault_secrets(realm=realm.get("name", None), apcode=payload.apcode, vault=vault)
         ws_name = f"ws_bucket_{payload.subscription_id}"
         tf_directory = "terraform/v1.12/bucket"
 
-        cos_instance = get_cos_instance_by_name(payload.cos_instance, session)
-        backup_vault = (
-            get_backup_vault_by_sub_id(immutability["backup"]["backup_vault_sub_id"], session) if immutability["backup"]["backup_vault_sub_id"] is not None
-            else None
-        )
-
         variables = {
             "region": payload.region,
             "bucket_storage_class": payload.storage_class,
-            "cos_instance_crn": cos_instance.crn,
-            "cos_instance_name": cos_instance.name,
+            "cos_instance_crn": cos_instance["crn"],
+            "cos_instance_name": cos_instance["name"],
             "activity_tracker_crn": account_instances_crn.get("cloudlogs", None),
             "kms_key_crn": account_instances_crn.get("encryption_key", None),
             "sysdig_crn": account_instances_crn.get("cloudlogs", None),
@@ -247,8 +245,13 @@ def bucket_create():
         try:
             bucket = get_bucket_by_sub_id(session, payload.subscription_id)
             if bucket is None:
+                # process_bucket_creation was always given the ORM row, not the
+                # dict carried in `validated`; this is the one remaining
+                # re-fetch, to drop once bucketService is confirmed to read the
+                # instance by key.
+                cos_instance_row = get_cos_instance_by_name(payload.cos_instance, session)
                 bucket = process_bucket_creation(
-                    payload, realm, immutability, account_instances_crn, description, cos_instance, backup_vault, session
+                    payload, realm, immutability, account_instances_crn, description, cos_instance_row, backup_vault, session
                 )
 
             if bucket["workspace"]["workspace_id"] is None:
@@ -280,6 +283,7 @@ def bucket_create():
 
     @step
     def apply_tf_workspace(
+        validated: dict,
         workspace_id: str,
         account_instances_crn: dict,
         immutability: dict,
@@ -289,7 +293,6 @@ def bucket_create():
         payload: BucketCreatePayload = depends(payload_dependency),
         vault: Vault = depends(vault_dependency),
     ) -> dict:
-        from cos_service.services.cosService import get_cos_instance_by_name
         from cos_service.services.workspaceService import (
             update_bucket_workspace,
             build_bucket_workspace_details,
@@ -298,22 +301,18 @@ def bucket_create():
             update_bucket_workspace_status,
             update_bucket_status,
         )
-        from cos_service.services.backup_vault_service import get_backup_vault_by_sub_id
 
-        cos_instance = get_cos_instance_by_name(payload.cos_instance, session)
-        backup_vault = (
-            get_backup_vault_by_sub_id(immutability["backup"]["backup_vault_sub_id"], session) if immutability["backup"]["backup_vault_sub_id"] is not None
-            else None
-        )
+        cos_instance = validated["cos_instance"]
+        backup_vault = validated["backup_vault"]
 
         workspace_details = build_bucket_workspace_details(
             workspace_id=workspace_id,
             realm=payload.realm,
             app_code=payload.apcode,
-            region=payload.region, #"eu-de" if realm["env_type"] == "NPR" else "eu-fr2", # TODO payload.region,
+            region=payload.region,
             storage_class=payload.storage_class,
-            cos_instance_crn=cos_instance.crn,
-            cos_instance_name=cos_instance.name,
+            cos_instance_crn=cos_instance["crn"],
+            cos_instance_name=cos_instance["name"],
             activity_tracker_crn=account_instances_crn.get("cloudlogs", None),
             kms_crn=account_instances_crn.get("encryption_key", None),
             monitoring_crn=account_instances_crn.get("cloudlogs", None),
@@ -353,10 +352,9 @@ def bucket_create():
     ) -> dict | None:
         from cos_service.services.bucketService import complete_bucket_create
 
-        vip = f"https://s3.direct.{payload.region}.cloud-object-storage.appdomain.cloud/{apply_tf_result['bucket_name']['value']}"
-
-        vpe = f"s3.direct.{payload.region}.cloud-object-storage.appdomain.cloud"
         bucket_name = apply_tf_result["bucket_name"]["value"]
+        vpe = f"s3.direct.{payload.region}.cloud-object-storage.appdomain.cloud"
+        vip = f"https://{vpe}/{bucket_name}"
 
         virtual_server_endpoint = {
             "path_style": f"https://{vpe}/{bucket_name}",
@@ -365,63 +363,24 @@ def bucket_create():
             "host_style": f"https://{bucket_name}.{vpe}",
         }
 
-        if payload.retention and payload.retention.retention_enabled is None:
-            retention_state = {
-                "minimum": immutability["retention"]["minimum"],
-                "maximum": immutability["retention"]["maximum"],
-                "default": immutability["retention"]["default"]
-            }
-            state_manager.push_state({"retention": retention_state} )
-            logger.info(f'retention is ::{retention_state} and {payload.retention.retention_enabled} and {payload.retention}')
-        if payload.retention and payload.retention.retention_enabled is not None:
-            state_manager.push_state({"retention": immutability["retention"]})
-            logger.info(f'retention is :: {immutability["retention"]} payload.retention.retention_enabled : {payload.retention.retention_enabled}')
-
-
-        if payload.object_lock_duration_days is not None:
-            state_manager.push_state({
-                "object_lock_duration_days": immutability["object_lock_duration_days"]
-            })
-            state_manager.push_state({
-                "object_locking_enabled": immutability["object_locking_enabled"]
-            })
-
-        if payload.object_lock_duration_years is not None:
-            state_manager.push_state({
-                "object_lock_duration_years": immutability["object_lock_duration_years"]
-            })
-            state_manager.push_state({
-                "object_locking_enabled": immutability["object_locking_enabled"]
-            })
-
-        if payload.immutability_choice is not None:
-            state_manager.push_state({"immutability_choice": payload.immutability_choice})
-        else:
-            if payload.retention is not None and not payload.retention.is_empty():
-                state_manager.push_state({"immutability_choice": Immutability.RETENTION})
-            if payload.object_lock_duration_days is not None or payload.object_lock_duration_years is not None:
-                state_manager.push_state({"immutability_choice": Immutability.OBJECT_LOCK})
-            if payload.object_lock_duration_days is None and payload.object_lock_duration_years is None and (
-                    payload.retention is None or payload.retention.is_empty()
-            ):
-                state_manager.push_state({"immutability_choice": Immutability.NONE})
-
-        if payload.enable_versioning is not None :
-            state_manager.push_state({"enable_versioning": immutability["object_versioning_enabled"]})
-
-        if payload.backup and payload.backup.backup_enabled is not None:
-            state_manager.push_state({"backup": immutability["backup"]})
-
-        ws_state = {
-            "name": apply_tf_result["bucket_name"]["value"],
+        # The state reflects the effective configuration computed by the
+        # immutability service (defaults included), not what the client typed.
+        state_manager.push_state({
+            "name": bucket_name,
             "crn": apply_tf_result["bucket_crn"]["value"],
             "virtual_server_endpoint": virtual_server_endpoint,
             "storage_class": payload.storage_class,
             "enable_custom_permissions": payload.enable_custom_permissions,
             "clean_status": Status.SUCCESS.value,
             "lifecycle_policy_rule_enabled": False,
-        }
-        state_manager.push_state(ws_state)
+            "immutability_choice": immutability["immutability_choice"],
+            "retention": immutability["retention"],
+            "object_locking_enabled": immutability["object_locking_enabled"],
+            "object_lock_duration_days": immutability["object_lock_duration_days"],
+            "object_lock_duration_years": immutability["object_lock_duration_years"],
+            "enable_versioning": immutability["object_versioning_enabled"],
+            "backup": immutability["backup"],
+        })
 
         complete_bucket_create(payload.subscription_id, vip, apply_tf_result, session)
         return {"subscription_id": payload.subscription_id}
@@ -429,8 +388,15 @@ def bucket_create():
     validated = validate_request()
     immutability = process_protection_configuration(validated=validated)
     account_instances_crn = get_account_instances_crn(validated=validated)
-    workspace_id = create_tf_workspace(account_instances_crn=account_instances_crn, immutability=immutability)
-    apply_tf_result = apply_tf_workspace(workspace_id=workspace_id, account_instances_crn=account_instances_crn, immutability=immutability)
+    workspace_id = create_tf_workspace(
+        validated=validated, account_instances_crn=account_instances_crn, immutability=immutability
+    )
+    apply_tf_result = apply_tf_workspace(
+        validated=validated,
+        workspace_id=workspace_id,
+        account_instances_crn=account_instances_crn,
+        immutability=immutability,
+    )
     save_bucket_in_db(apply_tf_result=apply_tf_result, immutability=immutability)
 
 

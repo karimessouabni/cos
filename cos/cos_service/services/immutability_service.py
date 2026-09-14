@@ -150,6 +150,10 @@ def compute_bucket_new_immutability(
     if _backup_requested(backup):
         immutability = compute_bucket_backup(immutability, backup)
 
+    # The resolved choice (explicit or inferred, with its unit) is the one the
+    # callers must persist: they must not re-infer it from the payload.
+    immutability["immutability_choice"] = immutability_choice.value
+
     logging.info(f"compute_bucket_new_immutability : {immutability}")
     return immutability
 
@@ -353,6 +357,7 @@ def compute_bucket_immutability_for_update_bucket(bucket: dict, session) -> dict
         object_lock_duration_years = None
 
     immutability = {
+        "immutability_choice": compute_bucket_immutability_choice(bucket).value,
         "object_locking_enabled": object_lock_duration_days is not None or object_lock_duration_years is not None,
         "object_versioning_enabled": bool(bucket.get("object_versioning_enabled")),
         "object_lock_duration_days": object_lock_duration_days,
