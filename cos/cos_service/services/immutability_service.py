@@ -545,20 +545,30 @@ def _retention_from_bucket(bucket: dict) -> dict:
         **{key: bucket[f"retention_{key}"] if enabled else None for key in _RETENTION_KEYS},
     }
 
+def _backup_vault_sub_id(bucket: dict):
+    """Subscription id du vault de backup d'une ligne bucket.
+
+    ``Bucket.to_dict()`` ne sérialise pas la colonne ``backup_vault_subscription_id``
+    mais la relation ``backup_vault`` (KeyError constaté en INT) : on lit la
+    relation d'abord, la colonne en repli.
+    """
+    backup_vault = bucket.get("backup_vault")
+    if backup_vault:
+        return backup_vault["subscription_id"]
+    return bucket.get("backup_vault_subscription_id")
+
+
 def _backup_from_bucket(bucket: dict, session) -> dict:
-    """Bloc backup depuis la ligne bucket ; le vault n'est résolu que si nécessaire."""
+    """Bloc backup depuis la ligne bucket, sans requête : l'id du vault y est déjà."""
     if not bucket["backup_enabled"]:
         return {"backup_enabled": False, "backup_vault_sub_id": None, "backup_retention_days": None}
 
-    from cos_service.services.backup_vault_service import get_backup_vault_by_sub_id
-
-    # get_backup_vault_by_sub_id renvoie la ligne ORM (accès par attribut,
-    # comme dans bucketService.process_bucket_update) ; seule
-    # get_backup_vault_by_name renvoie un dict.
-    backup_vault = get_backup_vault_by_sub_id(bucket["backup_vault_subscription_id"], session)
+    backup_vault_sub_id = _backup_vault_sub_id(bucket)
+    if backup_vault_sub_id is None:
+        logging.warning("bucket %s has backup enabled but no backup vault attached", bucket.get("subscription_id"))
     return {
         "backup_enabled": True,
-        "backup_vault_sub_id": backup_vault.subscription_id,
+        "backup_vault_sub_id": backup_vault_sub_id,
         "backup_retention_days": bucket["backup_retention_days"],
     }
 

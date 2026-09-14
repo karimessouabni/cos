@@ -333,18 +333,31 @@ class TestComputeBucketImmutabilityForUpdate:
             "retention_enabled": True, "default": 30, "minimum": 10, "maximum": 60
         }
 
-    def test_backup_resolves_the_vault_by_sub_id(self, monkeypatch):
-        vault_service = MagicMock()
-        vault_service.get_backup_vault_by_sub_id.return_value = SimpleNamespace(subscription_id="bv-sub", crn="crn:bv")
-        monkeypatch.setitem(sys.modules, "cos_service.services.backup_vault_service", vault_service)
-        row = bucket_row(backup_enabled=True, backup_vault_subscription_id="bv-sub", backup_retention_days=7)
+    def test_backup_vault_id_is_read_from_the_relation(self):
+        """to_dict() expose la relation backup_vault, pas la colonne FK."""
+        row = bucket_row(backup_enabled=True, backup_retention_days=7, backup_vault={"subscription_id": "bv-sub", "crn": "crn:bv"})
+        del row["backup_vault_subscription_id"]
 
-        result = svc.compute_bucket_immutability_for_update_bucket(row, session="session")
+        result = svc.compute_bucket_immutability_for_update_bucket(row, session=None)
 
-        vault_service.get_backup_vault_by_sub_id.assert_called_once_with("bv-sub", "session")
         assert result["backup"] == {
             "backup_enabled": True, "backup_vault_sub_id": "bv-sub", "backup_retention_days": 7
         }
+
+    def test_backup_vault_id_falls_back_to_the_column(self):
+        row = bucket_row(backup_enabled=True, backup_vault_subscription_id="bv-col", backup_retention_days=7)
+
+        result = svc.compute_bucket_immutability_for_update_bucket(row, session=None)
+
+        assert result["backup"]["backup_vault_sub_id"] == "bv-col"
+
+    def test_backup_without_vault_is_kept_with_a_warning(self, caplog):
+        row = bucket_row(backup_enabled=True, backup_retention_days=7)
+
+        result = svc.compute_bucket_immutability_for_update_bucket(row, session=None)
+
+        assert result["backup"]["backup_vault_sub_id"] is None
+        assert "no backup vault attached" in caplog.text
 
 
 class TestValidateImmutabilityForUpdate:
