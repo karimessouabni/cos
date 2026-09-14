@@ -77,6 +77,21 @@ class ProductCreatePayload:
             setattr(self, name, value)
 
 
+class ProductActionPayload(ProductCreatePayload):
+    """Même doublure : realm, apcode, environment, region, subscription_id."""
+
+
+class ProductActionConfig:
+    def __init__(self, **options):
+        self.options = options
+
+
+class LinearCooldownPolicy:
+    def __init__(self, delay, max_attempts):
+        self.delay = delay
+        self.max_attempts = max_attempts
+
+
 class TerraformVar:
     def __init__(self, value, sensitive: bool = False):
         self.value = value
@@ -116,7 +131,7 @@ def build_modules() -> dict[str, types.ModuleType]:
     def step(fn):
         return Step(fn, registry)
 
-    def product_action(name, tags=None, payload=None):
+    def product_action(name, tags=None, payload=None, config=None):
         def decorator(fn):
             def run():
                 fn()
@@ -124,6 +139,7 @@ def build_modules() -> dict[str, types.ModuleType]:
 
             run.dag_name = name
             run.payload = payload
+            run.config = config
             return run
 
         return decorator
@@ -167,14 +183,21 @@ def build_modules() -> dict[str, types.ModuleType]:
     schemas = types.ModuleType("bp2i_airflow_library.schemas")
     schemas.Field = Field
     schemas.ProductCreatePayload = ProductCreatePayload
+    schemas.ProductActionPayload = ProductActionPayload
+    schemas.ProductActionConfig = ProductActionConfig
 
     terraform = types.ModuleType("bp2i_terraform")
     backends = types.ModuleType("bp2i_terraform.backends")
     schematics = types.ModuleType("bp2i_terraform.backends.schematics")
     schematics.TerraformVar = TerraformVar
     schematics.VCS = VCS
+    components = types.ModuleType("bp2i_terraform.components")
+    cooldown = types.ModuleType("bp2i_terraform.components.cooldown_policies")
+    cooldown.LinearCooldownPolicy = LinearCooldownPolicy
 
     return {
+        "bp2i_terraform.components": components,
+        "bp2i_terraform.components.cooldown_policies": cooldown,
         "bp2i_airflow_library": root,
         "bp2i_airflow_library.config": config,
         "bp2i_airflow_library.dag": dag,

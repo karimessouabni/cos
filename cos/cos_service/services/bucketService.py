@@ -348,6 +348,15 @@ def process_bucket_update(
     )
 
 
+def update_bucket_action(subscription_id: str, action: Action, session: SASession) -> None:
+    _execute(
+        session,
+        update(Bucket)
+        .values(action=action.value)
+        .where(Bucket.subscription_id == subscription_id),
+    )
+
+
 def update_bucket_on_destroy(subscription_id: str, session: SASession) -> None:
     _execute(
         session,

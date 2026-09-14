@@ -250,6 +250,13 @@ class TestUpdates:
         assert statement.values_["backup_enabled"] is True
         assert statement.values_["description"] == "desc"
 
+    def test_update_bucket_action(self, session):
+        svc.update_bucket_action("sub-1", Action.DESTROY, session)
+
+        (statement,) = executed(session)
+        assert statement.table is Bucket
+        assert statement.values_ == {"action": Action.DESTROY.value}
+
     def test_update_bucket_on_destroy(self, session):
         svc.update_bucket_on_destroy("sub-1", session)
 

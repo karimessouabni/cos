@@ -17,7 +17,7 @@ cos/
 │   │   │       ├── cos.bucket.v1.clean.py
 │   │   │       ├── cos.bucket.v1.create.py                      ← reconstitué
 │   │   │       ├── cos.bucket.v1.create_lifecycle_policy_rule.py
-│   │   │       ├── cos.bucket.v1.delete.py
+│   │   │       ├── cos.bucket.v1.delete.py                      ← reconstitué + corrigé
 │   │   │       ├── cos.bucket.v1.delete_lifecycle_policy_rule.py
 │   │   │       ├── cos.bucket.v1.force_clean.py
 │   │   │       ├── cos.bucket.v1.refresh_restore_ranges.py

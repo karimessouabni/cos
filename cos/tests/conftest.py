@@ -25,7 +25,8 @@ if str(ROOT) not in sys.path:
 
 from tests.stubs import bp2i, orm as orm_stubs, schemas as schema_stubs  # noqa: E402
 
-DAG_PATH = ROOT / "cos_service" / "dags" / "bucket" / "v1" / "cos.bucket.v1.create.py"
+DAGS_DIR = ROOT / "cos_service" / "dags" / "bucket" / "v1"
+DAG_PATH = DAGS_DIR / "cos.bucket.v1.create.py"
 
 
 def _install_if_missing(name: str, module: types.ModuleType) -> None:
@@ -108,6 +109,7 @@ SERVICE_MODULES = (
     "cosService",
     "backup_vault_service",
     "bucketService",
+    "ibm_iam_service",
     "schematics_service",
     "vault_service",
     "workspaceService",
@@ -128,8 +130,8 @@ def services(monkeypatch):
 
 
 @pytest.fixture
-def dag(monkeypatch):
-    """Importe le DAG de création avec ``step`` remplacé par un enregistreur.
+def load_dag(monkeypatch):
+    """Importe un DAG avec ``step`` remplacé par un enregistreur.
 
     Renvoie ``module`` (le module du DAG) et ``steps`` (nom -> fonction brute).
     Les dépendances ``depends(...)`` valent ``None`` : les tests passent
@@ -140,9 +142,18 @@ def dag(monkeypatch):
         monkeypatch.setitem(sys.modules, name, modules[name])
     registry = modules["bp2i_airflow_library.dag"].registry
 
-    spec = importlib.util.spec_from_file_location("cos_bucket_v1_create_dag", DAG_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    def loader(filename: str):
+        registry.clear()
+        spec = importlib.util.spec_from_file_location(filename.replace(".", "_"), DAGS_DIR / filename)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        steps = {name: step.fn for name, step in registry.items()}
+        return SimpleNamespace(module=module, steps=steps)
 
-    steps = {name: step.fn for name, step in registry.items()}
-    return SimpleNamespace(module=module, steps=steps)
+    return loader
+
+
+@pytest.fixture
+def dag(load_dag):
+    """Le DAG de création."""
+    return load_dag("cos.bucket.v1.create.py")

@@ -93,3 +93,5 @@ class SubscriptionStatus(str, Enum):
     ACTIVE = "active"
     CREATING = "creating"
     LOCKED = "locked"
+    TERMINATING = "terminating"
+    TERMINATED = "terminated"
