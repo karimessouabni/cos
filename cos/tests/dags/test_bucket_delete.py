@@ -170,7 +170,7 @@ class TestDestroyTfResources:
         assert self.run(delete_dag, payload, tf) is True
 
         services.bucketService.update_bucket_on_destroy.assert_called_once_with("sub-1", "session")
-        services.bucketService.update_bucket_workspace_status.assert_called_once_with("sub-1", Status.INPROGRESS, "session")
+        services.bucketService.update_bucket_workspace_status.assert_not_called()  # déjà posé par update_bucket_on_destroy
         details = services.workspaceService.build_bucket_workspace_details.call_args.kwargs
         assert details["workspace_id"] == "ws-1"
         assert details["realm"] == "realm-a"

@@ -139,9 +139,10 @@ def bucket_delete():
         vault: Vault = depends(vault_dependency),
     ) -> bool:
         from cos_service.services.workspaceService import update_bucket_workspace, build_bucket_workspace_details
-        from cos_service.services.bucketService import update_bucket_on_destroy, update_bucket_workspace_status
+        from cos_service.services.bucketService import update_bucket_on_destroy
         from cos_service.services.immutability_service import compute_bucket_immutability_for_update_bucket
 
+        # Pose action=DESTROY et status=INPROGRESS sur le workspace.
         update_bucket_on_destroy(payload.subscription_id, session)
 
         workspace_id = bucket["workspace"]["workspace_id"]
@@ -169,7 +170,9 @@ def bucket_delete():
         )
 
         try:
-            update_bucket_workspace_status(payload.subscription_id, Status.INPROGRESS, session)
+            # Rafraîchit VCS, token GitLab et variables (dont les tokens Vault,
+            # à durée de vie courte) : sans ça le provider ne s'authentifie
+            # pas au destroy. Les valeurs métier, elles, ne servent à rien ici.
             update_bucket_workspace(payload=payload, workspace_details=workspace_details, vault=vault, tf=tf)
             tf.workspaces.get_by_id(workspace_id=workspace_id)  # lève avec code 404 si déjà supprimé
             tf.workspaces.delete_workspace_resources(
