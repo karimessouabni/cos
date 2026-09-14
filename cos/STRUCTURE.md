@@ -22,7 +22,7 @@ cos/
 │   │   │       ├── cos.bucket.v1.force_clean.py
 │   │   │       ├── cos.bucket.v1.refresh_restore_ranges.py
 │   │   │       ├── cos.bucket.v1.restore.py
-│   │   │       ├── cos.bucket.v1.update.py
+│   │   │       ├── cos.bucket.v1.update.py                      ← reconstitué + corrigé
 │   │   │       └── cos.bucket.v1.update_lifecycle_policy_rule.py
 │   │   ├── bucket_migration/
 │   │   ├── cos/

@@ -29,10 +29,39 @@ def mark_task_as_declined(*args, **kwargs):
 
 
 class LazyResult:
-    """Valeur renvoyée par l'appel d'une étape pendant le câblage du DAG."""
+    """Valeur renvoyée par l'appel d'une étape pendant le câblage du DAG.
+
+    Imite ce que les DAGs en font : ``.operator.task_id`` et l'opérateur ``>>``.
+    """
 
     def __init__(self, step_name: str):
         self.step_name = step_name
+        self.operator = types.SimpleNamespace(task_id=step_name)
+        self.downstream = []
+
+    def __rshift__(self, other):
+        self.downstream.append(other)
+        return other
+
+    def __rrshift__(self, other):
+        return self
+
+
+class DateTimeSensorAsync:
+    """Doublure du sensor Airflow : ne fait que mémoriser ses arguments."""
+
+    def __init__(self, task_id: str, target_time: str, **kwargs):
+        self.task_id = task_id
+        self.target_time = target_time
+        self.kwargs = kwargs
+        self.downstream = []
+
+    def __rshift__(self, other):
+        self.downstream.append(other)
+        return other
+
+    def __rrshift__(self, other):
+        return self
 
 
 class Step:
@@ -195,7 +224,17 @@ def build_modules() -> dict[str, types.ModuleType]:
     cooldown = types.ModuleType("bp2i_terraform.components.cooldown_policies")
     cooldown.LinearCooldownPolicy = LinearCooldownPolicy
 
+    airflow = types.ModuleType("airflow")
+    airflow.__path__ = []
+    sensors = types.ModuleType("airflow.sensors")
+    sensors.__path__ = []
+    date_time = types.ModuleType("airflow.sensors.date_time")
+    date_time.DateTimeSensorAsync = DateTimeSensorAsync
+
     return {
+        "airflow": airflow,
+        "airflow.sensors": sensors,
+        "airflow.sensors.date_time": date_time,
         "bp2i_terraform.components": components,
         "bp2i_terraform.components.cooldown_policies": cooldown,
         "bp2i_airflow_library": root,
@@ -218,4 +257,7 @@ DAG_OVERRIDES = (
     "bp2i_airflow_library.dag",
     "bp2i_airflow_library.dependencies",
     "bp2i_airflow_library.schemas",
+    "airflow",
+    "airflow.sensors",
+    "airflow.sensors.date_time",  # le vrai sensor exige un contexte de DAG
 )
