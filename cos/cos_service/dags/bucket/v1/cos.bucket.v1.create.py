@@ -257,7 +257,8 @@ def bucket_create():
                     cos_instance_row, backup_vault_row, session,
                 )
 
-            if bucket["workspace"]["workspace_id"] is None:
+            workspace = bucket.get("workspace") or {}
+            if workspace.get("workspace_id") is None:
                 logger.info("Terraform create workspace")
                 create_ws_result = create_or_update_ws(
                     tf,
@@ -276,8 +277,7 @@ def bucket_create():
 
             else:
                 logger.info("Workspace already created")
-                workspace = bucket['workspace']
-                return workspace['workspace_id']
+                return workspace["workspace_id"]
 
         except Exception:
             update_bucket_status(payload.subscription_id, SubscriptionStatus.LOCKED, session)

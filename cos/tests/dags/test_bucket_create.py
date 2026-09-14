@@ -401,6 +401,12 @@ class TestCreateTfWorkspace:
         assert variables["cloud_type"] == "2"
         assert variables["target_backup_vault_crn"] is None
 
+    def test_bucket_dict_without_workspace_key_still_creates_the_workspace(self, dag, happy_services, make_payload, state_manager):
+        happy_services.bucketService.get_bucket_by_sub_id.return_value = {"subscription_id": "sub-1"}
+        happy_services.schematics_service.create_or_update_ws.return_value = {"id": "ws-1"}
+
+        assert self.run(dag, make_payload(), state_manager) == "ws-1"
+
     def test_existing_workspace_is_reused(self, dag, happy_services, make_payload, state_manager):
         happy_services.bucketService.get_bucket_by_sub_id.return_value = {"workspace": {"workspace_id": "ws-old"}}
 

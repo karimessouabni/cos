@@ -229,6 +229,21 @@ class TestProcessBucketCreation:
         assert bucket.workspace.status == Status.INPROGRESS.value
         session.commit.assert_called_once()
         assert result["subscription_id"] == "sub-1"
+        assert result["workspace"]["action"] == Action.APPLY.value  # relation présente dans le dict renvoyé
+
+    def test_workspace_left_none_by_to_dict_is_read_back(self, session, monkeypatch):
+        """Même garantie que le getter : le DAG lit bucket["workspace"]["workspace_id"] juste après."""
+        payload = SimpleNamespace(
+            subscription_id="sub-1", requestor="karim", region="eu-de", storage_class="standard",
+            environment="dev", enable_custom_permissions=False,
+        )
+        monkeypatch.setattr(Bucket, "to_dict", lambda self: {"subscription_id": "sub-1", "workspace": None})
+        session.query.return_value.filter.return_value.one_or_none.return_value = Workspace(workspace_id=None)
+
+        result = svc.process_bucket_creation(payload, {}, fresh_immutability(), {}, "d", object(), None, session)
+
+        assert result["workspace"] == {"workspace_id": None}
+        session.query.assert_called_once_with(Workspace)
 
 
 class TestUpdates:

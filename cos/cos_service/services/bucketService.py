@@ -278,7 +278,9 @@ def process_bucket_creation(
     bucket.backup_vault = backup_vault
     session.add(bucket)
     session.commit()
-    return dict(bucket)
+    # Même forme que get_bucket_by_sub_id : l'original renvoyait dict(bucket),
+    # qui n'expose pas la relation workspace que le DAG lit juste après.
+    return _bucket_dict(session, bucket)
 
 
 def update_bucket_workspace_details(bucket: dict, create_ws_result: dict, session: SASession) -> None:
