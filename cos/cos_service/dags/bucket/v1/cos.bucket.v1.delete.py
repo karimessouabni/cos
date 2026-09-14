@@ -79,7 +79,6 @@ def bucket_delete():
         from cos_service.services.bucketService import (
             check_bucket_has_contents,
             get_bucket_by_sub_id,
-            get_bucket_workspace,
             update_bucket_status,
         )
         from cos_service.services.ibm_iam_service import get_iam_access_token
@@ -89,12 +88,9 @@ def bucket_delete():
         if bucket is None:
             raise DeclineDemandException(f"the bucket doesn't exist for the sub id {payload.subscription_id}")
 
-        # Ce que to_dict() a réellement sérialisé : permet de distinguer une
-        # relation absente du dict d'un workspace sans id en base.
         logger.info(
-            "bucket %s keys: %s, workspace: %r, cos loaded: %s, backup_vault: %r",
+            "bucket %s: workspace %r, cos loaded: %s, backup_vault %r",
             payload.subscription_id,
-            sorted(bucket),
             bucket.get("workspace"),
             bucket.get("cos") is not None,
             bucket.get("backup_vault"),
@@ -107,13 +103,9 @@ def bucket_delete():
             errors.append(f"the bucket is not fully created for the sub id {payload.subscription_id} (no name)")
         if not bucket["virtual_server_endpoint"]:
             errors.append("the bucket has no endpoint, its contents cannot be checked")
-        # Le workspace est relu dans sa table quand to_dict() ne l'a pas fourni,
-        # pour ne pas dépendre de la sérialisation des relations du modèle.
+        # get_bucket_by_sub_id garantit la clé "workspace" (relue dans sa table
+        # quand to_dict() ne la fournit pas) : None = aucune ligne rattachée.
         workspace = bucket.get("workspace")
-        if workspace is None:
-            workspace = get_bucket_workspace(session, payload.subscription_id)
-            logger.info("workspace read from its table for %s: %r", payload.subscription_id, workspace)
-            bucket["workspace"] = workspace
         if workspace is None:
             errors.append("no workspace row is attached to this bucket, its resources cannot be destroyed")
         elif workspace.get("workspace_id") is None:

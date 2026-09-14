@@ -80,6 +80,19 @@ def _bucket_relations():
     )
 
 
+def _bucket_dict(session: SASession, bucket: Bucket) -> dict:
+    """``to_dict()`` complété du workspace lu dans sa table.
+
+    Constaté en INT : ``Bucket.to_dict()`` rend ``workspace`` à None alors que
+    la ligne existe (``cos`` et ``backup_vault`` passent). Les DAGs lisent
+    ``bucket["workspace"]["workspace_id"]``, on le garantit ici.
+    """
+    bucket_dict = bucket.to_dict()
+    if bucket_dict.get("workspace") is None:
+        bucket_dict["workspace"] = get_bucket_workspace(session, bucket_dict["subscription_id"])
+    return bucket_dict
+
+
 def get_bucket_by_sub_id(session: SASession, subscription_id: str) -> Optional[dict]:
     """Bucket par subscription_id, en correspondance exacte, relations chargées.
 
@@ -92,7 +105,7 @@ def get_bucket_by_sub_id(session: SASession, subscription_id: str) -> Optional[d
         .filter(Bucket.subscription_id == subscription_id)
         .one_or_none()
     )
-    return bucket.to_dict() if bucket else None
+    return _bucket_dict(session, bucket) if bucket else None
 
 
 def get_bucket_by_name(session: SASession, name: str) -> Optional[dict]:
@@ -102,7 +115,7 @@ def get_bucket_by_name(session: SASession, name: str) -> Optional[dict]:
         .filter(Bucket.name == name)
         .one_or_none()
     )
-    return bucket.to_dict() if bucket else None
+    return _bucket_dict(session, bucket) if bucket else None
 
 
 def get_bucket_workspace(session: SASession, subscription_id: str) -> Optional[dict]:

@@ -45,12 +45,33 @@ class TestGetBucketBySubId:
         return session.query.return_value.options.return_value
 
     def test_exact_match_returns_a_dict(self, session):
-        row = Bucket(subscription_id="sub-1", name="bucket-a")
+        row = Bucket(subscription_id="sub-1", name="bucket-a", workspace={"workspace_id": "ws-1"})
         self.query(session).filter.return_value.one_or_none.return_value = row
 
-        assert svc.get_bucket_by_sub_id(session, "sub-1") == {"subscription_id": "sub-1", "name": "bucket-a"}
+        assert svc.get_bucket_by_sub_id(session, "sub-1") == {
+            "subscription_id": "sub-1", "name": "bucket-a", "workspace": {"workspace_id": "ws-1"}
+        }
         condition = self.query(session).filter.call_args.args[0]
         assert condition == ("==", "subscription_id", "sub-1")
+        session.query.assert_called_once_with(Bucket)  # pas de relecture du workspace
+
+    def test_workspace_left_none_by_to_dict_is_read_from_its_table(self, session):
+        row = Bucket(subscription_id="sub-1", name="bucket-a", workspace=None)
+        self.query(session).filter.return_value.one_or_none.return_value = row
+        workspace_query = session.query.return_value.filter.return_value.one_or_none
+        workspace_query.return_value = Workspace(workspace_id="ws-db", bucket_subscription_id="sub-1")
+
+        result = svc.get_bucket_by_sub_id(session, "sub-1")
+
+        assert result["workspace"] == {"workspace_id": "ws-db", "bucket_subscription_id": "sub-1"}
+        assert session.query.call_args_list[1].args == (Workspace,)
+
+    def test_workspace_stays_none_when_no_row_exists(self, session):
+        row = Bucket(subscription_id="sub-1", name="bucket-a", workspace=None)
+        self.query(session).filter.return_value.one_or_none.return_value = row
+        session.query.return_value.filter.return_value.one_or_none.return_value = None
+
+        assert svc.get_bucket_by_sub_id(session, "sub-1")["workspace"] is None
 
     def test_relations_read_by_the_dags_are_eager_loaded(self, session):
         self.query(session).filter.return_value.one_or_none.return_value = None

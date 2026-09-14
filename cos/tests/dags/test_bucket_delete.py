@@ -125,28 +125,13 @@ class TestValidateRequest:
         services.bucketService.check_bucket_has_contents.assert_not_called()
         services.bucketService.update_bucket_status.assert_not_called()
 
-    def test_workspace_missing_from_the_dict_is_read_from_its_table(self, delete_dag, empty_bucket, payload):
-        empty_bucket.bucketService.get_bucket_by_sub_id.return_value = bucket_row(workspace=None)
-        empty_bucket.bucketService.get_bucket_workspace.return_value = {"workspace_id": "ws-db"}
-
-        result = self.run(delete_dag, payload)
-
-        empty_bucket.bucketService.get_bucket_workspace.assert_called_once_with("session", "sub-1")
-        assert result["workspace"] == {"workspace_id": "ws-db"}
-
     def test_no_workspace_row_at_all_is_declined(self, delete_dag, empty_bucket, payload):
         empty_bucket.bucketService.get_bucket_by_sub_id.return_value = bucket_row(workspace=None)
-        empty_bucket.bucketService.get_bucket_workspace.return_value = None
 
         errors = self.errors_of(delete_dag, payload)
 
         assert errors == ["no workspace row is attached to this bucket, its resources cannot be destroyed"]
         empty_bucket.bucketService.update_bucket_status.assert_not_called()
-
-    def test_workspace_present_in_the_dict_is_not_read_again(self, delete_dag, empty_bucket, payload):
-        self.run(delete_dag, payload)
-
-        empty_bucket.bucketService.get_bucket_workspace.assert_not_called()
 
     def test_non_empty_bucket_is_locked_and_declined(self, delete_dag, empty_bucket, payload):
         empty_bucket.bucketService.check_bucket_has_contents.return_value = True
