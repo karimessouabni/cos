@@ -49,7 +49,8 @@ cos/
 │   ├── sql/                                     ← scripts SQL gérés à la main (cible Alembic)
 │   └── utils/
 ├── terraform/
-│   └── v1.12/bucket/main.tf          (déduit du tf_directory + onglet main.tf)
+│   ├── v1.12/backup_vault/main.tf                   ← reconstitué
+│   └── v1.12/bucket/main.tf                         ← reconstitué + corrigé (backup_policies)
 ├── tests/
 ├── .gitignore
 ├── __init__.py
