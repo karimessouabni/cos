@@ -119,9 +119,16 @@ class TestValidateRequest:
         assert errors == [
             "the bucket is not fully created for the sub id sub-1 (no name)",
             "the bucket has no endpoint, its contents cannot be checked",
-            "the bucket has no Terraform workspace, its resources cannot be destroyed",
+            "the bucket workspace has no Schematics id, its resources cannot be destroyed",
             "the bucket is not linked to a cos instance",
         ]
+
+    def test_workspace_relation_absent_from_the_dict_is_reported_as_such(self, delete_dag, empty_bucket, payload):
+        empty_bucket.bucketService.get_bucket_by_sub_id.return_value = bucket_row(workspace=None)
+
+        errors = self.errors_of(delete_dag, payload)
+
+        assert errors == ["the bucket row carries no workspace (relation not loaded or never created)"]
         services.bucketService.check_bucket_has_contents.assert_not_called()
         services.bucketService.update_bucket_status.assert_not_called()
 
@@ -140,7 +147,7 @@ class TestValidateRequest:
         errors = self.errors_of(delete_dag, payload)
 
         assert errors == [
-            "the bucket has no Terraform workspace, its resources cannot be destroyed",
+            "the bucket workspace has no Schematics id, its resources cannot be destroyed",
             "The bucket bucket-a is not empty",
         ]
 

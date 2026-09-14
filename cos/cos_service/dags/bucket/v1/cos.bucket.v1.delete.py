@@ -88,6 +88,17 @@ def bucket_delete():
         if bucket is None:
             raise DeclineDemandException(f"the bucket doesn't exist for the sub id {payload.subscription_id}")
 
+        # Ce que to_dict() a réellement sérialisé : permet de distinguer une
+        # relation absente du dict d'un workspace sans id en base.
+        logger.info(
+            "bucket %s keys: %s, workspace: %r, cos loaded: %s, backup_vault: %r",
+            payload.subscription_id,
+            sorted(bucket),
+            bucket.get("workspace"),
+            bucket.get("cos") is not None,
+            bucket.get("backup_vault"),
+        )
+
         errors = []
 
         # --- the bucket must have been fully created --------------------------
@@ -95,8 +106,11 @@ def bucket_delete():
             errors.append(f"the bucket is not fully created for the sub id {payload.subscription_id} (no name)")
         if not bucket["virtual_server_endpoint"]:
             errors.append("the bucket has no endpoint, its contents cannot be checked")
-        if not bucket.get("workspace") or bucket["workspace"].get("workspace_id") is None:
-            errors.append("the bucket has no Terraform workspace, its resources cannot be destroyed")
+        workspace = bucket.get("workspace")
+        if workspace is None:
+            errors.append("the bucket row carries no workspace (relation not loaded or never created)")
+        elif workspace.get("workspace_id") is None:
+            errors.append("the bucket workspace has no Schematics id, its resources cannot be destroyed")
         if not bucket.get("cos"):
             errors.append("the bucket is not linked to a cos instance")
 
