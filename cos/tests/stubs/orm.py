@@ -63,11 +63,26 @@ Bucket = _model(
 )
 Cos = _model("Cos", "subscription_id", "context", "workspace")
 Workspace = _model("Workspace", "bucket_subscription_id", "workspace_id")
+BackupVault = _model("BackupVault", "subscription_id", "name")
+BackupVaultRestore = _model("BackupVaultRestore", "id", "subscription_id", "status")
 
 
 class Action(str, Enum):
     APPLY = "apply"
     DESTROY = "destroy"
+
+
+class RestoreStatus(str, Enum):
+    REQUESTED = "requested"
+    RUNNING = "running"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class PokeReturnValue:
+    def __init__(self, is_done: bool, xcom_value=None):
+        self.is_done = is_done
+        self.xcom_value = xcom_value
 
 
 class FakeUpdate:

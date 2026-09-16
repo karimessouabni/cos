@@ -21,7 +21,7 @@ cos/
 │   │   │       ├── cos.bucket.v1.delete_lifecycle_policy_rule.py
 │   │   │       ├── cos.bucket.v1.force_clean.py
 │   │   │       ├── cos.bucket.v1.refresh_restore_ranges.py
-│   │   │       ├── cos.bucket.v1.restore.py
+│   │   │       ├── cos.bucket.v1.restore.py                     ← reconstitué (+ restore_point_in_time)
 │   │   │       ├── cos.bucket.v1.update.py                      ← reconstitué + corrigé
 │   │   │       └── cos.bucket.v1.update_lifecycle_policy_rule.py
 │   │   ├── bucket_migration/
@@ -43,6 +43,7 @@ cos/
 │   │   ├── contextService.py         (déduit)  get_realm, get_apcodes, get_account_instances_crn
 │   │   ├── cosService.py             (déduit)  get_cos_instance_by_name, get_cos_instance_status
 │   │   ├── immutability_service.py              ← reconstitué
+│   │   ├── recovery_range_service.py            ← nouveau : point de restauration et choix du range
 │   │   ├── schematics_service.py                ← reconstitué + corrigé (create_or_update_ws, update_ws, update_ws_variables, run_workspace)
 │   │   ├── vault_service.py          (déduit)  get_vault_secrets
 │   │   └── workspaceService.py       (déduit)  update_bucket_workspace, build_bucket_workspace_details

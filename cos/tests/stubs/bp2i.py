@@ -261,3 +261,5 @@ DAG_OVERRIDES = (
     "airflow.sensors",
     "airflow.sensors.date_time",  # le vrai sensor exige un contexte de DAG
 )
+# NB : airflow.sensors.base (PokeReturnValue) n'est pas remplacé : la doublure
+# n'est installée que si le vrai module manque (conftest).

@@ -76,7 +76,13 @@ _install_if_missing("sqlalchemy.orm", _sqlalchemy_orm)
 _models = _schema_module("cos_service.models")
 _models.__path__ = []
 _install_if_missing("cos_service.models", _models)
-for _model_name, _model_cls in (("Bucket", orm_stubs.Bucket), ("Cos", orm_stubs.Cos), ("Workspace", orm_stubs.Workspace)):
+for _model_name, _model_cls in (
+    ("Bucket", orm_stubs.Bucket),
+    ("Cos", orm_stubs.Cos),
+    ("Workspace", orm_stubs.Workspace),
+    ("BackupVault", orm_stubs.BackupVault),
+    ("BackupVaultRestore", orm_stubs.BackupVaultRestore),
+):
     _install_if_missing(
         f"cos_service.models.{_model_name}",
         _schema_module(f"cos_service.models.{_model_name}", **{_model_name: _model_cls}),
@@ -85,6 +91,15 @@ _install_if_missing(
     "cos_service.schemas.action",
     _schema_module("cos_service.schemas.action", Action=orm_stubs.Action),
 )
+_install_if_missing(
+    "cos_service.schemas.restore_status",
+    _schema_module("cos_service.schemas.restore_status", RestoreStatus=orm_stubs.RestoreStatus),
+)
+_sensors_base = _schema_module("airflow.sensors.base", PokeReturnValue=orm_stubs.PokeReturnValue)
+_install_if_missing("airflow.sensors.base", _sensors_base)
+_repository = _schema_module("cos_service.repository")
+_repository.__path__ = []
+_install_if_missing("cos_service.repository", _repository)
 _install_if_missing(
     "cos_service.schemas.bucket_backup",
     _schema_module("cos_service.schemas.bucket_backup", BucketBackup=schema_stubs.BucketBackup),
@@ -110,6 +125,7 @@ SERVICE_MODULES = (
     "backup_vault_service",
     "bucketService",
     "ibm_iam_service",
+    "restore_service",
     "schematics_service",
     "vault_service",
     "workspaceService",
@@ -126,6 +142,9 @@ def services(monkeypatch):
         monkeypatch.setitem(sys.modules, f"cos_service.services.{name}", mock)
         mocks[name] = mock
     mocks["schematics_service"].TERRAFORM_VERSION = "1.12"
+    restore_repository = MagicMock(name="backup_vault_restore_repository")
+    monkeypatch.setitem(sys.modules, "cos_service.repository.backup_vault_restore_repository", restore_repository)
+    mocks["backup_vault_restore_repository"] = restore_repository
     return SimpleNamespace(**mocks)
 
 
