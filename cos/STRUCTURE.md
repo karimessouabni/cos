@@ -7,6 +7,9 @@ référencés par les imports des fichiers reconstitués.
 ```
 cos/
 ├── .venv/
+├── cos-subscriptions/
+│   ├── subscriptions_cleanup.py      ← nettoyage des souscriptions orchestrator (--delete, --locked)
+│   └── test_subscriptions_cleanup.py
 ├── cos_service/
 │   ├── __init__.py
 │   ├── dags/
