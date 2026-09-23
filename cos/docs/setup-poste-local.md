@@ -183,6 +183,36 @@ poetry config http-basic.ap43584-pypi-local <login> "<token>"
 
 Poetry range les identifiants dans le trousseau macOS ou dans
 `~/Library/Application Support/pypoetry/auth.toml`, jamais dans le projet.
+Si Poetry reste en 401 alors que curl passe, forcer le stockage en fichier ou
+passer par les variables d'environnement, que Poetry lit en priorité :
+
+```bash
+poetry config keyring.enabled false
+# ou
+export POETRY_HTTP_BASIC_ARTIFACTORY_PYPI_USERNAME="<login>"
+export POETRY_HTTP_BASIC_ARTIFACTORY_PYPI_PASSWORD="<token>"
+export POETRY_HTTP_BASIC_AP43584_PYPI_LOCAL_USERNAME="<login>"
+export POETRY_HTTP_BASIC_AP43584_PYPI_LOCAL_PASSWORD="<token>"
+```
+
+### 401 ou 403 : ce n'est pas la même chose
+
+| Code | Sens | Quoi faire |
+|---|---|---|
+| `401` | Identifiants absents ou faux | Vérifier login (matricule ou mail) et jeton, en regénérer un |
+| `403` | Compte reconnu mais **pas de droit de lecture** sur le dépôt | Demander l'accès (voir ci-dessous) |
+
+Pour confirmer que le compte est authentifié et voir les dépôts visibles :
+
+```bash
+curl -sS -u "<login>:<token>" \
+  https://repo.artifactory-dogen.group.echonet.net.intra/artifactory/api/repositories
+```
+
+Si `pypi` et `ap43584-pypi-local` n'apparaissent pas, demander l'accès en
+lecture à ces deux dépôts (permission target AP43584, code application de
+l'orchestrateur) à l'équipe propriétaire, via ticket. En attendant, les tests
+tournent avec les stubs (section 7).
 
 Optionnel, pour `pip` seul (`~/.config/pip/pip.conf`, droits `600`, jamais versionné) :
 
@@ -280,4 +310,5 @@ poetry run mypy cos_service
 | `Could not find a suitable TLS CA certificate bundle` | `REQUESTS_CA_BUNDLE` pointe vers un fichier absent | 3.3 |
 | `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain` | CA interne inconnue de Python | 3.3 |
 | `401` sur Artifactory | Identifiants manquants ou faux | 4 |
+| `403` sur Artifactory | Compte reconnu, pas de droit de lecture sur le dépôt | 4 |
 | Installeur Python demande un mot de passe admin | `.pkg` python.org, y compris via PyCharm | 1 |
