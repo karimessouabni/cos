@@ -43,10 +43,15 @@ python3 -m pip install -r requirements-test.txt                  # = pytest
 # premier test : le DAG create déclare bien ses 6 étapes dans l'ordre
 python3 -m pytest tests/dags/test_bucket_create.py::test_dag_declares_the_expected_steps_in_order -v
 
-# tout le DAG create (39 tests), puis toute la suite
+# tout le DAG create (39 tests par étape), puis les 7 scénarios bout-en-bout, puis toute la suite
 python3 -m pytest tests/dags/test_bucket_create.py -v
+python3 -m pytest tests/dags/test_bucket_create_scenario.py -v
 python3 -m pytest
 ```
+
+`test_bucket_create_scenario.py` enchaîne les six étapes dans l'ordre du DAG
+avec `run_create_dag()` : chemin nominal, backup vault, workspace existant,
+demande déclinée, échec Terraform. C'est le modèle à copier pour les autres DAGs.
 
 Si `pip` est bloqué par le proxy, `pytest` est sans doute déjà présent dans le
 venv du projet (`requirements-dev.txt`). Le test `compute_target_time` du DAG
