@@ -68,7 +68,9 @@ COS_TESTS_FORCE_STUBS=0 python3 -m pytest -m integration tests/integration -v
 ```
 
 Il est exclu du run par défaut (`-m "not integration"` dans `pytest.ini`) et
-s'ignore tout seul si Airflow ou la lib manquent. Si le framework bp2i lit
+s'ignore tout seul si Airflow ou la lib manquent. La lib lit `ENVIRONMENT` et
+`DEFAULT_PRODUCT_BRANCH` dans l'environnement dès son import : le test les
+positionne à `int` et `main` s'ils sont absents. Si le framework bp2i lit
 des Variables ou Connections Airflow au parsing, ce test le montrera : c'est
 le premier point à vérifier avant de le mettre en CI.
 

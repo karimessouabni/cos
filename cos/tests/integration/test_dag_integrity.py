@@ -26,16 +26,26 @@ def _real_module_or_skip(name: str):
     return module
 
 
+# bp2i_airflow_library/config/environment.py lit ces variables à l'import
+# (os.environ[...] sans défaut) : sans elles, importer la lib lève KeyError.
+LIB_ENV_DEFAULTS = {
+    "ENVIRONMENT": "int",
+    "DEFAULT_PRODUCT_BRANCH": "main",
+    "AIRFLOW__CORE__UNIT_TEST_MODE": "True",
+    "AIRFLOW__CORE__LOAD_EXAMPLES": "False",
+}
+
+
 @pytest.fixture(scope="module")
 def dagbag():
     if os.environ.get("COS_TESTS_FORCE_STUBS", "1") != "0":
         pytest.skip("doublures actives : relancer avec COS_TESTS_FORCE_STUBS=0")
+    for key, value in LIB_ENV_DEFAULTS.items():
+        os.environ.setdefault(key, value)
     _real_module_or_skip("bp2i_airflow_library")
     _real_module_or_skip("airflow")
     from airflow.models import DagBag
 
-    os.environ.setdefault("AIRFLOW__CORE__UNIT_TEST_MODE", "True")
-    os.environ.setdefault("AIRFLOW__CORE__LOAD_EXAMPLES", "False")
     return DagBag(dag_folder=str(DAGS_DIR), include_examples=False)
 
 
