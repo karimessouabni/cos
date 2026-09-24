@@ -6,8 +6,17 @@ Ces tests chargent les DAGs et les services **sans** `bp2i_airflow_library`,
 ## Comment ça marche
 
 - `conftest.py` met la racine du projet dans `sys.path` et installe des
-  doublures (`tests/stubs/`) **uniquement** pour les modules qui ne s'importent
-  pas. Sur un poste où les vraies libs sont installées, rien n'est remplacé.
+  doublures (`tests/stubs/`) à deux niveaux :
+  - **toujours**, pour la frontière d'infrastructure dont les tests unitaires
+    dépendent : `bp2i_airflow_library`, `bp2i_terraform`, `airflow`,
+    `sqlalchemy` et les modèles `cos_service.models.*`. Même avec le venv
+    complet, un test unitaire ne parle pas à une base ni à Airflow ;
+  - **seulement si le vrai module manque**, pour le code projet :
+    `cos_service.schemas.*`, `cos_service.utils.*`, `cos_service.repository.*`.
+    Sur le venv complet, ce sont les vrais schémas et constantes.
+  - `COS_TESTS_FORCE_STUBS=0` désactive le premier niveau (tout ce qui existe
+    reste réel) : utile pour `tests/integration`, pas pour les unitaires.
+- Les services et les étapes de DAG testés sont toujours le vrai code.
 - `stubs/bp2i.py` remplace les deux décorateurs du framework : `@step`
   enregistre la fonction Python brute de chaque étape au lieu de construire une
   tâche Airflow, et `depends(...)` vaut `None`. Chaque étape d'un DAG devient
@@ -42,6 +51,21 @@ python3 -m pytest
 Si `pip` est bloqué par le proxy, `pytest` est sans doute déjà présent dans le
 venv du projet (`requirements-dev.txt`). Le test `compute_target_time` du DAG
 update est ignoré (`skipped`) quand `pendulum` n'est pas installé.
+
+## Avec le venv complet (lib bp2i, Airflow, SQLAlchemy installés)
+
+Les unitaires se lancent pareil, `python3 -m pytest`, et restent isolés de
+l'infrastructure. En plus, `tests/integration/test_dag_integrity.py` charge
+les DAGs avec le **vrai** framework via le `DagBag` Airflow :
+
+```bash
+COS_TESTS_FORCE_STUBS=0 python3 -m pytest -m integration tests/integration -v
+```
+
+Il est exclu du run par défaut (`-m "not integration"` dans `pytest.ini`) et
+s'ignore tout seul si Airflow ou la lib manquent. Si le framework bp2i lit
+des Variables ou Connections Airflow au parsing, ce test le montrera : c'est
+le premier point à vérifier avant de le mettre en CI.
 
 ## Écrire un test d'étape
 

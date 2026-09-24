@@ -1,16 +1,26 @@
 """Configuration pytest commune.
 
-* met la racine ``cos/`` dans ``sys.path`` pour importer ``cos_service`` ;
-* installe les doublures de ``tests/stubs`` pour chaque module externe ou
-  déduit qui n'est pas importable dans l'environnement courant. Sur le projet
-  complet, rien n'est remplacé et les tests tournent contre le vrai code.
+* met la racine du projet dans ``sys.path`` pour importer ``cos_service`` ;
+* installe les doublures de ``tests/stubs`` :
+  - TOUJOURS (sauf ``COS_TESTS_FORCE_STUBS=0``) pour la frontière
+    d'infrastructure dont les tests unitaires dépendent : le framework
+    ``bp2i_airflow_library`` / ``bp2i_terraform``, ``airflow``, ``sqlalchemy``
+    et les modèles ``cos_service.models.*`` (enregistreur ``update``, colonnes
+    comparables, ``to_dict`` prévisible) ;
+  - SEULEMENT si le vrai module manque pour le code projet (``cos_service.schemas``,
+    ``cos_service.utils``, ``cos_service.repository``) : sur un venv complet,
+    les tests tournent contre les vrais schémas et constantes.
+
+Les services et les étapes de DAG testés sont toujours le vrai code.
 
 Lancement :
 
-    python -m pytest tests
+    python -m pytest                                   # unitaires
+    COS_TESTS_FORCE_STUBS=0 python -m pytest -m integration   # DagBag réel (venv complet)
 """
 import importlib
 import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
@@ -29,11 +39,22 @@ DAGS_DIR = ROOT / "cos_service" / "dags" / "bucket" / "v1"
 DAG_PATH = DAGS_DIR / "cos.bucket.v1.create.py"
 
 
+FORCE_STUBS = os.environ.get("COS_TESTS_FORCE_STUBS", "1") != "0"
+
+
 def _install_if_missing(name: str, module: types.ModuleType) -> None:
     try:
         importlib.import_module(name)
     except ImportError:
         sys.modules[name] = module
+
+
+def _install_forced(name: str, module: types.ModuleType) -> None:
+    """Doublure d'infrastructure : remplace le vrai module, sauf COS_TESTS_FORCE_STUBS=0."""
+    if FORCE_STUBS:
+        sys.modules[name] = module
+    else:
+        _install_if_missing(name, module)
 
 
 def _schema_module(name: str, **attrs) -> types.ModuleType:
@@ -44,7 +65,7 @@ def _schema_module(name: str, **attrs) -> types.ModuleType:
 
 
 for _name, _module in bp2i.build_modules().items():
-    _install_if_missing(_name, _module)
+    _install_forced(_name, _module)
 
 _install_if_missing(
     "cos_service.schemas.bucket_retention",
@@ -70,12 +91,12 @@ _sqlalchemy = _schema_module("sqlalchemy", update=orm_stubs.update)
 _sqlalchemy.__path__ = []
 _sqlalchemy_orm = _schema_module("sqlalchemy.orm", joinedload=orm_stubs.joinedload)
 _sqlalchemy.orm = _sqlalchemy_orm
-_install_if_missing("sqlalchemy", _sqlalchemy)
-_install_if_missing("sqlalchemy.orm", _sqlalchemy_orm)
+_install_forced("sqlalchemy", _sqlalchemy)
+_install_forced("sqlalchemy.orm", _sqlalchemy_orm)
 
 _models = _schema_module("cos_service.models")
 _models.__path__ = []
-_install_if_missing("cos_service.models", _models)
+_install_forced("cos_service.models", _models)
 for _model_name, _model_cls in (
     ("Bucket", orm_stubs.Bucket),
     ("Cos", orm_stubs.Cos),
@@ -83,7 +104,7 @@ for _model_name, _model_cls in (
     ("BackupVault", orm_stubs.BackupVault),
     ("BackupVaultRestore", orm_stubs.BackupVaultRestore),
 ):
-    _install_if_missing(
+    _install_forced(
         f"cos_service.models.{_model_name}",
         _schema_module(f"cos_service.models.{_model_name}", **{_model_name: _model_cls}),
     )
