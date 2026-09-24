@@ -57,6 +57,29 @@ Si `pip` est bloqué par le proxy, `pytest` est sans doute déjà présent dans 
 venv du projet (`requirements-dev.txt`). Le test `compute_target_time` du DAG
 update est ignoré (`skipped`) quand `pendulum` n'est pas installé.
 
+## Couverture de tests
+
+En ligne de commande, avec `pytest-cov` (dans `requirements-test.txt`) et la
+configuration de `.coveragerc` (source `cos_service/`, branches comprises) :
+
+```bash
+python3 -m pytest --cov --cov-report=term-missing      # tableau + lignes manquantes
+python3 -m pytest --cov --cov-report=html              # rapport navigable : htmlcov/index.html
+python3 -m pytest --cov --cov-report=xml               # coverage.xml pour GitLab CI / SonarQube
+```
+
+Les DAGs chargés par chemin par la fixture `dag` sont bien comptés. Point de
+départ mesuré sur ce dépôt : 92,6 % sur `cos_service/`, les 7,4 % restants
+étant surtout le DAG restore. Pour bloquer la CI sous un seuil, ajouter
+`--cov-fail-under=90` (partir du niveau mesuré, puis remonter).
+
+Dans PyCharm : clic droit sur `tests/` ou sur un fichier de test, puis
+« Run 'pytest in tests' with Coverage » (icône bouclier à côté du bouton Run).
+Le pourcentage s'affiche par dossier dans l'explorateur de projet et les
+lignes non couvertes sont surlignées en rouge dans l'éditeur. PyCharm utilise
+son propre runner de couverture : ne pas mettre `--cov` dans `addopts` de
+`pytest.ini`, les deux entreraient en conflit.
+
 ## Avec le venv complet (lib bp2i, Airflow, SQLAlchemy installés)
 
 Les unitaires se lancent pareil, `python3 -m pytest`, et restent isolés de

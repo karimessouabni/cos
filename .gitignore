@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .idea/
 .pytest_cache/
+
+# couverture de tests
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
