@@ -40,8 +40,8 @@ cd ~/PycharmProjects/cos
 python3 -m venv .venv-tests && source .venv-tests/bin/activate   # optionnel
 python3 -m pip install -r requirements-test.txt                  # = pytest
 
-# premier test : le DAG create déclare bien ses 6 étapes dans l'ordre
-python3 -m pytest tests/dags/test_bucket_create.py::test_dag_declares_the_expected_steps_in_order -v
+# premier test : trois cas simples sur le DAG create
+python3 -m pytest tests/dags/test_bucket_create_smoke.py -v
 
 # tout le DAG create (39 tests par étape), puis les 7 scénarios bout-en-bout, puis toute la suite
 python3 -m pytest tests/dags/test_bucket_create.py -v

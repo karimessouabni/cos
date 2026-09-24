@@ -220,12 +220,16 @@ def _load_dag_with_real_library(monkeypatch, filename: str) -> SimpleNamespace:
     real_dag_cls = product_action_module.DAG
     created: list = []
 
-    class RecordingDAG(real_dag_cls):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            created.append(self)
+    # product_action instancie BP2I_Dag(DAG), une sous-classe définie à l'import du
+    # module : on enregistre les instances depuis __init__ de la classe de base,
+    # que la sous-classe appelle via super().__init__.
+    original_init = real_dag_cls.__init__
 
-    monkeypatch.setattr(product_action_module, "DAG", RecordingDAG)
+    def recording_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(real_dag_cls, "__init__", recording_init)
 
     module_name = filename.replace(".", "_")
     spec = importlib.util.spec_from_file_location(module_name, DAGS_DIR / filename)
