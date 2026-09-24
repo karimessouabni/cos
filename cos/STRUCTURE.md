@@ -8,7 +8,7 @@ référencés par les imports des fichiers reconstitués.
 cos/
 ├── .venv/
 ├── cos-subscriptions/
-│   ├── subscriptions_cleanup.py      ← nettoyage des souscriptions orchestrator (--delete, --locked)
+│   ├── subscriptions_cleanup.py      ← nettoyage des souscriptions orchestrator (--delete, --on-error)
 │   └── test_subscriptions_cleanup.py
 ├── cos_service/
 │   ├── __init__.py
@@ -55,7 +55,13 @@ cos/
 ├── terraform/
 │   ├── v1.12/backup_vault/main.tf                   ← reconstitué
 │   └── v1.12/bucket/main.tf                         ← reconstitué + corrigé (backup_policies)
-├── tests/
+├── tests/                            ← tests unitaires sans les libs internes (voir tests/README.md)
+│   ├── conftest.py                       stubs installés seulement si le vrai module manque
+│   ├── stubs/                            bp2i.py (step/depends), orm.py (sqlalchemy, modèles), schemas.py
+│   ├── dags/                             test_bucket_create.py, _delete.py, _update.py, _restore.py
+│   └── services/
+├── pytest.ini
+├── requirements-test.txt
 ├── .gitignore
 ├── __init__.py
 ├── poetry.lock

@@ -1,0 +1,3 @@
+# Seule dépendance nécessaire pour lancer tests/ sans les libs internes
+# (bp2i_airflow_library, bp2i_terraform, Airflow, SDK IBM) : voir tests/README.md
+pytest>=8

@@ -98,6 +98,7 @@ def test_payload_defaults(make_payload):
 
 
 def test_compute_target_time_is_iso8601_in_paris_time(update_dag, make_payload):
+    pytest.importorskip("pendulum", reason="pendulum (dépendance Airflow) absent de cet environnement")
     result = update_dag.steps["compute_target_time"](payload=make_payload(scheduling_update_date_time="2026-01-15T10:00:00.000"))
 
     assert result == "2026-01-15T10:00:00+01:00"
