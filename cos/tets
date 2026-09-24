@@ -1,3 +1,3 @@
-LIB=$(dirname $(/chemin/vers/venv310/bin/python -c "import bp2i_airflow_library as m; print(m.__file__)"))
-cat "$LIB/dag.py" "$LIB/dependencies/__init__.py" "$LIB/airflow/decorators/__init__.py"
-grep -rn "def airflow_decorator_factory" "$LIB"
+LIB=.venv/lib/python3.14/site-packages/bp2i_airflow_library
+ls "$LIB" "$LIB/airflow" "$LIB/airflow/decorators"
+cat "$LIB/dag.py" "$LIB/dependencies.py" "$LIB/airflow/decorators/product_action.py"
