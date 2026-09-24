@@ -74,6 +74,28 @@ positionne à `int` et `main` s'ils sont absents. Si le framework bp2i lit
 des Variables ou Connections Airflow au parsing, ce test le montrera : c'est
 le premier point à vérifier avant de le mettre en CI.
 
+## Tests de DAG contre la vraie lib (expérimental)
+
+Avec `COS_TESTS_FORCE_STUBS=0` et la lib importable, la fixture `load_dag`
+n'utilise plus les doublures : le vrai `product_action` construit le DAG
+Airflow, puis chaque étape est retrouvée dans `dag.tasks` via `python_callable`,
+déballé de ses wrappers (`__wrapped__`). Les mêmes tests tournent alors sur
+les vrais décorateurs :
+
+```bash
+COS_TESTS_FORCE_STUBS=0 python -m pytest tests/dags/test_bucket_create.py -v
+```
+
+Deux échecs possibles, tous deux explicites dans le message d'erreur :
+- `product_action n'a construit aucun DAG` : le décorateur ne passe pas par
+  `DAG(...)` de `version_compat` ni ne dépose le DAG dans les globals ;
+- `aucune étape retrouvée` : le wrapper de `@step` n'expose pas `__wrapped__`.
+  Il faut alors adapter `_unwrap()` dans `conftest.py` au wrapper réel.
+
+Le test `test_dag_declares_the_expected_steps_in_order` ne compte que les
+étapes définies dans le fichier du DAG ; les tâches ajoutées par le framework
+(bootstrap, notify...) sont listées dans `dag.framework_tasks`.
+
 ## Écrire un test d'étape
 
 ```python
