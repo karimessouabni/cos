@@ -106,7 +106,7 @@ def apply_choice_unit(
 
 
 def compute_bucket_new_immutability(
-        immutability_choice: Immutability,
+        immutability_choice: Immutability | None,
         payload_retention: BucketRetention,
         object_lock_duration_days: int,
         object_lock_duration_years: int,
@@ -119,8 +119,11 @@ def compute_bucket_new_immutability(
     Sans choix explicite dans le payload, le choix est déduit de ce qui est
     saisi : rétention -> RETENTION, durée d'object-lock -> OBJECT_LOCK, sinon
     NONE (seule la bascule de versioning est appliquée).
+
+    Un choix absent (None) est traité comme NONE : c'est le seul endroit où
+    la valeur est normalisée, tout ce qui est appelé en dessous reçoit un enum.
     """
-    if immutability_choice is Immutability.NONE:
+    if immutability_choice is None or immutability_choice is Immutability.NONE:
         immutability_choice = _infer_immutability_choice(
             payload_retention, object_lock_duration_days, object_lock_duration_years
         )
@@ -146,6 +149,10 @@ def compute_bucket_new_immutability(
 
     if _backup_requested(backup):
         immutability = compute_bucket_backup(immutability, backup)
+
+    # The resolved choice (explicit or inferred, with its unit) is the one the
+    # callers must persist: they must not re-infer it from the payload.
+    immutability["immutability_choice"] = immutability_choice.value
 
     logging.info(f"compute_bucket_new_immutability : {immutability}")
     return immutability
@@ -350,6 +357,7 @@ def compute_bucket_immutability_for_update_bucket(bucket: dict, session) -> dict
         object_lock_duration_years = None
 
     immutability = {
+        "immutability_choice": compute_bucket_immutability_choice(bucket).value,
         "object_locking_enabled": object_lock_duration_days is not None or object_lock_duration_years is not None,
         "object_versioning_enabled": bool(bucket.get("object_versioning_enabled")),
         "object_lock_duration_days": object_lock_duration_days,
@@ -537,17 +545,30 @@ def _retention_from_bucket(bucket: dict) -> dict:
         **{key: bucket[f"retention_{key}"] if enabled else None for key in _RETENTION_KEYS},
     }
 
+def _backup_vault_sub_id(bucket: dict):
+    """Subscription id du vault de backup d'une ligne bucket.
+
+    ``Bucket.to_dict()`` ne sérialise pas la colonne ``backup_vault_subscription_id``
+    mais la relation ``backup_vault`` (KeyError constaté en INT) : on lit la
+    relation d'abord, la colonne en repli.
+    """
+    backup_vault = bucket.get("backup_vault")
+    if backup_vault:
+        return backup_vault["subscription_id"]
+    return bucket.get("backup_vault_subscription_id")
+
+
 def _backup_from_bucket(bucket: dict, session) -> dict:
-    """Bloc backup depuis la ligne bucket ; le vault n'est résolu que si nécessaire."""
+    """Bloc backup depuis la ligne bucket, sans requête : l'id du vault y est déjà."""
     if not bucket["backup_enabled"]:
         return {"backup_enabled": False, "backup_vault_sub_id": None, "backup_retention_days": None}
 
-    from cos_service.services.backup_vault_service import get_backup_vault_by_sub_id
-
-    backup_vault = get_backup_vault_by_sub_id(bucket["backup_vault_subscription_id"], session)
+    backup_vault_sub_id = _backup_vault_sub_id(bucket)
+    if backup_vault_sub_id is None:
+        logging.warning("bucket %s has backup enabled but no backup vault attached", bucket.get("subscription_id"))
     return {
         "backup_enabled": True,
-        "backup_vault_sub_id": backup_vault.subscription_id,
+        "backup_vault_sub_id": backup_vault_sub_id,
         "backup_retention_days": bucket["backup_retention_days"],
     }
 
