@@ -53,6 +53,7 @@ cos/
 │   ├── sql/                                     ← scripts SQL gérés à la main (cible Alembic)
 │   └── utils/
 ├── terraform/
+│   ├── README.md                     ← chaîne DAG -> Schematics -> modules, schémas et points d'attention
 │   ├── v1.12/backup_vault/main.tf                   ← reconstitué
 │   └── v1.12/bucket/main.tf                         ← reconstitué + corrigé (backup_policies)
 ├── tests/                            ← tests unitaires sans les libs internes (voir tests/README.md)
