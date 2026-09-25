@@ -177,6 +177,7 @@ def build_modules() -> dict[str, types.ModuleType]:
         return None
 
     root = types.ModuleType("bp2i_airflow_library")
+    root.__path__ = []  # paquet : un sous-module inconnu donne "No module named" et non "is not a package"
     root.add_project_to_path = lambda: None
 
     config = types.ModuleType("bp2i_airflow_library.config")
@@ -216,11 +217,18 @@ def build_modules() -> dict[str, types.ModuleType]:
     schemas.ProductActionConfig = ProductActionConfig
 
     terraform = types.ModuleType("bp2i_terraform")
+    terraform.__path__ = []
     backends = types.ModuleType("bp2i_terraform.backends")
+    backends.__path__ = []
     schematics = types.ModuleType("bp2i_terraform.backends.schematics")
     schematics.TerraformVar = TerraformVar
     schematics.VCS = VCS
+    # le vrai schematics_service importe VCS depuis bp2i_terraform.schemas
+    tf_schemas = types.ModuleType("bp2i_terraform.schemas")
+    tf_schemas.TerraformVar = TerraformVar
+    tf_schemas.VCS = VCS
     components = types.ModuleType("bp2i_terraform.components")
+    components.__path__ = []
     cooldown = types.ModuleType("bp2i_terraform.components.cooldown_policies")
     cooldown.LinearCooldownPolicy = LinearCooldownPolicy
 
@@ -247,6 +255,7 @@ def build_modules() -> dict[str, types.ModuleType]:
         "bp2i_terraform": terraform,
         "bp2i_terraform.backends": backends,
         "bp2i_terraform.backends.schematics": schematics,
+        "bp2i_terraform.schemas": tf_schemas,
     }
 
 
