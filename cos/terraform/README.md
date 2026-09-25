@@ -187,6 +187,73 @@ flowchart LR
 Les tokens sont passés comme `TerraformVar(valeur, sensitive=True)` : Schematics
 les stocke chiffrés et ne les affiche jamais dans les logs.
 
+### 4 bis. Trois `variables.tf`, aucun ne recharge l'autre
+
+Il y a un fichier `variables.tf` par niveau, et chacun est la **signature**
+de ce niveau : ce qu'il accepte en entrée, avec un type et un éventuel
+défaut. Aucun niveau ne va chercher de valeur tout seul ; à chaque passage,
+quelqu'un écrit explicitement la ligne qui transmet, comme des appels de
+fonction imbriqués avec des arguments nommés.
+
+```mermaid
+flowchart TB
+    subgraph L1["Niveau 1 : DAG → module racine"]
+        D["DAG : variables = {kms_key_crn: ..., retention: {...}}"]
+        S["Schematics : stocke sur le workspace, injecte en tfvars à l'apply"]
+        V1["terraform/v1.12/bucket/variables.tf<br/>variable &quot;kms_key_crn&quot; {}<br/>variable &quot;retention&quot; { type = object }"]
+        D --> S --> V1
+    end
+    subgraph L2["Niveau 2 : module racine → terraform-module-cos"]
+        M1["terraform/v1.12/bucket/main.tf<br/>module &quot;bucket&quot; {<br/>&nbsp;&nbsp;kms_key_crn = var.kms_key_crn<br/>&nbsp;&nbsp;retention_default = var.retention.default<br/>}"]
+        V2["terraform-module-cos/variables.tf<br/>variable &quot;kms_key_crn&quot; { default = null }<br/>variable &quot;retention_default&quot; { default = null }<br/>variable &quot;hard_quota&quot; { default = -1 }"]
+        M1 --> V2
+    end
+    subgraph L3["Niveau 3 : terraform-module-cos → terraform-ibm-cos → provider"]
+        M2["terraform-module-cos/main.tf : même mécanisme"]
+        R["ibm_cos_bucket { retention_rule { default = ... } }"]
+        M2 --> R
+    end
+    V1 -- "var.xxx" --> M1
+    V2 -- "var.xxx" --> M2
+```
+
+Règles de correspondance, identiques à chaque niveau :
+
+| Situation | Effet |
+|---|---|
+| Valeur fournie et variable déclarée | la valeur est prise |
+| Valeur fournie, variable non déclarée | ignorée, avertissement `Value for undeclared variable` (niveau 1) ou erreur `Unsupported argument` (niveaux 2 et 3) |
+| Variable déclarée avec `default`, valeur non fournie | le défaut du `variables.tf` de **ce** niveau s'applique |
+| Variable déclarée sans `default`, valeur non fournie | échec du plan, `No value for required variable` |
+| Noms différents entre deux niveaux | permis, c'est le bloc `module` qui fait le lien, ex. `retention_default = var.retention.default` |
+
+Le chemin complet d'une valeur, la rétention par défaut :
+
+```text
+payload.retention.default_days = 30
+  → immutability_service : conversion en jours                      (Python)
+  → variables["retention"] = {"default": 30, ...}                   (DAG, create_tf_workspace)
+  → Schematics : tfvars  retention = { default = 30, ... }
+  → v1.12/bucket/variables.tf : variable "retention" { type = object({...}) }
+  → v1.12/bucket/main.tf      : retention_default = var.retention.default
+  → terraform-module-cos/variables.tf : variable "retention_default" { default = null }
+  → terraform-module-cos/main.tf      : transmis à terraform-ibm-cos
+  → ibm_cos_bucket.retention_rule.default = 30
+```
+
+Deux conséquences :
+
+- **Ajouter une variable, c'est toucher chaque maillon.** Le DAG, puis
+  `variables.tf` et `main.tf` de `v1.12/bucket`, et si le module ne la
+  connaît pas encore, `variables.tf` et `main.tf` de `terraform-module-cos`
+  avec un nouveau tag. Un maillon sauté donne un avertissement silencieux ou
+  un échec de plan, jamais une valeur qui passe « toute seule ».
+- **Le `variables.tf` du dépôt GitLab ne lit jamais celui de `cos`.** Il ne
+  connaît que ce que le bloc `module "bucket"` lui écrit. C'est ce qui
+  explique que `activity_tracker_crn`, envoyé par le DAG et déclaré dans
+  `v1.12/bucket`, n'arrive nulle part : la ligne du bloc `module "bucket"`
+  est commentée, le maillon manque.
+
 ---
 
 ## 5. Le dépôt `terraform-module-cos`
