@@ -25,46 +25,74 @@ TERRAFORM_VERSION = "1.12"
 TF_VERSION_LABEL = f"terraform_v{TERRAFORM_VERSION}"
 SCHEMATICS_PROJECT = "rg-realms"
 
-# Surchargeables par l'environnement d'exécution, sans toucher au code :
-# - COS_TF_INT_BRANCH : branche Terraform suivie par l'INT (évite de committer
-#   un nom de branche de feature). Le défaut reste la branche actuelle.
-# - COS_TF_LOG_LEVEL  : niveau TF_LOG envoyé à Schematics (TRACE, DEBUG, INFO,
-#   WARN, ERROR). DEBUG est très verbeux, à baisser en prod.
-INT_BRANCH = os.environ.get("COS_TF_INT_BRANCH", "feature/update-retention-to-5-years")
-TF_LOG_LEVEL = os.environ.get("COS_TF_LOG_LEVEL", "DEBUG")
+# Branche git clonée par Schematics et niveau TF_LOG, par environnement.
+# Alignés sur les branches de la CI (.gitlab-ci.yml) : main -> int,
+# preprod -> pprod, prod -> prod. Ces défauts ne se changent pas dans le code.
+DEFAULT_BRANCHES = {
+    OrchestratorEnvironment.INT.value: "main",
+    OrchestratorEnvironment.PREPROD.value: "preprod",
+    OrchestratorEnvironment.PROD.value: "prod",
+}
+# Tags posés sur le workspace Schematics (le tag d'environnement garde le
+# libellé historique "pprod" pour la préprod).
+ENV_TAGS = {
+    OrchestratorEnvironment.INT.value: "env:int",
+    OrchestratorEnvironment.PREPROD.value: "env:pprod",
+    OrchestratorEnvironment.PROD.value: "env:prod",
+}
+# TF_LOG : TRACE, DEBUG, INFO, WARN, ERROR. DEBUG trace les requêtes HTTP des
+# providers dans les logs Schematics : confortable en INT, à éviter en prod.
+DEFAULT_TF_LOG = {
+    OrchestratorEnvironment.INT.value: "DEBUG",
+    OrchestratorEnvironment.PREPROD.value: "INFO",
+    OrchestratorEnvironment.PROD.value: "ERROR",
+}
+# Surcharges, lues à chaque appel (jamais à l'import), dans cet ordre :
+# 1. Airflow Variable du même nom (interface Airflow de l'environnement, sans
+#    redéploiement : par exemple `cos_tf_branch = feature/xxx` sur l'INT le
+#    temps de tester une branche non fusionnée) ;
+# 2. variable d'environnement en majuscules (COS_TF_BRANCH, COS_TF_LOG_LEVEL) ;
+# 3. défaut de l'environnement ci-dessus.
+BRANCH_SETTING = "cos_tf_branch"
+TF_LOG_SETTING = "cos_tf_log_level"
 
 
 class EnvSettings(NamedTuple):
     tags: list[str]
     branch: str
+    tf_log: str
 
 
-_ENV_SETTINGS: dict[str, EnvSettings] = {
-    OrchestratorEnvironment.INT.value: EnvSettings(
-        tags=["env:int", "agent:ga", "version:1.0"], branch=INT_BRANCH
-    ),
-    OrchestratorEnvironment.PREPROD.value: EnvSettings(
-        tags=["env:pprod", "agent:ga", "version:1.0"], branch="preprod"
-    ),
-    OrchestratorEnvironment.PROD.value: EnvSettings(
-        tags=["env:prod", "agent:ga", "version:1.0"], branch="prod"
-    ),
-}
+def _setting(name: str, default: str) -> str:
+    """Valeur d'un réglage : Airflow Variable, sinon variable d'environnement, sinon défaut."""
+    fallback = os.environ.get(name.upper(), default)
+    try:
+        from airflow.models import Variable
+    except ImportError:
+        return fallback
+    try:
+        return Variable.get(name, default_var=fallback)
+    except Exception as exc:  # métadonnées Airflow injoignables : ne pas bloquer la demande
+        logger.warning("could not read Airflow Variable %s (%s), using %r", name, exc, fallback)
+        return fallback
 
 
 def settings_for(orchestrator_env) -> EnvSettings:
-    """Tags et branche Terraform d'un environnement (enum ou sa valeur).
+    """Tags, branche Terraform et TF_LOG d'un environnement (enum ou sa valeur).
 
     Lève une ``ValueError`` explicite sur un environnement inconnu au lieu
     d'envoyer une branche vide à Schematics.
     """
     key = getattr(orchestrator_env, "value", orchestrator_env)
-    try:
-        return _ENV_SETTINGS[key]
-    except KeyError:
+    if key not in DEFAULT_BRANCHES:
         raise ValueError(
-            f"Unknown orchestrator environment '{key}', expected one of {sorted(_ENV_SETTINGS)}"
-        ) from None
+            f"Unknown orchestrator environment '{key}', expected one of {sorted(DEFAULT_BRANCHES)}"
+        )
+    return EnvSettings(
+        tags=[ENV_TAGS[key], "agent:ga", "version:1.0"],
+        branch=_setting(BRANCH_SETTING, DEFAULT_BRANCHES[key]),
+        tf_log=_setting(TF_LOG_SETTING, DEFAULT_TF_LOG[key]),
+    )
 
 
 def _vcs(settings: EnvSettings, tf_directory: str, gitlab_token: str) -> VCS:
@@ -76,8 +104,8 @@ def _vcs(settings: EnvSettings, tf_directory: str, gitlab_token: str) -> VCS:
     )
 
 
-def _env_values() -> list[dict]:
-    return [{"TF_LOG": TF_LOG_LEVEL}]
+def _env_values(settings: EnvSettings) -> list[dict]:
+    return [{"TF_LOG": settings.tf_log}]
 
 
 def create_or_update_ws(
@@ -97,7 +125,7 @@ def create_or_update_ws(
         tf_version=TF_VERSION_LABEL,
         vcs=_vcs(settings, tf_directory, gitlab_token),
         description=description,
-        env_values=_env_values(),
+        env_values=_env_values(settings),
         variables=variables,
         project=SCHEMATICS_PROJECT,
     )
@@ -120,7 +148,7 @@ def update_ws(
         tf_version=TF_VERSION_LABEL,
         vcs=_vcs(settings, tf_directory, gitlab_token),
         description=description,
-        env_values=_env_values(),
+        env_values=_env_values(settings),
     )
 
 
