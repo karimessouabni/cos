@@ -1,0 +1,37 @@
+# Jobs de standards_check à inclure depuis .gitlab-ci.yml :
+#   include:
+#     - local: '.gitlab-ci.standards.yml'
+# Ils s'appuient sur `.base_job` (Poetry) défini dans .gitlab-requirements.yml.
+
+# Aucun nom de branche de feature ne doit être codé en dur dans le service
+# Schematics : la branche clonée par Schematics suit l'environnement
+# (main -> int, preprod -> pprod, prod -> prod) et se surcharge par Airflow
+# Variable ou variable d'environnement, jamais dans le code.
+check_no_feature_branch_in_code:
+  stage: standards_check
+  script:
+    - |
+      if grep -En '"(feature|hotfix|bugfix)/' cos_service/services/schematics_service.py; then
+        echo "[FAILURE] schematics_service.py must not hardcode a feature branch (use the cos_tf_branch Airflow Variable)" 1>&2;
+        exit 1;
+      else
+        echo "[SUCCESS] No feature branch hardcoded in schematics_service.py";
+      fi
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(main|preprod|prod)$/'
+
+# Tests unitaires (sans Airflow ni libs internes, voir tests/README.md), en
+# feu rouge avant le scan CoE qui tourne sur le miroir.
+unit_tests:
+  extends: [.base_job]
+  stage: standards_check
+  script:
+    - poetry run pip install -r requirements-test.txt
+    - poetry run pytest --cov --cov-report=term --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(main|preprod|prod)$/'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /^(main|preprod|prod)$/'

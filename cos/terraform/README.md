@@ -311,11 +311,19 @@ Les anciens dossiers restent pour les workspaces existants créés avec eux.
 **Branche git par environnement.** Schematics clone toujours le dépôt `cos`
 lui-même, sur une branche qui dépend de l'environnement de l'orchestrateur :
 
-| Environnement | Branche clonée par Schematics | Tags du workspace |
-|---|---|---|
-| `int` | `COS_TF_INT_BRANCH`, défaut `feature/update-retention-to-5-years` | `env:int` |
-| `preprod` | `preprod` | `env:pprod` |
-| `prod` | `prod` | `env:prod` |
+| Environnement | Branche clonée par Schematics | `TF_LOG` | Tags du workspace |
+|---|---|---|---|
+| `int` | `main` | `DEBUG` | `env:int` |
+| `preprod` | `preprod` | `INFO` | `env:pprod` |
+| `prod` | `prod` | `ERROR` | `env:prod` |
+
+Ces défauts sont ceux des branches de la CI. Ils se surchargent sans toucher au
+code, lus à chaque appel : d'abord l'Airflow Variable (`cos_tf_branch`,
+`cos_tf_log_level`) de l'environnement, puis la variable d'environnement en
+majuscules (`COS_TF_BRANCH`, `COS_TF_LOG_LEVEL`). Cas d'usage : poser
+`cos_tf_branch = feature/xxx` dans l'interface Airflow de l'INT le temps de
+tester une branche non fusionnée, puis la supprimer. Un job de la CI refuse
+toute MR qui recoderait un nom de branche de feature dans le service.
 
 Conséquence importante : **le Terraform exécuté est celui de la branche, pas
 celui du poste**. Une modification de `main.tf` non poussée sur la branche de
@@ -326,7 +334,9 @@ immédiatement ce que le prochain apply fera.
 flowchart LR
     ENV["ENVIRONMENT = int | preprod | prod"] --> S["settings_for(env)"]
     S --> BR["branche git"]
+    S --> TL["TF_LOG"]
     S --> TG["tags workspace"]
+    AV["Airflow Variable / env var<br/>(surcharge optionnelle)"] --> S
     TV["TERRAFORM_VERSION = 1.12"] --> DIR["tf_directory = terraform/v1.12/bucket"]
     TV --> LBL["tf_version = terraform_v1.12"]
     BR & DIR & LBL --> VCS["VCS(repository, branch, directory) envoyé à Schematics"]

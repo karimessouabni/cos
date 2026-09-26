@@ -371,8 +371,9 @@ workspace, qui garde son `tfstate`.
   VPE, l'écriture des clés HMAC dans Vault.
 - `terraform/v1.12/backup_vault/main.tf` crée un backup vault.
 - `schematics_service.py` est générique : créer ou mettre à jour un workspace, changer ses
-  variables, lancer `plan` + `apply`. La branche Terraform suivie dépend de l'environnement
-  (`int`, `pprod`, `prod`), surchargeable par variable d'environnement.
+  variables, lancer `plan` + `apply`. La branche Terraform clonée et le niveau `TF_LOG`
+  suivent l'environnement (`main`/`DEBUG` en int, `preprod`/`INFO`, `prod`/`ERROR`),
+  surchargeables par Airflow Variable ou variable d'environnement, jamais dans le code.
 
 Chaîne complète, versions des modules, provenance de chaque variable et points d'attention :
 [`terraform/README.md`](terraform/README.md).
@@ -426,7 +427,15 @@ docs/adr/                   décisions d'architecture
 
 `STRUCTURE.md` détaille l'arborescence telle que reconstituée depuis le projet d'origine.
 
-## 12. Développer et tester
+## 12. Intégration continue
+
+`.gitlab-ci.yml` ne déploie rien : la plateforme charge les DAGs depuis `main` (int),
+`preprod` (pprod) et `prod` (prod). La CI contrôle les MR vers ces trois branches :
+titre Conventional Commit, changelog généré, `.airflowignore` intact, puis miroir vers le
+projet ITG pour les scans CoE. `.gitlab-ci.standards.yml` ajoute les tests unitaires et le
+garde-fou qui interdit une branche de feature codée en dur dans `schematics_service.py`.
+
+## 13. Développer et tester
 
 Les tests tournent **sans** Airflow, sans `bp2i_airflow_library` et sans IBM : un
 `conftest.py` installe des doublures pour l'infrastructure et pour les schémas absents du
@@ -451,7 +460,7 @@ Deux conventions à connaître : la date du jour est figée dans les tests (les 
 années → jours comptent les 29 février) ; et un test marqué `integration` exige le venv
 complet avec la vraie librairie. Tout est décrit dans [`tests/README.md`](tests/README.md).
 
-## 13. Documentation associée
+## 14. Documentation associée
 
 | Document | Sujet |
 |---|---|
@@ -460,7 +469,7 @@ complet avec la vraie librairie. Tout est décrit dans [`tests/README.md`](tests
 | [`docs/adr/0001-retention-unites-jours-annees.md`](docs/adr/0001-retention-unites-jours-annees.md) | Rétention jours/années sans rupture du contrat v1 |
 | `STRUCTURE.md` | Arborescence du projet d'origine |
 
-## 14. Glossaire
+## 15. Glossaire
 
 | Terme | Signification |
 |---|---|
