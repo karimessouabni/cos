@@ -7,6 +7,9 @@ référencés par les imports des fichiers reconstitués.
 ```
 cos/
 ├── .venv/
+├── cos-subscriptions/
+│   ├── subscriptions_cleanup.py      ← nettoyage des souscriptions orchestrator (--delete, --on-error)
+│   └── test_subscriptions_cleanup.py
 ├── cos_service/
 │   ├── __init__.py
 │   ├── dags/
@@ -17,12 +20,12 @@ cos/
 │   │   │       ├── cos.bucket.v1.clean.py
 │   │   │       ├── cos.bucket.v1.create.py                      ← reconstitué
 │   │   │       ├── cos.bucket.v1.create_lifecycle_policy_rule.py
-│   │   │       ├── cos.bucket.v1.delete.py
+│   │   │       ├── cos.bucket.v1.delete.py                      ← reconstitué + corrigé
 │   │   │       ├── cos.bucket.v1.delete_lifecycle_policy_rule.py
 │   │   │       ├── cos.bucket.v1.force_clean.py
 │   │   │       ├── cos.bucket.v1.refresh_restore_ranges.py
-│   │   │       ├── cos.bucket.v1.restore.py
-│   │   │       ├── cos.bucket.v1.update.py
+│   │   │       ├── cos.bucket.v1.restore.py                     ← reconstitué (+ restore_point_in_time)
+│   │   │       ├── cos.bucket.v1.update.py                      ← reconstitué + corrigé
 │   │   │       └── cos.bucket.v1.update_lifecycle_policy_rule.py
 │   │   ├── bucket_migration/
 │   │   ├── cos/
@@ -39,18 +42,28 @@ cos/
 │   │   └── subscription_status.py    (déduit)  SubscriptionStatus
 │   ├── services/
 │   │   ├── backup_vault_service.py   (déduit)  get_backup_vault_by_name, get_backup_vault_by_sub_id
-│   │   ├── bucketService.py          (déduit)  get_bucket_by_sub_id, process_bucket_creation, update_bucket_*, complete_bucket_create
+│   │   ├── bucketService.py                     ← reconstitué + corrigé (lecture, appels S3, process_bucket_creation, update_bucket_*, complete_bucket_create)
 │   │   ├── contextService.py         (déduit)  get_realm, get_apcodes, get_account_instances_crn
 │   │   ├── cosService.py             (déduit)  get_cos_instance_by_name, get_cos_instance_status
 │   │   ├── immutability_service.py              ← reconstitué
-│   │   ├── schematics_service.py     (déduit)  create_or_update_ws
+│   │   ├── recovery_range_service.py            ← nouveau : point de restauration et choix du range
+│   │   ├── schematics_service.py                ← reconstitué + corrigé (create_or_update_ws, update_ws, update_ws_variables, run_workspace)
 │   │   ├── vault_service.py          (déduit)  get_vault_secrets
 │   │   └── workspaceService.py       (déduit)  update_bucket_workspace, build_bucket_workspace_details
 │   ├── sql/                                     ← scripts SQL gérés à la main (cible Alembic)
 │   └── utils/
 ├── terraform/
-│   └── v1.12/bucket/main.tf          (déduit du tf_directory + onglet main.tf)
-├── tests/
+│   ├── README.md                     ← chaîne DAG -> Schematics -> modules, schémas et points d'attention
+│   ├── README.md                     ← chaîne DAG -> Schematics -> modules, schémas et points d'attention
+│   ├── v1.12/backup_vault/main.tf                   ← reconstitué
+│   └── v1.12/bucket/main.tf                         ← reconstitué + corrigé (backup_policies)
+├── tests/                            ← tests unitaires sans les libs internes (voir tests/README.md)
+│   ├── conftest.py                       stubs installés seulement si le vrai module manque
+│   ├── stubs/                            bp2i.py (step/depends), orm.py (sqlalchemy, modèles), schemas.py
+│   ├── dags/                             test_bucket_create.py, _delete.py, _update.py, _restore.py
+│   └── services/
+├── pytest.ini
+├── requirements-test.txt
 ├── .gitignore
 ├── __init__.py
 ├── poetry.lock
