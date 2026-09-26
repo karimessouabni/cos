@@ -1,0 +1,115 @@
+---
+
+stages:
+  - install_requirements
+  - standards_check
+  - sync-mirroring
+  - trigger-coe-devops-scan
+  - get-mirrored-artifacts
+
+variables:
+  ITG_PROJECT_PATH: 'gf/itg_bp2i/storage/storage/cos'
+
+include:
+  - local: '.gitlab-requirements.yml'
+  - local: '.gitlab-ci.standards.yml'
+  - project: 'gf/itg_bp2i/tr10b/dev_infra_shared_lib/ci-coe-devops'
+    ref: 'master'
+    file: 'ci-squad-templates/.gitlab-ci.mirroring.yml'
+  - project: 'gf/itg_bp2i/tr10b/dev_infra_shared_lib/ci-coe-devops'
+    ref: 'master'
+    file: 'ci-squad-templates/.gitlab-ci.get-mirrored-artifacts.yml'
+
+trigger-coe-devops-scan:
+  stage: trigger-coe-devops-scan
+  needs:
+    - job: sync-mirroring
+    - job: get-toolchain-token
+      artifacts: true
+  variables:
+    DEVELOPMENT_LANGUAGES: "Python"
+    # CLONING_FROM_VERSION: "main"  # la variable CLONING_FROM_VERSION doit être désactivée tant que la CI COE (Qualité et Sécurité) n'est pas encore lancée sur la branche main
+    MARKETPLACE_ARTIFACTORY_USER: '$ARTIFACTORY_USER'
+    MARKETPLACE_ARTIFACTORY_PASSWORD: '$ARTIFACTORY_PASSWORD'
+    SKELETON_PROJECT_TOKEN: '$SKELETON_PROJECT_TOKEN'
+    SONARQUBE_QG_TOKEN: '$SONARQUBE_QG_TOKEN'
+  trigger:
+    project: $ITG_PROJECT_PATH
+    branch: '$CI_COMMIT_REF_NAME'
+    strategy: depend
+    forward:
+      pipeline_variables: true
+      yaml_variables: true
+
+build_changelog:
+  extends: [.base_job]
+  stage: standards_check
+  script:
+    # These three commands are necessary to fetch branches history
+    - git fetch --all
+    - git checkout $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+    - git checkout $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+    - |
+      poetry run git-changelog --output CHANGELOG.md \
+        --convention angular \
+        --sections feat,fix,ci,test,doc,revert,refactor \
+        --template angular \
+        --filter-commits $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME...$CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+    - |
+      curl --request PUT \
+        --fail-with-body \
+        --header "Authorization: Bearer $GITLAB_TOKEN" \
+        --data-urlencode description@CHANGELOG.md \
+        --data-urlencode "title=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME^^} $(date +%Y-%m-%d)" \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID"
+  variables:
+    GIT_DEPTH: 0
+  artifacts:
+    paths:
+      - CHANGELOG.md
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(main|preprod|prod)$/'
+
+check_airflowignore:
+  stage: standards_check
+  script:
+    # These three commands are necessary to fetch branches history
+    - git fetch --all
+    - git checkout $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+    - git checkout $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+    - |
+      if git diff --name-only $CI_MERGE_REQUEST_TARGET_BRANCH_NAME $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME | grep --quiet cos/.airflowignore; then
+        echo "[FAILURE] File cos/.airflowignore must be restored before merging this MR" 1>&2;
+        exit 1;
+      else
+        echo "[SUCCESS] No change detected in file cos/.airflowignore";
+      fi
+  variables:
+    GIT_DEPTH: 0
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+
+check_conventional_commit:
+  stage: standards_check
+  script:
+    - |
+      if [[ -z "$CI_MERGE_REQUEST_TITLE" ]]; then
+        if echo "$CI_COMMIT_TITLE" | grep --quiet --perl-regexp "$CONVENTIONAL_COMMIT_PATTERN"; then
+          echo "[SUCCESS] Commit title '$CI_COMMIT_TITLE' matches Conventional Commit pattern /$CONVENTIONAL_COMMIT_PATTERN/"
+        else
+          echo "[FAILURE] Commit title '$CI_COMMIT_TITLE' does not match Conventional Commit pattern /$CONVENTIONAL_COMMIT_PATTERN/" 1>&2;
+          exit 1;
+        fi
+      else
+        if echo "$CI_MERGE_REQUEST_TITLE" | grep --quiet --perl-regexp "$CONVENTIONAL_COMMIT_PATTERN"; then
+          echo "[SUCCESS] Merge request title '$CI_MERGE_REQUEST_TITLE' matches Conventional Commit pattern /$CONVENTIONAL_COMMIT_PATTERN/"
+        else
+          echo "[FAILURE] Merge request title '$CI_MERGE_REQUEST_TITLE' does not match Conventional Commit pattern /$CONVENTIONAL_COMMIT_PATTERN/" 1>&2;
+          exit 1;
+        fi
+      fi
+  variables:
+    CONVENTIONAL_COMMIT_PATTERN: '^(fix|feat|build|chore|ci|docs|style|refactor|perf|test)(\((TCAAS\d{4}-\d{4})\))?!?:\s+([a-zA-Z0-9\-_.,\. ]+)$'
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /^(main|preprod|prod)$/'

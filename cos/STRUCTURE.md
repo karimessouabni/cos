@@ -63,6 +63,9 @@ cos/
 │   ├── schemas/                          test_bucket_retention.py (contrat des deux formats)
 │   └── services/
 ├── docs/adr/                         ← décisions d'architecture (0001 : rétention jours/années sans rupture v1)
+├── .gitlab-ci.yml                    ← CI : standards des MR (changelog, Conventional Commit, .airflowignore), miroir ITG, scans CoE
+├── .gitlab-ci.standards.yml          ← tests unitaires + garde-fou branche de feature dans schematics_service
+├── .gitlab-requirements.yml   (déduit)  .base_job Poetry, stage install_requirements
 ├── pytest.ini
 ├── requirements-test.txt
 ├── .gitignore
