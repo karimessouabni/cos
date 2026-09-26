@@ -163,9 +163,11 @@ immutability_choice = "retention_yearly"
 ```
 
 Dans les deux formats, `retention_enabled` garde le même rôle : c'est l'interrupteur.
-À la création, la rétention n'est prise en compte que s'il vaut `true` et que les bornes
-sont saisies. À la mise à jour, `false` ou absent signifie "ne touche pas à la rétention
-existante". Il est relu tel quel dans le state.
+Des bornes fournies sans le drapeau l'activent automatiquement (`retention_enabled`
+passe à `true`) ; un `false` explicite est respecté. À la création, la rétention n'est
+prise en compte que si le drapeau est vrai et que les bornes sont saisies. À la mise à
+jour, `false` ou un bloc vide signifie "ne touche pas à la rétention existante". Le
+drapeau est relu tel quel dans le state.
 
 **Les deux formats sont acceptés.** L'ancien est déprécié, pas cassé :
 

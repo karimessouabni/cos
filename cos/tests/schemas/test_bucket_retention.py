@@ -67,3 +67,18 @@ def test_is_empty_looks_at_bounds_only():
 def test_max_retention_per_unit():
     assert max_retention(YEARS) == 5
     assert max_retention(DAYS) == 1825
+
+
+def test_bounds_without_flag_auto_enable_retention():
+    assert BucketRetention(default_days=30, minimum_days=1, maximum_days=90).retention_enabled is True
+    assert BucketRetention(maximum_years=5).retention_enabled is True
+    assert BucketRetention(default=30, minimum=1, maximum=90).retention_enabled is True
+
+
+def test_explicit_false_flag_is_kept_with_bounds():
+    assert BucketRetention(retention_enabled=False, default_days=30).retention_enabled is False
+
+
+def test_no_bounds_leave_the_flag_untouched():
+    assert BucketRetention().retention_enabled is None
+    assert BucketRetention(retention_enabled=False).retention_enabled is False
