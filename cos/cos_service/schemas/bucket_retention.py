@@ -6,7 +6,11 @@ Deux formats de payload sont acceptés :
   ``default_days`` / ``default_years``, ``minimum_days`` / ``minimum_years``,
   ``maximum_days`` / ``maximum_years``. Une seule unité par demande.
 * **Format historique (déprécié)** : ``default``, ``minimum``, ``maximum``,
-  implicitement en jours. Il est accepté tel quel pour ne pas casser les
+  implicitement en jours.
+
+Dans les deux formats, des bornes fournies sans ``retention_enabled`` activent
+la rétention (``retention_enabled`` passe à True) ; un ``False`` explicite est
+conservé. Il est accepté tel quel pour ne pas casser les
   clients existants, recopié vers ``*_days`` à la validation, et signalé par
   un warning. Le mélange des deux formats est refusé.
 
@@ -95,6 +99,20 @@ class BucketRetention(BaseModel):
         for key, value in legacy.items():
             setattr(self, f"{key}_{DAYS}", value)
         self._legacy_format = True
+        return self
+
+    @model_validator(mode="after")
+    def _auto_enable_retention(self) -> "BucketRetention":
+        """Des bornes sans drapeau valent une demande de rétention.
+
+        Un client qui envoie ``default_days`` sans ``retention_enabled`` veut
+        évidemment une rétention : le drapeau passe à True. Un ``False``
+        explicite est respecté (la demande sera déclinée en aval si un choix
+        ``retention_*`` l'exige).
+        """
+        if self.retention_enabled is None and self._units_present():
+            logger.info("retention bounds given without retention_enabled: enabling retention")
+            self.retention_enabled = True
         return self
 
     @property

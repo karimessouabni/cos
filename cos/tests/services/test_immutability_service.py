@@ -460,6 +460,22 @@ class TestLegacyRetentionPayload:
         with pytest.raises(DeclineDemandException, match="1825 days"):
             compute(retention=retention_legacy(maximum=2000))
 
+    def test_bounds_without_flag_create_a_retention(self):
+        result = compute(retention=BucketRetention(default_days=30, minimum_days=10, maximum_days=60))
+
+        assert result["retention"] == self.EXPECTED
+        assert result["immutability_choice"] == Immutability.RETENTION.value
+
+    def test_update_with_a_single_bound_and_no_flag_is_applied(self):
+        bucket = bucket_row(retention_enabled=True, retention_default=30, retention_minimum=10, retention_maximum=60)
+        existing = {"retention": {"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 60}}
+        errors = []
+
+        svc.validate_retention_update(BucketRetention(maximum_years=5), bucket, existing, errors)
+
+        assert errors == []
+        assert existing["retention"]["maximum"] == 1825
+
     def test_update_accepts_years_and_fills_missing_from_bucket(self):
         bucket = bucket_row(retention_enabled=True, retention_default=30, retention_minimum=10, retention_maximum=60)
         existing = {"retention": {"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 60}}
