@@ -162,11 +162,16 @@ retention          = { retention_enabled = true, default_years = 2, minimum_year
 immutability_choice = "retention_yearly"
 ```
 
+Dans les deux formats, `retention_enabled` garde le même rôle : c'est l'interrupteur.
+À la création, la rétention n'est prise en compte que s'il vaut `true` et que les bornes
+sont saisies. À la mise à jour, `false` ou absent signifie "ne touche pas à la rétention
+existante". Il est relu tel quel dans le state.
+
 **Les deux formats sont acceptés.** L'ancien est déprécié, pas cassé :
 
 ```mermaid
 flowchart TD
-    P["payload.retention"] --> Q{Format ?}
+    P["payload.retention<br/>retention_enabled + bornes"] --> Q{Format des bornes ?}
     Q -->|"default / minimum / maximum"| L["Format historique<br/>→ recopié en *_days<br/>→ warning dans les logs"]
     Q -->|"*_days ou *_years"| N["Format courant"]
     Q -->|"les deux"| R["Refusé : not both"]
@@ -176,7 +181,7 @@ flowchart TD
     U2 --> C
     C --> J["Conversion en jours<br/>(1 an = 365 jours)"]
     J --> DB[("base + Terraform<br/>toujours en jours")]
-    J --> ST["state client :<br/>clés historiques en jours<br/>+ unit + bornes telles que saisies"]
+    J --> ST["state client :<br/>retention_enabled + clés historiques en jours<br/>+ unit + bornes telles que saisies"]
 ```
 
 Pourquoi ce choix plutôt qu'une `v2` : ajouter une unité est additif du point de vue du
