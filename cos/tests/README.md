@@ -22,7 +22,9 @@ Ces tests chargent les DAGs et les services **sans** `bp2i_airflow_library`,
   tâche Airflow, et `depends(...)` vaut `None`. Chaque étape d'un DAG devient
   donc une fonction appelable directement.
 - `stubs/orm.py` et `stubs/schemas.py` remplacent `sqlalchemy`, les modèles
-  `cos_service.models.*` et les schémas absents.
+  `cos_service.models.*` et les schémas absents (`bucket_retention` est présent
+  dans le dépôt et n'est plus doublé ; il demande `pydantic`, voir
+  `requirements-test.txt`).
 - La fixture `services` remplace chaque `cos_service.services.*` par un
   `MagicMock`, sauf `immutability_service` qui reste le vrai module.
 - La fixture `dag` charge `cos.bucket.v1.create.py` et expose

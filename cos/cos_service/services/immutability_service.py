@@ -385,7 +385,7 @@ def compute_bucket_retention(payload_retention: BucketRetention, immutability: d
     seule la première ligne était visible. Le corps ci-dessous est complet.
     """
     unit = payload_retention.unit
-    default, minimum, maximum = payload_retention.default, payload_retention.minimum, payload_retention.maximum
+    default, minimum, maximum = (payload_retention.value(key) for key in _RETENTION_KEYS)
 
     if None in (unit, default, minimum, maximum):
         logging.info("compute_bucket_retention1")
@@ -394,12 +394,33 @@ def compute_bucket_retention(payload_retention: BucketRetention, immutability: d
             "in the same unit, either in days (…_days) or in years (…_years)."
         )
 
+    errors = []
+    check_retention_bounds(unit, default, minimum, maximum, errors)
+    raise_on_errors(errors)
+
     immutability["retention"]["retention_enabled"] = payload_retention.retention_enabled
     for key in _RETENTION_KEYS:
         immutability["retention"][key] = payload_retention.in_days(key)
 
     logging.info(f"compute_bucket_retention2 {immutability}")
     return immutability
+
+def retention_state_for_client(payload_retention: BucketRetention | None, retention: dict) -> dict:
+    """Bloc ``retention`` poussé dans le state de la souscription.
+
+    Les clés historiques (``retention_enabled`` et ``default``/``minimum``/
+    ``maximum`` en jours) sont conservées telles quelles : c'est ce que les
+    clients existants relisent, un renommage ferait dériver leur plan Terraform.
+    S'y ajoutent l'unité saisie et les bornes telles que le client les a
+    envoyées (``default_years`` …), pour qu'un client en années relise ce qu'il
+    a écrit et non sa conversion en jours.
+    """
+    state = dict(retention)
+    if payload_retention is not None and payload_retention.unit is not None:
+        state["unit"] = payload_retention.unit
+        state.update(payload_retention.as_sent())
+    return state
+
 
 def check_single_unit(days, years, label, days_field, years_field, errors) -> str | None:
     """Vérifie qu'une seule unité est saisie et renvoie laquelle ("days"/"years"/None)."""
@@ -420,7 +441,7 @@ def format_limit(unit) -> str:
     """Plafond lisible dans l'unité saisie : "5 years" ou "5 years (1825 days)"."""
     if unit == YEARS:
         return f"{MAX_RETENTION_YEARS} years"
-    return f"{MAX_RETENTION_YEARS} years "
+    return f"{MAX_RETENTION_YEARS} years ({max_retention(DAYS)} days)"
 
 def compute_bucket_object_lock(
     immutability,

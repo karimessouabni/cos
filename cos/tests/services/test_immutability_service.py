@@ -147,13 +147,15 @@ class TestNewImmutabilityRetention:
         assert result["retention"]["default"] == 365
         assert result["immutability_choice"] == Immutability.RETENTION_YEARLY.value
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="compute_bucket_retention ne vérifie pas min <= default <= max sur un create",
-    )
     def test_inconsistent_bounds_are_declined_on_create(self):
-        with pytest.raises(DeclineDemandException):
+        with pytest.raises(DeclineDemandException, match="Retention default"):
             compute(retention=retention_days(default=100, minimum=10, maximum=50))
+
+    def test_bounds_are_checked_in_the_given_unit(self):
+        with pytest.raises(DeclineDemandException, match="superior to 5 years"):
+            compute(retention=retention_years(default=2, minimum=1, maximum=6))
+        with pytest.raises(DeclineDemandException, match="1825 days"):
+            compute(retention=retention_days(default=30, minimum=10, maximum=2000))
 
 
 # --- object lock ------------------------------------------------------------------
@@ -283,7 +285,6 @@ class TestFormatLimit:
     def test_years(self):
         assert svc.format_limit(YEARS) == "5 years"
 
-    @pytest.mark.xfail(strict=True, reason="format_limit renvoie '5 years ' pour les jours au lieu d'inclure 1825 days")
     def test_days_mentions_the_day_equivalent(self):
         assert svc.format_limit(DAYS) == "5 years (1825 days)"
 
@@ -419,3 +420,74 @@ class TestValidateImmutabilityForUpdate:
         result = self.validate(bucket_row(object_versioning_enabled=True), backup=backup_enabled())
 
         assert result["backup"]["backup_enabled"] is True
+
+
+# --- compatibilité : format historique de rétention (jours implicites) ---------------
+
+def retention_legacy(default=30, minimum=10, maximum=60, enabled=True) -> BucketRetention:
+    return BucketRetention(retention_enabled=enabled, default=default, minimum=minimum, maximum=maximum)
+
+
+class TestLegacyRetentionPayload:
+    """Un client existant envoie default/minimum/maximum sans unité : même résultat qu'avant."""
+
+    EXPECTED = {"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 60}
+
+    def test_inferred_choice(self):
+        result = compute(retention=retention_legacy())
+
+        assert result["retention"] == self.EXPECTED
+        assert result["immutability_choice"] == Immutability.RETENTION.value
+
+    def test_legacy_choice(self):
+        result = compute(choice=Immutability.RETENTION, retention=retention_legacy())
+
+        assert result["retention"] == self.EXPECTED
+
+    def test_daily_choice_accepts_the_legacy_format(self):
+        result = compute(choice=Immutability.RETENTION_DAILY, retention=retention_legacy())
+
+        assert result["retention"] == self.EXPECTED
+
+    def test_yearly_choice_still_requires_years(self):
+        with pytest.raises(DeclineDemandException, match="must be set in years"):
+            compute(choice=Immutability.RETENTION_YEARLY, retention=retention_legacy())
+
+    def test_same_result_as_the_days_format(self):
+        assert compute(retention=retention_legacy())["retention"] == compute(retention=retention_days(30, 10, 60))["retention"]
+
+    def test_legacy_bounds_are_checked_in_days(self):
+        with pytest.raises(DeclineDemandException, match="1825 days"):
+            compute(retention=retention_legacy(maximum=2000))
+
+    def test_update_accepts_years_and_fills_missing_from_bucket(self):
+        bucket = bucket_row(retention_enabled=True, retention_default=30, retention_minimum=10, retention_maximum=60)
+        existing = {"retention": {"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 60}}
+        errors = []
+
+        svc.validate_retention_update(BucketRetention(retention_enabled=True, maximum_years=5), bucket, existing, errors)
+
+        assert errors == []
+        assert existing["retention"] == {"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 1825}
+
+
+class TestRetentionStateForClient:
+    DAYS_STATE = {"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 60}
+
+    def test_no_payload_keeps_the_effective_block(self):
+        assert svc.retention_state_for_client(None, self.DAYS_STATE) == self.DAYS_STATE
+
+    def test_legacy_payload_keeps_legacy_keys_and_adds_unit(self):
+        assert svc.retention_state_for_client(retention_legacy(), self.DAYS_STATE) == {**self.DAYS_STATE, "unit": "days"}
+
+    def test_years_payload_is_echoed_as_sent_next_to_days(self):
+        years = {"retention_enabled": True, "default": 365, "minimum": 365, "maximum": 730}
+
+        state = svc.retention_state_for_client(retention_years(1, 1, 2), years)
+
+        assert state == {**years, "unit": "years", "default_years": 1, "minimum_years": 1, "maximum_years": 2}
+
+    def test_empty_payload_adds_nothing(self):
+        disabled = {"retention_enabled": False, "default": None, "minimum": None, "maximum": None}
+
+        assert svc.retention_state_for_client(BucketRetention(), disabled) == disabled

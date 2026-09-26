@@ -273,6 +273,14 @@ class TestProcessProtectionConfiguration:
         assert result["immutability_choice"] == Immutability.RETENTION.value
         assert result["retention"]["default"] == 365
 
+    def test_legacy_retention_format_is_still_accepted(self, dag, make_payload):
+        payload = make_payload(retention=BucketRetention(retention_enabled=True, default=30, minimum=10, maximum=60))
+
+        result = self.run(dag, payload)
+
+        assert result["immutability_choice"] == Immutability.RETENTION.value
+        assert result["retention"] == {"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 60}
+
     def test_object_lock_needs_versioning(self, dag, make_payload):
         with pytest.raises(DeclineDemandException, match="Versioning should be enabled"):
             self.run(dag, make_payload(object_lock_duration_days=30))
@@ -521,6 +529,20 @@ class TestSaveBucketInDb:
         assert state["backup"] == immutability["backup"]
         assert state["clean_status"] == Status.SUCCESS.value
         assert state["lifecycle_policy_rule_enabled"] is False
+
+    def test_retention_state_keeps_days_keys_and_echoes_years_as_sent(self, dag, happy_services, make_payload, state_manager):
+        immutability = fresh_immutability(choice=Immutability.RETENTION_YEARLY)
+        immutability["retention"] = {"retention_enabled": True, "default": 365, "minimum": 365, "maximum": 730}
+        payload = make_payload(retention=BucketRetention(
+            retention_enabled=True, default_years=1, minimum_years=1, maximum_years=2
+        ))
+
+        self.run(dag, payload, state_manager, immutability)
+
+        assert state_manager.push_state.call_args.args[0]["retention"] == {
+            "retention_enabled": True, "default": 365, "minimum": 365, "maximum": 730,
+            "unit": "years", "default_years": 1, "minimum_years": 1, "maximum_years": 2,
+        }
 
     def test_defaults_are_pushed_even_when_the_client_sent_nothing(self, dag, happy_services, make_payload, state_manager):
         self.run(dag, make_payload(), state_manager)

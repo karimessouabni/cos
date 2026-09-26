@@ -1,3 +1,5 @@
 # Dépendances pour lancer tests/ sans les libs internes : pytest, et pytest-cov pour la couverture
 pytest>=8
 pytest-cov>=5
+# Le schéma cos_service.schemas.bucket_retention est un modèle pydantic (fourni par bp2i sur le venv complet)
+pydantic>=2.7

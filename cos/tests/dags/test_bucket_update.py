@@ -277,3 +277,19 @@ class TestSaveBucketInDb:
             "sub-1", data["immutability"], False, "my bucket", "session"
         )
         services.bucketService.update_bucket_workspace_status.assert_called_once_with("sub-1", Status.SUCCESS, "session")
+
+    def test_retention_state_echoes_the_unit_sent_by_the_client(self, update_dag, services, make_payload, state_manager):
+        data = validated()
+        data["immutability"]["retention"] = {"retention_enabled": True, "default": 365, "minimum": 365, "maximum": 730}
+        payload = make_payload(retention=BucketRetention(
+            retention_enabled=True, default_years=1, minimum_years=1, maximum_years=2
+        ))
+
+        update_dag.steps["save_bucket_in_db"](
+            validated=data, is_update_ws_done=True, payload=payload, state_manager=state_manager, session="session"
+        )
+
+        assert state_manager.push_state.call_args.args[0]["retention"] == {
+            "retention_enabled": True, "default": 365, "minimum": 365, "maximum": 730,
+            "unit": "years", "default_years": 1, "minimum_years": 1, "maximum_years": 2,
+        }

@@ -78,18 +78,6 @@ def _schema_module(name: str, **attrs) -> types.ModuleType:
 for _name, _module in bp2i.build_modules().items():
     _install_forced(_name, _module)
 
-_install_if_missing(
-    "cos_service.schemas.bucket_retention",
-    _schema_module(
-        "cos_service.schemas.bucket_retention",
-        DAYS=schema_stubs.DAYS,
-        YEARS=schema_stubs.YEARS,
-        MAX_RETENTION_YEARS=schema_stubs.MAX_RETENTION_YEARS,
-        _RETENTION_KEYS=schema_stubs._RETENTION_KEYS,
-        max_retention=schema_stubs.max_retention,
-        BucketRetention=schema_stubs.BucketRetention,
-    ),
-)
 _constants = _schema_module(
     "cos_service.utils.constants",
     TERRAFORM_REPOSITORY="https://gitlab.example/cos/cos.git",
