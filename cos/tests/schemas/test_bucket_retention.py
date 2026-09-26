@@ -21,7 +21,7 @@ def test_days_payload():
 
     assert retention.legacy_format is False
     assert retention.unit == DAYS
-    assert retention.value("default") == 30
+    assert retention.default == 30
     assert retention.in_days("maximum") == 90
     assert retention.as_sent() == {"default_days": 30, "minimum_days": 1, "maximum_days": 90}
 
@@ -30,7 +30,7 @@ def test_years_payload_is_converted_to_days():
     retention = BucketRetention(retention_enabled=True, default_years=2, minimum_years=1, maximum_years=5)
 
     assert retention.unit == YEARS
-    assert retention.value("default") == 2
+    assert retention.default == 2
     assert retention.in_days("default") == 730
     assert retention.in_days("maximum") == 1825
     assert retention.as_sent() == {"default_years": 2, "minimum_years": 1, "maximum_years": 5}
@@ -45,7 +45,7 @@ def test_mixed_units_have_no_unit():
     retention = BucketRetention(retention_enabled=True, default_days=30, minimum_years=1, maximum_years=5)
 
     assert retention.unit is None
-    assert retention.value("default") is None
+    assert retention.default is None
     assert retention.in_days("default") is None
 
 
@@ -82,3 +82,29 @@ def test_explicit_false_flag_is_kept_with_bounds():
 def test_no_bounds_leave_the_flag_untouched():
     assert BucketRetention().retention_enabled is None
     assert BucketRetention(retention_enabled=False).retention_enabled is False
+
+
+def test_bound_properties_follow_the_unit_given():
+    days = BucketRetention(default_days=30, minimum_days=1, maximum_days=90)
+    years = BucketRetention(default_years=2, minimum_years=1, maximum_years=5)
+
+    assert (days.default, days.minimum, days.maximum) == (30, 1, 90)
+    assert (years.default, years.minimum, years.maximum) == (2, 1, 5)
+    assert (BucketRetention().default, BucketRetention().minimum, BucketRetention().maximum) == (None, None, None)
+
+
+def test_legacy_keys_are_not_fields_but_are_still_read_through_properties():
+    retention = BucketRetention(retention_enabled=True, default=30, minimum=1, maximum=90)
+
+    assert "default" not in retention.model_dump()
+    assert retention.default == 30
+    assert retention.model_dump(exclude_none=True) == {
+        "retention_enabled": True, "default_days": 30, "minimum_days": 1, "maximum_days": 90
+    }
+
+
+def test_legacy_format_from_a_raw_dict_like_the_orchestrator_payload():
+    retention = BucketRetention.model_validate({"retention_enabled": True, "default": 30, "minimum": 1, "maximum": 90})
+
+    assert retention.legacy_format is True
+    assert retention.default_days == 30
