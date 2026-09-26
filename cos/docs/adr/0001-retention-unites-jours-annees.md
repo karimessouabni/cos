@@ -22,8 +22,11 @@ DAG (`BucketCreatePayload` / `BucketRetention`) connaît ces champs.
    recopié vers `*_days` à la validation, marqué `deprecated` dans le schéma et journalisé
    en warning avec les valeurs reçues. Mélanger les deux formats est refusé.
 3. **Le jour est l'unité canonique** de la base (`retention_default/minimum/maximum`) et
-   du Terraform interne. Les années sont converties (365 jours par an) après vérification
-   des bornes dans l'unité saisie.
+   du Terraform interne. Les années sont converties en leur équivalent exact en jours à la
+   date de la demande (bissextiles comprises), après vérification des bornes dans l'unité
+   saisie par `BucketRetention._validate`. Le service ne re-vérifie pas les bornes à la
+   création ; il les vérifie encore à la mise à jour, sur les valeurs fusionnées avec la
+   ligne bucket.
 4. **Le state ne renomme aucune clé.** `retention.default/minimum/maximum` restent en
    jours ; on y ajoute `unit` et les bornes telles que le client les a envoyées
    (`default_years`…), pour qu'un client en années relise ce qu'il a écrit. Les DAGs
@@ -51,3 +54,12 @@ confirmer avec les clients identifiés en base par `retention_enabled = true`). 
   la toolchain doit le confirmer.
 - À prévoir en base : une colonne `retention_unit` pour restituer l'unité aussi sur les
   lectures qui ne passent pas par un payload (update partiel, refresh).
+- Point ouvert, conversion dépendante de la date : `2 ans` vaut 730 ou 731 jours selon le
+  jour de la demande, et le plafond en jours vaut 1826 ou 1827. Deux demandes identiques à
+  des dates différentes stockent des valeurs différentes, et un client en années peut voir
+  un écart d'un jour entre son state et une nouvelle évaluation. Alternatives : figer
+  365 jours par an, ou stocker l'unité et la valeur saisies et ne convertir qu'au moment
+  d'écrire le Terraform.
+- Point ouvert, égalité des bornes : le schéma accepte `minimum = default = maximum` ;
+  `check_retention_bounds` (mise à jour) exige `default < maximum` strictement. À aligner
+  dans un sens ou dans l'autre.

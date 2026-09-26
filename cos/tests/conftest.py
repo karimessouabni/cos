@@ -170,6 +170,26 @@ SERVICE_MODULES = (
 )
 
 
+# La conversion années -> jours de bucket_retention dépend de date.today()
+# (années bissextiles). Figée pour que les tests soient déterministes :
+# depuis le 2025-03-01, 1 an = 365 j, 2 ans = 730 j, 5 ans = 1826 j (29/02/2028).
+FROZEN_TODAY = __import__("datetime").date(2025, 3, 1)
+
+
+@pytest.fixture(autouse=True)
+def frozen_today(monkeypatch):
+    import datetime as _dt
+    from cos_service.schemas import bucket_retention
+
+    class _FrozenDate(_dt.date):
+        @classmethod
+        def today(cls):
+            return FROZEN_TODAY
+
+    monkeypatch.setattr(bucket_retention, "date", _FrozenDate)
+    return FROZEN_TODAY
+
+
 @pytest.fixture
 def services(monkeypatch):
     """Remplace chaque module ``cos_service.services.*`` importé dans les étapes

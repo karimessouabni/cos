@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
 from cos_service.schemas.bucket_backup import BucketBackup
@@ -135,7 +136,9 @@ class TestNewImmutabilityRetention:
             compute(choice=Immutability.RETENTION_DAILY, retention=retention_years())
 
     def test_yearly_choice_drops_day_values_and_keeps_years(self):
-        retention = BucketRetention(
+        # Le schéma refuse le mélange d'unités à la validation ; model_construct
+        # contourne cette validation pour couvrir la garde du service.
+        retention = BucketRetention.model_construct(
             retention_enabled=True,
             default_days=30, minimum_days=10, maximum_days=60,
             default_years=1, minimum_years=1, maximum_years=2,
@@ -147,15 +150,16 @@ class TestNewImmutabilityRetention:
         assert result["retention"]["default"] == 365
         assert result["immutability_choice"] == Immutability.RETENTION_YEARLY.value
 
-    def test_inconsistent_bounds_are_declined_on_create(self):
-        with pytest.raises(DeclineDemandException, match="Retention default"):
-            compute(retention=retention_days(default=100, minimum=10, maximum=50))
+    def test_inconsistent_bounds_are_rejected_by_the_schema_before_the_service(self):
+        with pytest.raises(ValidationError, match="default cannot be superior to maximum"):
+            retention_days(default=100, minimum=10, maximum=50)
+        with pytest.raises(ValidationError, match="superior to 5 years"):
+            retention_years(default=2, minimum=1, maximum=6)
 
-    def test_bounds_are_checked_in_the_given_unit(self):
-        with pytest.raises(DeclineDemandException, match="superior to 5 years"):
-            compute(retention=retention_years(default=2, minimum=1, maximum=6))
-        with pytest.raises(DeclineDemandException, match="1825 days"):
-            compute(retention=retention_days(default=30, minimum=10, maximum=2000))
+    def test_equal_bounds_accepted_by_the_schema_are_stored_on_create(self):
+        result = compute(retention=retention_days(30, 30, 30))
+
+        assert result["retention"] == {"retention_enabled": True, "default": 30, "minimum": 30, "maximum": 30}
 
 
 # --- object lock ------------------------------------------------------------------
@@ -261,7 +265,7 @@ class TestCheckRetentionBounds:
 
     def test_maximum_above_limit_is_an_error(self):
         errors = []
-        svc.check_retention_bounds(DAYS, 30, 10, 1826, errors)
+        svc.check_retention_bounds(DAYS, 30, 10, 1827, errors)  # plafond figé à 1826 jours
         assert any("maximum" in e for e in errors)
 
 
@@ -286,7 +290,7 @@ class TestFormatLimit:
         assert svc.format_limit(YEARS) == "5 years"
 
     def test_days_mentions_the_day_equivalent(self):
-        assert svc.format_limit(DAYS) == "5 years (1825 days)"
+        assert svc.format_limit(DAYS) == "5 years (1826 days)"  # date figée : 29/02/2028 dans la fenêtre
 
 
 # --- update : reconstruction depuis la ligne bucket ----------------------------------
@@ -456,9 +460,9 @@ class TestLegacyRetentionPayload:
     def test_same_result_as_the_days_format(self):
         assert compute(retention=retention_legacy())["retention"] == compute(retention=retention_days(30, 10, 60))["retention"]
 
-    def test_legacy_bounds_are_checked_in_days(self):
-        with pytest.raises(DeclineDemandException, match="1825 days"):
-            compute(retention=retention_legacy(maximum=2000))
+    def test_legacy_bounds_are_checked_in_days_by_the_schema(self):
+        with pytest.raises(ValidationError, match="1826 days"):
+            retention_legacy(maximum=2000)
 
     def test_bounds_without_flag_create_a_retention(self):
         result = compute(retention=BucketRetention(default_days=30, minimum_days=10, maximum_days=60))
@@ -474,7 +478,7 @@ class TestLegacyRetentionPayload:
         svc.validate_retention_update(BucketRetention(maximum_years=5), bucket, existing, errors)
 
         assert errors == []
-        assert existing["retention"]["maximum"] == 1825
+        assert existing["retention"]["maximum"] == 1826
 
     def test_update_accepts_years_and_fills_missing_from_bucket(self):
         bucket = bucket_row(retention_enabled=True, retention_default=30, retention_minimum=10, retention_maximum=60)
@@ -484,7 +488,7 @@ class TestLegacyRetentionPayload:
         svc.validate_retention_update(BucketRetention(retention_enabled=True, maximum_years=5), bucket, existing, errors)
 
         assert errors == []
-        assert existing["retention"] == {"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 1825}
+        assert existing["retention"] == {"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 1826}
 
 
 class TestRetentionStateForClient:
@@ -493,8 +497,10 @@ class TestRetentionStateForClient:
     def test_no_payload_keeps_the_effective_block(self):
         assert svc.retention_state_for_client(None, self.DAYS_STATE) == self.DAYS_STATE
 
-    def test_legacy_payload_keeps_legacy_keys_and_adds_unit(self):
-        assert svc.retention_state_for_client(retention_legacy(), self.DAYS_STATE) == {**self.DAYS_STATE, "unit": "days"}
+    def test_legacy_payload_keeps_legacy_keys_and_adds_unit_and_suffixed_bounds(self):
+        assert svc.retention_state_for_client(retention_legacy(), self.DAYS_STATE) == {
+            **self.DAYS_STATE, "unit": "days", "default_days": 30, "minimum_days": 10, "maximum_days": 60
+        }
 
     def test_years_payload_is_echoed_as_sent_next_to_days(self):
         years = {"retention_enabled": True, "default": 365, "minimum": 365, "maximum": 730}

@@ -143,7 +143,11 @@ stateDiagram-v2
 | **Object lock** | Verrou WORM sur les versions d'objets pendant `object_lock_duration_days` ou `_years` | Versioning obligatoire, irréversible |
 | **Aucun** | Bucket classique | Versioning et backup libres |
 
-Règles de bornes, appliquées dans l'unité saisie : `0 < minimum ≤ default < maximum ≤ 5 ans`.
+Règles de bornes, vérifiées par le schéma `BucketRetention` dès la réception du payload,
+dans l'unité saisie : chaque valeur `> 0`, `minimum ≤ default ≤ maximum`, et rien au-dessus
+de cinq ans. En jours, le plafond est l'équivalent exact de cinq ans à la date de la demande
+(1826 ou 1827 selon les 29 février de la fenêtre). Toutes les erreurs sont renvoyées en une
+seule réponse, séparées par ` | `.
 
 ### 4.1 Unités : jours et années
 
@@ -179,9 +183,9 @@ flowchart TD
     Q -->|"les deux"| R["Refusé : not both"]
     L --> U["unit = days"]
     N --> U2["unit = days | years"]
-    U --> C["Bornes vérifiées<br/>dans l'unité saisie"]
+    U --> C["_validate : signe, ordre, plafond<br/>dans l'unité saisie, erreurs accumulées"]
     U2 --> C
-    C --> J["Conversion en jours<br/>(1 an = 365 jours)"]
+    C --> J["Conversion en jours<br/>(années bissextiles comprises,<br/>à la date de la demande)"]
     J --> DB[("base + Terraform<br/>toujours en jours")]
     J --> ST["state client :<br/>retention_enabled + clés historiques en jours<br/>+ unit + bornes telles que saisies"]
 ```

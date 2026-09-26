@@ -17,6 +17,9 @@ Ces tests chargent les DAGs et les services **sans** `bp2i_airflow_library`,
   - `COS_TESTS_FORCE_STUBS=0` désactive le premier niveau (tout ce qui existe
     reste réel) : utile pour `tests/integration`, pas pour les unitaires.
 - Les services et les étapes de DAG testés sont toujours le vrai code.
+- La fixture `frozen_today` (autouse) fige `date.today()` du schéma de rétention au
+  2025-03-01 : les conversions années -> jours (bissextiles) deviennent déterministes
+  (1 an = 365 j, 2 ans = 730 j, 5 ans = 1826 j).
 - `stubs/bp2i.py` remplace les deux décorateurs du framework : `@step`
   enregistre la fonction Python brute de chaque étape au lieu de construire une
   tâche Airflow, et `depends(...)` vaut `None`. Chaque étape d'un DAG devient
