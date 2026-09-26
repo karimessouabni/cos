@@ -394,10 +394,8 @@ def compute_bucket_retention(payload_retention: BucketRetention, immutability: d
             "in the same unit, either in days (…_days) or in years (…_years)."
         )
 
-    errors = []
-    check_retention_bounds(unit, default, minimum, maximum, errors)
-    raise_on_errors(errors)
-
+    # Bornes, plafond et signe sont déjà vérifiés par BucketRetention._validate
+    # à la construction du payload ; ne pas dupliquer la règle ici.
     immutability["retention"]["retention_enabled"] = payload_retention.retention_enabled
     for key in _RETENTION_KEYS:
         immutability["retention"][key] = payload_retention.in_days(key)
