@@ -174,7 +174,7 @@ drapeau est relu tel quel dans le state.
 ```mermaid
 flowchart TD
     P["payload.retention<br/>retention_enabled + bornes"] --> Q{Format des bornes ?}
-    Q -->|"default / minimum / maximum"| L["Format historique<br/>→ recopié en *_days<br/>→ warning dans les logs"]
+    Q -->|"default / minimum / maximum"| L["Format historique<br/>→ recopié en *_days avant validation<br/>→ warning dans les logs"]
     Q -->|"*_days ou *_years"| N["Format courant"]
     Q -->|"les deux"| R["Refusé : not both"]
     L --> U["unit = days"]

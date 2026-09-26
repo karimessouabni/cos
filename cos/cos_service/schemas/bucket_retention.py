@@ -6,21 +6,24 @@ Deux formats de payload sont acceptés :
   ``default_days`` / ``default_years``, ``minimum_days`` / ``minimum_years``,
   ``maximum_days`` / ``maximum_years``. Une seule unité par demande.
 * **Format historique (déprécié)** : ``default``, ``minimum``, ``maximum``,
-  implicitement en jours.
+  implicitement en jours. Il est accepté tel quel pour ne pas casser les
+  clients existants, recopié vers ``*_days`` avant validation et signalé par
+  un warning. Le mélange des deux formats est refusé.
 
 Dans les deux formats, des bornes fournies sans ``retention_enabled`` activent
 la rétention (``retention_enabled`` passe à True) ; un ``False`` explicite est
-conservé. Il est accepté tel quel pour ne pas casser les
-  clients existants, recopié vers ``*_days`` à la validation, et signalé par
-  un warning. Le mélange des deux formats est refusé.
+conservé.
 
 Quel que soit le format d'entrée, la base et le Terraform interne ne
-connaissent que des jours (``in_days``). L'unité saisie est conservée
-(``unit``) pour être restituée au client dans le state.
+connaissent que des jours (``in_days``). L'unité saisie est exposée par la
+propriété ``unit`` et les bornes dans cette unité par ``default``, ``minimum``
+et ``maximum``.
 """
 
 import logging
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from typing import Any
+
+from pydantic import BaseModel, PrivateAttr, model_validator
 
 DAYS = "days"
 YEARS = "years"
@@ -58,59 +61,59 @@ class BucketRetention(BaseModel):
     minimum_years: int | None = None
     maximum_years: int | None = None
 
-    # Format historique, en jours. Déprécié : retiré à la date annoncée dans
-    # docs/adr/0001-retention-unites-jours-annees.md.
-    default: int | None = Field(default=None, deprecated=True)
-    minimum: int | None = Field(default=None, deprecated=True)
-    maximum: int | None = Field(default=None, deprecated=True)
-
     _legacy_format: bool = PrivateAttr(default=False)
 
-    # --- compatibilité -------------------------------------------------------
+    # --- compatibilité : format historique -----------------------------------
+    @model_validator(mode="wrap")
+    @classmethod
+    def _accept_legacy_format(cls, data: Any, handler):
+        """``default``/``minimum``/``maximum`` (jours implicites) -> ``*_days``.
+
+        Ces clés ne sont pas des champs : elles sont absorbées ici, avant la
+        validation des champs. À retirer à la date annoncée dans
+        docs/adr/0001-retention-unites-jours-annees.md.
+        """
+        legacy = {}
+        if isinstance(data, dict):
+            legacy = {key: data[key] for key in _RETENTION_KEYS if data.get(key) is not None}
+            if legacy:
+                explicit = [
+                    f"{key}_{unit}"
+                    for key in _RETENTION_KEYS
+                    for unit in UNITS
+                    if data.get(f"{key}_{unit}") is not None
+                ]
+                if explicit:
+                    raise ValueError(
+                        "Retention must use either the legacy fields (default, minimum, maximum) "
+                        f"or the unit-suffixed fields ({', '.join(explicit)}), not both."
+                    )
+                logger.warning(
+                    "Legacy retention payload (implicit days) received: %s. "
+                    "Use default_days / minimum_days / maximum_days (or *_years) instead.",
+                    legacy,
+                )
+                data = {key: value for key, value in data.items() if key not in _RETENTION_KEYS}
+                data.update({f"{key}_{DAYS}": value for key, value in legacy.items()})
+
+        instance = handler(data)
+        instance._legacy_format = bool(legacy)
+        return instance
+
+    # --- règles ----------------------------------------------------------------
     @model_validator(mode="after")
-    def _legacy_to_days(self) -> "BucketRetention":
-        # Lecture brute : l'accès attribut des champs dépréciés émet un
-        # DeprecationWarning, inutile ici.
-        legacy = {
-            key: self.__dict__.get(key)
-            for key in _RETENTION_KEYS
-            if self.__dict__.get(key) is not None
-        }
-        if not legacy:
-            return self
-
-        explicit = [
-            f"{key}_{unit}"
-            for key in _RETENTION_KEYS
-            for unit in UNITS
-            if getattr(self, f"{key}_{unit}") is not None
-        ]
-        if explicit:
-            raise ValueError(
-                "Retention must use either the legacy fields (default, minimum, maximum) "
-                f"or the unit-suffixed fields ({', '.join(explicit)}), not both."
-            )
-
-        logger.warning(
-            "Legacy retention payload (implicit days) received: %s. "
-            "Use default_days / minimum_days / maximum_days (or *_years) instead.",
-            legacy,
-        )
-        for key, value in legacy.items():
-            setattr(self, f"{key}_{DAYS}", value)
-        self._legacy_format = True
-        return self
-
-    @model_validator(mode="after")
-    def _auto_enable_retention(self) -> "BucketRetention":
+    def _validate(self) -> "BucketRetention":
         """Des bornes sans drapeau valent une demande de rétention.
 
         Un client qui envoie ``default_days`` sans ``retention_enabled`` veut
         évidemment une rétention : le drapeau passe à True. Un ``False``
         explicite est respecté (la demande sera déclinée en aval si un choix
-        ``retention_*`` l'exige).
+        ``retention_*`` l'exige). Le mélange d'unités n'est pas refusé ici :
+        un choix ``retention_daily`` / ``retention_yearly`` explicite tranche
+        dans ``apply_choice_unit`` ; sans choix, ``unit`` vaut None et le
+        service décline la demande.
         """
-        if self.retention_enabled is None and self._units_present():
+        if self.retention_enabled is None and not self.is_empty():
             logger.info("retention bounds given without retention_enabled: enabling retention")
             self.retention_enabled = True
         return self
@@ -120,7 +123,7 @@ class BucketRetention(BaseModel):
         """True si le client a envoyé l'ancien format (jours implicites)."""
         return self._legacy_format
 
-    # --- lecture -------------------------------------------------------------
+    # --- lecture ---------------------------------------------------------------
     def _units_present(self) -> set[str]:
         return {
             unit
@@ -145,6 +148,18 @@ class BucketRetention(BaseModel):
             return None
         return getattr(self, f"{key}_{unit}")
 
+    @property
+    def default(self) -> int | None:
+        return self.value("default")
+
+    @property
+    def minimum(self) -> int | None:
+        return self.value("minimum")
+
+    @property
+    def maximum(self) -> int | None:
+        return self.value("maximum")
+
     def in_days(self, key: str) -> int | None:
         """Borne ``key`` convertie en jours, unité canonique de la base et du Terraform."""
         unit = self.unit
@@ -157,10 +172,10 @@ class BucketRetention(BaseModel):
         return not self._units_present()
 
     def as_sent(self) -> dict:
-        """Champs de bornes tels que le client les a envoyés, pour écho dans le state.
+        """Bornes telles que le client les a envoyées, pour écho dans le state.
 
         Format historique : les valeurs sont déjà sous ``default/minimum/maximum``
-        en jours, rien à ajouter. Format courant : ``{key}_{unit}`` renseignés.
+        en jours dans le state, rien à ajouter. Format courant : ``{key}_{unit}``.
         """
         if self._legacy_format:
             return {}
