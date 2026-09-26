@@ -170,23 +170,23 @@ class TestLegacyFormat:
         assert (r.default, r.minimum, r.maximum) == (30, 10, 60)
         assert [r.in_days(k) for k in ("default", "minimum", "maximum")] == [30, 10, 60]
 
-    def test_legacy_fields_are_normalized_to_days_and_cleared(self):
+    def test_legacy_keys_are_not_fields(self):
         r = BucketRetention(default=30, minimum=10, maximum=60)
 
+        assert "default" not in BucketRetention.model_fields
         assert r.model_dump(exclude_none=True) == {
             "retention_enabled": True, "default_days": 30, "minimum_days": 10, "maximum_days": 60
         }
-        assert r.model_dump(by_alias=True)["default"] is None
 
-    def test_legacy_fields_are_visible_and_deprecated_in_the_json_schema(self):
-        schema = BucketRetention.model_json_schema()
+    def test_legacy_values_are_type_checked_like_the_days_fields(self):
+        with pytest.raises(ValidationError, match="default_days"):
+            BucketRetention(default="thirty")
 
-        for key in ("default", "minimum", "maximum"):
-            assert schema["properties"][key]["deprecated"] is True
-        assert "default_days" in schema["properties"]
+    def test_non_dict_input_is_left_untouched(self):
+        # Un objet déjà construit repasse dans le validateur sans être réinterprété.
+        r = BucketRetention(default=30, minimum=10, maximum=60)
 
-    def test_legacy_fields_accept_their_internal_name_too(self):
-        assert BucketRetention(legacy_default=30).default_days == 30
+        assert BucketRetention.model_validate(r) == r
 
     def test_same_model_as_the_days_format(self):
         legacy = BucketRetention(retention_enabled=True, default=30, minimum=10, maximum=60)

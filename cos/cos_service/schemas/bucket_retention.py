@@ -6,11 +6,10 @@ est de cinq ans, comparé dans l'unité saisie ; en jours il vaut l'équivalent
 exact de cinq ans à la date de la demande (années bissextiles comprises).
 
 Compatibilité : le format historique ``default`` / ``minimum`` / ``maximum``
-sans suffixe (jours implicites) reste accepté, via les champs dépréciés
-``legacy_*`` (alias ``default``, ``minimum``, ``maximum``). Il est recopié vers
-``*_days`` avant les contrôles, journalisé en warning, et sera retiré à la
-date annoncée dans docs/adr/0001-retention-unites-jours-annees.md. Le mélange
-des deux formats est refusé.
+sans suffixe (jours implicites) reste accepté. Il est recopié vers ``*_days``
+dans le payload brut, avant toute validation, journalisé en warning, et sera
+retiré à la date annoncée dans docs/adr/0001-retention-unites-jours-annees.md.
+Le mélange des deux formats est refusé.
 
 Des bornes fournies sans ``retention_enabled`` activent la rétention ; un
 ``false`` explicite est conservé.
@@ -19,7 +18,7 @@ import logging
 from datetime import date
 
 from dateutil.relativedelta import relativedelta
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +52,6 @@ def max_retention(unit: str) -> int:
 
 
 class BucketRetention(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
     retention_enabled: bool = False
     default_days: int | None = None
     default_years: int | None = None
@@ -62,15 +59,6 @@ class BucketRetention(BaseModel):
     minimum_years: int | None = None
     maximum_days: int | None = None
     maximum_years: int | None = None
-
-    # -- Format historique (déprécié) : mêmes bornes sans suffixe, en jours --
-    # Acceptées en entrée sous leur ancien nom (alias), recopiées vers *_days
-    # par _accept_legacy_format puis remises à None : le modèle n'a qu'une
-    # représentation. Visibles comme dépréciées dans le schéma JSON. À retirer
-    # à la date annoncée dans docs/adr/0001-retention-unites-jours-annees.md.
-    legacy_default: int | None = Field(default=None, alias="default", deprecated="use default_days or default_years")
-    legacy_minimum: int | None = Field(default=None, alias="minimum", deprecated="use minimum_days or minimum_years")
-    legacy_maximum: int | None = Field(default=None, alias="maximum", deprecated="use maximum_days or maximum_years")
 
     # -- helpers ------------------------------------------------------------
     @staticmethod
@@ -80,6 +68,39 @@ class BucketRetention(BaseModel):
             if any(get(f"{k}_{unit}") is not None for k in _RETENTION_KEYS):
                 return unit
         return None
+
+    # -- 0. Format historique (déprécié) : default/minimum/maximum = jours ----
+    # Recopiés vers *_days dans le payload brut, avant toute validation : le
+    # modèle ne connaît que les champs suffixés. Le mélange des deux formats
+    # est refusé. À retirer à la date annoncée dans
+    # docs/adr/0001-retention-unites-jours-annees.md.
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_format(cls, values):
+        if not isinstance(values, dict):
+            return values
+        legacy = {k: values[k] for k in _RETENTION_KEYS if values.get(k) is not None}
+        if not legacy:
+            return values
+        suffixed = [
+            f"{k}_{unit}"
+            for k in _RETENTION_KEYS
+            for unit in _UNITS
+            if values.get(f"{k}_{unit}") is not None
+        ]
+        if suffixed:
+            raise ValueError(
+                "Retention must use either the legacy fields (default, minimum, maximum) "
+                f"or the unit-suffixed fields ({', '.join(suffixed)}), not both."
+            )
+        logger.warning(
+            "Legacy retention payload (implicit days) received: %s. "
+            "Use default_days / minimum_days / maximum_days (or *_years) instead.",
+            legacy,
+        )
+        values = {k: v for k, v in values.items() if k not in _RETENTION_KEYS}
+        values.update({f"{k}_{DAYS}": v for k, v in legacy.items()})
+        return values
 
     # -- 1. Auto-enable si un paramètre est fourni sans le flag ---------------
     # Un ``retention_enabled`` à null (attribut Terraform optional non renseigné)
@@ -97,45 +118,11 @@ class BucketRetention(BaseModel):
         any_retention_param = any(
             values.get(name) is not None
             for k in _RETENTION_KEYS
-            for name in (k, f"legacy_{k}", *(f"{k}_{unit}" for unit in _UNITS))
+            for name in (k, *(f"{k}_{unit}" for unit in _UNITS))
         )
         if not retention_flag_given and any_retention_param:
             values["retention_enabled"] = True
         return values
-
-    # -- 1 bis. Format historique -> *_days, avant les contrôles ---------------
-    # Validateur "after" défini avant _validate : pydantic les exécute dans
-    # l'ordre de définition. Lecture via __dict__ pour ne pas déclencher le
-    # DeprecationWarning des champs dépréciés.
-    @model_validator(mode="after")
-    def _accept_legacy_format(self) -> "BucketRetention":
-        legacy = {
-            k: self.__dict__.get(f"legacy_{k}")
-            for k in _RETENTION_KEYS
-            if self.__dict__.get(f"legacy_{k}") is not None
-        }
-        if not legacy:
-            return self
-        suffixed = [
-            f"{k}_{unit}"
-            for k in _RETENTION_KEYS
-            for unit in _UNITS
-            if getattr(self, f"{k}_{unit}") is not None
-        ]
-        if suffixed:
-            raise ValueError(
-                "Retention must use either the legacy fields (default, minimum, maximum) "
-                f"or the unit-suffixed fields ({', '.join(suffixed)}), not both."
-            )
-        logger.warning(
-            "Legacy retention payload (implicit days) received: %s. "
-            "Use default_days / minimum_days / maximum_days (or *_years) instead.",
-            legacy,
-        )
-        for k, v in legacy.items():
-            setattr(self, f"{k}_{DAYS}", v)
-            self.__dict__[f"legacy_{k}"] = None
-        return self
 
     # -- 2. Tous les contrôles du payload, erreurs accumulées -----------------
     # Un seul validateur "after" qui n'échoue qu'à la fin : le client reçoit
