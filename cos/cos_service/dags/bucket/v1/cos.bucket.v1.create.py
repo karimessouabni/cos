@@ -348,6 +348,7 @@ def bucket_create():
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> dict | None:
         from cos_service.services.bucketService import complete_bucket_create
+        from cos_service.services.immutability_service import retention_state_for_client
 
         bucket_name = apply_tf_result["bucket_name"]["value"]
         vpe = f"s3.direct.{payload.region}.cloud-object-storage.appdomain.cloud"
@@ -371,7 +372,8 @@ def bucket_create():
             "clean_status": Status.SUCCESS.value,
             "lifecycle_policy_rule_enabled": False,
             "immutability_choice": immutability["immutability_choice"],
-            "retention": immutability["retention"],
+            # Clés historiques en jours conservées, unité et bornes saisies ajoutées.
+            "retention": retention_state_for_client(payload.retention, immutability["retention"]),
             "object_locking_enabled": immutability["object_locking_enabled"],
             "object_lock_duration_days": immutability["object_lock_duration_days"],
             "object_lock_duration_years": immutability["object_lock_duration_years"],

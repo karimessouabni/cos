@@ -36,7 +36,7 @@ cos/
 │   ├── repository/
 │   ├── schemas/
 │   │   ├── bucket_backup.py          (déduit)  BucketBackup
-│   │   ├── bucket_retention.py                 BucketRetention, DAYS, YEARS, MAX_RETENTION_YEARS, max_retention, _RETENTION_KEYS
+│   │   ├── bucket_retention.py                  ← reconstitué : deux formats de payload (historique en jours, *_days/*_years), jours canoniques
 │   │   ├── immutability.py                      ← reconstitué (enum Immutability)
 │   │   ├── status.py                 (déduit)  Status
 │   │   └── subscription_status.py    (déduit)  SubscriptionStatus
@@ -45,7 +45,7 @@ cos/
 │   │   ├── bucketService.py                     ← reconstitué + corrigé (lecture, appels S3, process_bucket_creation, update_bucket_*, complete_bucket_create)
 │   │   ├── contextService.py         (déduit)  get_realm, get_apcodes, get_account_instances_crn
 │   │   ├── cosService.py             (déduit)  get_cos_instance_by_name, get_cos_instance_status
-│   │   ├── immutability_service.py              ← reconstitué
+│   │   ├── immutability_service.py              ← reconstitué (+ bornes vérifiées au create, retention_state_for_client)
 │   │   ├── recovery_range_service.py            ← nouveau : point de restauration et choix du range
 │   │   ├── schematics_service.py                ← reconstitué + corrigé (create_or_update_ws, update_ws, update_ws_variables, run_workspace)
 │   │   ├── vault_service.py          (déduit)  get_vault_secrets
@@ -54,14 +54,15 @@ cos/
 │   └── utils/
 ├── terraform/
 │   ├── README.md                     ← chaîne DAG -> Schematics -> modules, schémas et points d'attention
-│   ├── README.md                     ← chaîne DAG -> Schematics -> modules, schémas et points d'attention
 │   ├── v1.12/backup_vault/main.tf                   ← reconstitué
 │   └── v1.12/bucket/main.tf                         ← reconstitué + corrigé (backup_policies)
 ├── tests/                            ← tests unitaires sans les libs internes (voir tests/README.md)
 │   ├── conftest.py                       stubs installés seulement si le vrai module manque
 │   ├── stubs/                            bp2i.py (step/depends), orm.py (sqlalchemy, modèles), schemas.py
 │   ├── dags/                             test_bucket_create.py, _delete.py, _update.py, _restore.py
+│   ├── schemas/                          test_bucket_retention.py (contrat des deux formats)
 │   └── services/
+├── docs/adr/                         ← décisions d'architecture (0001 : rétention jours/années sans rupture v1)
 ├── pytest.ini
 ├── requirements-test.txt
 ├── .gitignore
@@ -70,7 +71,7 @@ cos/
 ├── poetry.lock.txt
 ├── pyproject.toml
 ├── pyproject.toml.txt
-├── README.md
+├── README.md                         ← présentation vulgarisée du produit (diagrammes Mermaid)
 └── requirements-dev.txt
 ```
 

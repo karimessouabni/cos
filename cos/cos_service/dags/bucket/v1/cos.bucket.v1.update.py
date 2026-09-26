@@ -207,6 +207,7 @@ def bucket_update():
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> dict:
         from cos_service.services.bucketService import process_bucket_update, update_bucket_workspace_status
+        from cos_service.services.immutability_service import retention_state_for_client
 
         immutability = validated["immutability"]
         enable_custom_permissions = validated["enable_custom_permissions"]
@@ -214,7 +215,8 @@ def bucket_update():
         # Le state reflète la configuration effective calculée par le service,
         # y compris le choix d'immutabilité qu'il a résolu.
         state_manager.push_state({
-            "retention": immutability["retention"],
+            # Clés historiques en jours conservées, unité et bornes saisies ajoutées.
+            "retention": retention_state_for_client(payload.retention, immutability["retention"]),
             "object_lock_duration_days": immutability["object_lock_duration_days"],
             "object_lock_duration_years": immutability["object_lock_duration_years"],
             "object_locking_enabled": immutability["object_locking_enabled"],
