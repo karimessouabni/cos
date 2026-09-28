@@ -54,7 +54,7 @@ rien demander. Le user est mémorisé (pas le mot de passe).
 
 Token Vault
     export VAULT_TOKEN=hvs....                # ou --vault-token
-    --uid la90261                             # uid passé au service token
+    --uid lh90871                             # uid passé au service token
                                               # (défaut: $TOOLCHAIN_UID, sinon demandé
                                               # une fois puis mémorisé)
 Le token récupéré est sauvegardé dans ~/.cache/cos-toolchain/state.json
@@ -114,7 +114,7 @@ VAULTS = {
 # (Swagger sur <url>/docs). Réponse au format Vault : auth.client_token.
 # Instance Vault -> URL du service ; "" : pas de service, passage par l'UI Vault.
 TOKEN_SERVICES = {
-    "dev": "https://s02vi9956141:4430",
+    "dev": "https://s02vl9956141:4430",
     "staging": "",  # URL à renseigner
     "group": "",  # URL à renseigner
 }
@@ -882,7 +882,7 @@ def resolve_uid(args: argparse.Namespace, ask: Callable[[str], str] = input) -> 
     if not uid:
         if not sys.stdin.isatty():
             raise CliExit(EXIT_USAGE, f"uid manquant pour le service token : --uid ou ${UID_ENV}")
-        uid = ask(f"uid pour le service token (ex: la90261) [Entrée = {getpass.getuser()}] : ").strip() \
+        uid = ask(f"uid pour le service token (ex: lh90871) [Entrée = {getpass.getuser()}] : ").strip() \
             or getpass.getuser()
     if uid != load_setting("uid"):
         save_setting("uid", uid)

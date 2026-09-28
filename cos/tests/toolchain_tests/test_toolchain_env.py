@@ -25,7 +25,7 @@ TOKEN_OK = "hvs.CAESIEKO1gxUBXCdPSqoxyv5kr8P0bG4Mc5lgJEOsaVtqeTq"
 TOKEN_BAD = "hvs.CAESIFXQc9s9BYB1K9iDoRwwugBc3iFctwrVl30RdM9Ml4au"
 API_KEY = "YqGLLC6QTdV46Usp0ITQAuXGYAeKNRLRhnf9WH4G9KmK"
 SECRET_PATH = "ibm_ac002i000263/creds/rl002i000138_buhub"
-UID = "la90261"
+UID = "lh90871"
 
 
 class FakeVault(http.server.BaseHTTPRequestHandler):
@@ -291,8 +291,8 @@ class ProxyTest(unittest.TestCase):
 
     def test_with_no_proxy_adds_token_service_host(self):
         proxy = {"https_proxy": "http://p", "no_proxy": "localhost,.echonet"}
-        self.assertEqual(te.with_no_proxy(proxy, "https://s02vi9956141:4430")["no_proxy"],
-                         "localhost,.echonet,s02vi9956141")
+        self.assertEqual(te.with_no_proxy(proxy, "https://s02vl9956141:4430")["no_proxy"],
+                         "localhost,.echonet,s02vl9956141")
         self.assertEqual(te.with_no_proxy(proxy, "https://x.echonet/")["no_proxy"], "localhost,.echonet")
         self.assertEqual(te.with_no_proxy(proxy, "")["no_proxy"], "localhost,.echonet")
         self.assertEqual(te.with_no_proxy({}, "https://s02:1"), {})
@@ -407,8 +407,8 @@ class ResolveApiKeyTest(VaultServerTest):
     def test_resolve_uid_prompt_then_remembered(self):
         args = te.parse_args(["--no-proxy"])
         with mock.patch.object(sys.stdin, "isatty", return_value=True):
-            self.assertEqual(te.resolve_uid(args, ask=lambda q: " la90261 "), "la90261")
-        self.assertEqual(te.resolve_uid(args, ask=lambda q: self.fail("prompt")), "la90261")
+            self.assertEqual(te.resolve_uid(args, ask=lambda q: " lh90871 "), "lh90871")
+        self.assertEqual(te.resolve_uid(args, ask=lambda q: self.fail("prompt")), "lh90871")
         self.assertEqual(te.resolve_uid(te.parse_args(["--uid", "x"]), ask=lambda q: self.fail("prompt")), "x")
 
     def test_new_key_ignores_cached_key_but_keeps_token(self):
@@ -571,7 +571,7 @@ class MainTest(VaultServerTest):
         variables = json.loads(out.getvalue())
         self.assertEqual(variables["https_proxy"], "http://u:p%21@127.0.0.1:9")
         self.assertEqual(variables["HTTP_PROXY"], "http://u:p%21@127.0.0.1:9")
-        self.assertEqual(variables["no_proxy"], "127.0.0.1,s02vi9956141")  # + hôte du service token
+        self.assertEqual(variables["no_proxy"], "127.0.0.1,s02vl9956141")  # + hôte du service token
 
     def test_run_plan(self):
         run = mock.Mock(return_value=5)

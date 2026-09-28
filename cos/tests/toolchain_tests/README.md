@@ -24,7 +24,7 @@ ne refait que ce qui est nécessaire :
 
 Le `client_token` renvoyé par le service token est directement un token Vault (30 jours) :
 c'est celui que l'UI affiche ensuite dans « Copy token ». Le script l'utilise donc tel
-quel, sans passer par l'UI. L'uid (ex. `la90261`) est demandé au premier lancement puis
+quel, sans passer par l'UI. L'uid (ex. `lh90871`) est demandé au premier lancement puis
 mémorisé, comme le user du proxy ; le mot de passe du proxy est redemandé à chaque
 lancement et n'est jamais écrit sur disque. Le cache est dans
 `~/.cache/cos-toolchain/state.json` (lisible par soi seul).
@@ -58,13 +58,13 @@ l'UI Vault), `--vault` / `--vault-url` / `--token-service` / `--secret-path` /
 
 | `--env` | Vault | service token | secret lu |
 |---|---|---|---|
-| `int` | `hvault-dev.fr.net.intra` | `https://s02vi9956141:4430` | `ibm_ac002i000263/creds/rl002i000138_buhub` |
+| `int` | `hvault-dev.fr.net.intra` | `https://s02vl9956141:4430` | `ibm_ac002i000263/creds/rl002i000138_buhub` |
 | `qual`, `pprod` | `hvault.staging.echonet` | à renseigner (UI Vault en attendant) | `ibm_ac002i000263/creds/rl002i000077_buhub` (à vérifier) |
 | `prod` | `hvault.group.echonet` | à renseigner (UI Vault en attendant) | `ibm_ac002i000266/creds/rl002i000102_buhub` |
 
 Namespace Vault : `AP85135`. Tout est dans `ENVIRONMENTS`, `VAULTS` et `TOKEN_SERVICES`
 en tête du script. `no_proxy` vaut `localhost,127.0.0.1,.echonet,0.0.0.0` : les Vault
-`.echonet` sont joints en direct, `hvault-dev.fr.net.intra` via le proxy, et l'hôte du service token (`s02vi9956141`) est ajouté automatiquement à `no_proxy` : il n'est joignable qu'en direct.
+`.echonet` sont joints en direct, `hvault-dev.fr.net.intra` via le proxy, et l'hôte du service token (`s02vl9956141`) est ajouté automatiquement à `no_proxy` : il n'est joignable qu'en direct.
 
 ### Secours : token lu dans Chrome
 
