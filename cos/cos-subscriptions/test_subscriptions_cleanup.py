@@ -281,7 +281,7 @@ class ClientTests(unittest.TestCase):
             client.delete_subscription("0d8022cd-5e47-48be-b4ac-b50d1bb54211")
         req.assert_called_once_with(
             "DELETE",
-            "/apl/v1/subscriptions/0d8022cd-5e47-48be-b4ac-b50d1bb54211",
+            "/api/v1/subscriptions/0d8022cd-5e47-48be-b4ac-b50d1bb54211",
             {"product_branch": "main", "payload": {}},
         )
 

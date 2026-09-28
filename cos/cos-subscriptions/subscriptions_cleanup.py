@@ -15,7 +15,7 @@ Mode delete (défaut)
           non éligible,
         - la liste est non vide et ne contient pas d'autre action.
 2. Pour chaque souscription éligible :
-   - sans delete en échec : DELETE {base}/apl/v1/subscriptions/<subscription_id>
+   - sans delete en échec : DELETE {base}/api/v1/subscriptions/<subscription_id>
      avec le payload {"product_branch": "main", "payload": {}} ;
    - avec delete(s) en échec : on relance la demande existante plutôt que
      d'en créer une nouvelle :
@@ -908,7 +908,7 @@ class OrchestratorClient:
         except urllib.error.URLError as exc:
             raise OrchestratorApiError(f"{method} {url} -> {exc.reason}") from exc
 
-    # --- multireader / apl ---
+    # --- multireader / api ---
 
     def get_subscriptions_page(self, page: int, size: int = DEFAULT_PAGE_SIZE) -> Any:
         """GET /multireader/api/v1/subscriptions?page=<page>&size=<size>."""
@@ -928,8 +928,8 @@ class OrchestratorClient:
         return {"result": {"rows": filter_product(dedupe_rows(rows), product)}}
 
     def delete_subscription(self, subscription_id: str, product_branch: str = DEFAULT_PRODUCT_BRANCH) -> Any:
-        """DELETE /apl/v1/subscriptions/<id> avec {"product_branch": ..., "payload": {}}."""
-        return self._request("DELETE", f"/apl/v1/subscriptions/{_quote(subscription_id)}",
+        """DELETE /api/v1/subscriptions/<id> avec {"product_branch": ..., "payload": {}}."""
+        return self._request("DELETE", f"/api/v1/subscriptions/{_quote(subscription_id)}",
                              {"product_branch": product_branch, "payload": {}})
 
     # --- demandes ---
