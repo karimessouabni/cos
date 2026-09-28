@@ -19,6 +19,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import subscriptions_cleanup as sc  # noqa: E402
 
+# Le cache de tokens des tests ne doit jamais toucher celui de l'utilisateur.
+os.environ["XDG_CACHE_HOME"] = tempfile.mkdtemp(prefix="cos-subscriptions-tests-")
+
 
 def _demand(action: str, status: str = "SUCCESS", uuid: str = "", create_date: str = "") -> dict:
     return {"action": action, "status": status, "status_reason": status.lower(),
@@ -701,7 +704,7 @@ class InteractiveModeTests(unittest.TestCase):
         self.assertFalse(sc.parse_args(argv).delete)
 
     def test_delete_for_real_with_choices(self):
-        answers = ["1", "2", "2", "h12345", "", "dev", "", "2", "4"]
+        answers = ["1", "2", "2", "h12345", "", "dev", "", "3", "4"]
         argv, _ = self._wizard(answers)
         self.assertEqual(argv, ["--delete", "--user", "h12345", "--product-branch", "dev",
                                 "--manual-token", "--workers", "4"])
@@ -724,7 +727,7 @@ class InteractiveModeTests(unittest.TestCase):
 
     def test_token_is_masked_in_the_printed_command(self):
         with mock.patch("getpass.getpass", return_value="Bearer secret-token"):
-            argv, printed = self._wizard(["1", "1", "1", "", "", "3"])
+            argv, printed = self._wizard(["1", "1", "1", "", "", "4"])
         self.assertEqual(argv, ["--token", "secret-token"])
         self.assertNotIn("secret-token", printed)
         self.assertIn("--token '<token>'", printed)
@@ -750,6 +753,98 @@ class InteractiveModeTests(unittest.TestCase):
         self.assertTrue(sc.parse_args(["--dry-run"]).dry_run)
         with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
             sc.parse_args(["--dry-run", "--delete"])
+
+
+class TokenCacheTests(unittest.TestCase):
+    BASE = "https://gw.example"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env = mock.patch.dict(os.environ, {"XDG_CACHE_HOME": self.tmp.name, "ORCHESTRATOR_TOKEN": ""})
+        self.env.start()
+        self.stderr = mock.patch("sys.stderr")
+        self.stderr.start()
+
+    def tearDown(self):
+        self.stderr.stop()
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def _args(self, *extra):
+        return sc.parse_args(["--base-url", self.BASE, *extra])
+
+    def test_save_and_load(self):
+        token = _jwt(FAR_FUTURE)
+        sc.save_cached_token(self.BASE + "/", token)
+        self.assertEqual(sc.load_cached_token(self.BASE), token)
+        self.assertEqual(os.stat(sc.token_cache_path()).st_mode & 0o777, 0o600)
+        self.assertIsNone(sc.load_cached_token("https://other"))
+
+    def test_expired_or_opaque_tokens_are_not_reused(self):
+        sc.save_cached_token(self.BASE, _jwt(1_000))
+        self.assertIsNone(sc.load_cached_token(self.BASE))
+        sc.forget_cached_token(self.BASE)
+        sc.save_cached_token(self.BASE, "opaque")
+        self.assertIsNone(sc.load_cached_token(self.BASE))
+
+    def test_corrupted_cache_is_ignored(self):
+        os.makedirs(os.path.dirname(sc.token_cache_path()))
+        with open(sc.token_cache_path(), "w") as fh:
+            fh.write("{pas du json")
+        self.assertIsNone(sc.load_cached_token(self.BASE))
+
+    def test_connect_reuses_saved_token_without_browser(self):
+        token = _jwt(FAR_FUTURE)
+        sc.save_cached_token(self.BASE, token)
+        with mock.patch.object(sc, "acquire_token_interactively") as acquire:
+            client = sc.connect(self._args())
+        self.assertEqual(client.token, token)
+        acquire.assert_not_called()
+
+    def test_connect_saves_acquired_token(self):
+        token = _jwt(FAR_FUTURE)
+        with mock.patch.object(sc, "acquire_token_interactively", return_value=token):
+            sc.connect(self._args())
+        self.assertEqual(sc.load_cached_token(self.BASE), token)
+
+    def test_new_token_flag_skips_the_cache(self):
+        sc.save_cached_token(self.BASE, _jwt(FAR_FUTURE))
+        fresh = _jwt(FAR_FUTURE + 1)
+        with mock.patch.object(sc, "acquire_token_interactively", return_value=fresh):
+            self.assertEqual(sc.connect(self._args("--new-token")).token, fresh)
+        self.assertEqual(sc.load_cached_token(self.BASE), fresh)
+
+    def test_rejected_saved_token_is_replaced_once(self):
+        sc.save_cached_token(self.BASE, _jwt(FAR_FUTURE))
+        fresh = _jwt(FAR_FUTURE + 1)
+        calls = []
+
+        def get_subscriptions(self_client, *a, **k):
+            calls.append(self_client.token)
+            if len(calls) == 1:
+                raise sc.OrchestratorApiError("HTTP 401", status_code=401)
+            return {"result": {"rows": []}}
+
+        with mock.patch.object(sc.OrchestratorClient, "get_subscriptions", get_subscriptions), \
+             mock.patch.object(sc, "acquire_token_interactively", return_value=fresh):
+            client, rows = sc.connect_and_list(self._args())
+        self.assertEqual((client.token, rows), (fresh, []))
+        self.assertEqual(calls, [_jwt(FAR_FUTURE), fresh])
+        self.assertEqual(sc.load_cached_token(self.BASE), fresh)
+
+    def test_rejected_cli_token_is_not_retried(self):
+        with mock.patch.object(sc.OrchestratorClient, "get_subscriptions",
+                               side_effect=sc.OrchestratorApiError("HTTP 401", status_code=401)), \
+             mock.patch.object(sc, "acquire_token_interactively") as acquire:
+            with self.assertRaises(sc.CliExit) as cm:
+                sc.connect_and_list(self._args("--token", "opaque"))
+        self.assertEqual(cm.exception.code, 2)
+        acquire.assert_not_called()
+
+    def test_forget_token_flag(self):
+        sc.save_cached_token(self.BASE, _jwt(FAR_FUTURE))
+        self.assertEqual(sc.main(["--base-url", self.BASE, "--forget-token"]), 0)
+        self.assertIsNone(sc.load_cached_token(self.BASE))
 
 
 @unittest.skipUnless(sc.find_chromium_browser() and os.environ.get("RUN_BROWSER_TESTS"),

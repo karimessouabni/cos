@@ -37,6 +37,10 @@ TOUTES les demandes sont en ON_ERROR.
 
 Token
     export ORCHESTRATOR_TOKEN=...            # ou --token
+Le token récupéré est sauvegardé dans ~/.cache/cos-subscriptions/tokens.json
+(lisible par toi seul) et réutilisé tant qu'il est valide : Chrome ne s'ouvre
+que s'il est expiré ou refusé (401). --new-token force un nouveau token,
+--forget-token supprime celui sauvegardé.
 Sans token valide (absent ou JWT expiré), le script ouvre le Swagger dans un
 Chrome / Edge dédié, toujours en navigation privée : on se connecte en SSO
 Keycloak, on clique Authorize, et le token est lu automatiquement dans
@@ -131,6 +135,10 @@ class OrchestratorApiError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
         self.payload = payload
+
+
+class TokenRejected(Exception):
+    """L'API a refusé le token (HTTP 401)."""
 
 
 class CliExit(Exception):
@@ -767,7 +775,7 @@ def resolve_token(
             if left is not None:
                 _log(f"Token valide encore {left // 60} min.")
             return token
-        _log("Token fourni expiré : récupération d'un nouveau depuis le Swagger.")
+        _log("Token expiré : récupération d'un nouveau depuis le Swagger.")
     token = (acquire or acquire_token_interactively)(swagger_url)
     if not token:
         raise CliExit(EXIT_USAGE, f"Token manquant: --token, ${TOKEN_ENV}, ou copie depuis le Swagger "
@@ -776,6 +784,59 @@ def resolve_token(
     if left is not None:
         _log(f"Token récupéré, valide encore {left // 60} min.")
     return token
+
+
+# --------------------------------------------------------------------------- #
+# Token : cache local (réutilisé tant qu'il est valide)
+# --------------------------------------------------------------------------- #
+
+def token_cache_path() -> str:
+    """~/.cache/cos-subscriptions/tokens.json (ou $XDG_CACHE_HOME/...)."""
+    root = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(root, "cos-subscriptions", "tokens.json")
+
+
+def _read_token_cache() -> dict[str, str]:
+    try:
+        with open(token_cache_path(), encoding="utf-8") as fh:
+            cache = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in cache.items() if isinstance(v, str)} if isinstance(cache, dict) else {}
+
+
+def _write_token_cache(cache: dict[str, str]) -> None:
+    """Écrit le cache lisible par l'utilisateur seul (dossier 0700, fichier 0600)."""
+    path = token_cache_path()
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+    except OSError as exc:
+        _log(f"Token non sauvegardé ({exc}).")
+
+
+def load_cached_token(base_url: str) -> str | None:
+    """Token sauvegardé pour cette orchestrator s'il est encore valide."""
+    token = _read_token_cache().get(base_url.rstrip("/"))
+    left = token_seconds_left(token) if token else None
+    return token if left is not None and left >= TOKEN_MIN_VALIDITY else None
+
+
+def save_cached_token(base_url: str, token: str) -> None:
+    """Sauvegarde un JWT (les tokens sans expiration lisible ne sont pas gardés)."""
+    if jwt_expiry(token) is None:
+        return
+    cache = _read_token_cache()
+    cache[base_url.rstrip("/")] = token
+    _write_token_cache(cache)
+
+
+def forget_cached_token(base_url: str) -> None:
+    cache = _read_token_cache()
+    if cache.pop(base_url.rstrip("/"), None) is not None:
+        _write_token_cache(cache)
 
 
 # --------------------------------------------------------------------------- #
@@ -913,6 +974,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                            f"(défaut: ${SWAGGER_URL_ENV}, sinon <base-url>{SWAGGER_PATH})")
     auth.add_argument("--manual-token", action="store_true",
                       help="ne pas piloter Chrome / Edge : copier le token à la main depuis le Swagger")
+    auth.add_argument("--new-token", action="store_true",
+                      help="ignorer le token sauvegardé et en récupérer un nouveau")
+    auth.add_argument("--forget-token", action="store_true",
+                      help="supprimer le token sauvegardé, puis quitter")
     auth.add_argument("--print-bookmarklet", action="store_true",
                       help="affiche le bookmarklet qui copie le token depuis le Swagger, puis quitte")
 
@@ -956,6 +1021,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="sortie JSON (liste des éléments retenus)")
 
     args = parser.parse_args(argv)
+    args.token_from_cli = bool(args.token)
     args.swagger_url = args.swagger_url or args.base_url.rstrip("/") + SWAGGER_PATH
     if args.page_size < 1:
         parser.error("--page-size doit être >= 1")
@@ -978,9 +1044,15 @@ def _acquire_token(args: argparse.Namespace, swagger_url: str | None) -> str:
     return acquire_token_interactively(swagger_url, auto=not args.manual_token, auto_browser=browser_token)
 
 
-def connect(args: argparse.Namespace) -> OrchestratorClient:
-    """Client HTTP avec un token valide (récupéré depuis le Swagger au besoin)."""
-    args.token = resolve_token(args.token, args.swagger_url, lambda url: _acquire_token(args, url))
+def connect(args: argparse.Namespace, use_cache: bool = True) -> OrchestratorClient:
+    """Client HTTP avec un token valide : --token / $ORCHESTRATOR_TOKEN, sinon le
+    token sauvegardé, sinon un nouveau récupéré depuis le Swagger (puis sauvegardé)."""
+    cached = load_cached_token(args.base_url) if use_cache and not args.new_token else None
+    if not args.token and cached:
+        _log(f"Token sauvegardé réutilisé ({token_cache_path()}).")
+    args.token = resolve_token(args.token or cached, args.swagger_url, lambda url: _acquire_token(args, url))
+    if args.token != cached:
+        save_cached_token(args.base_url, args.token)
     try:
         return _make_client(args)
     except ValueError as exc:
@@ -993,8 +1065,29 @@ def load_rows(client: OrchestratorClient, args: argparse.Namespace) -> list[Row]
         body = client.get_subscriptions(args.product, args.page_size, args.first_page,
                                         lambda page, count: _log(f"page {page}: {count} row(s)"))
     except OrchestratorApiError as exc:
+        if exc.status_code == 401:
+            raise TokenRejected(str(exc)) from exc
         raise CliExit(EXIT_GET_FAILED, f"GET échoué: {exc}") from exc
     return extract_rows(body)
+
+
+def connect_and_list(args: argparse.Namespace) -> tuple[OrchestratorClient, list[Row]]:
+    """connect() + load_rows() ; si le token est refusé (401), il est oublié et
+    un nouveau est récupéré depuis le Swagger, une seule fois."""
+    client = connect(args)
+    try:
+        return client, load_rows(client, args)
+    except TokenRejected as exc:
+        forget_cached_token(args.base_url)
+        if args.token_from_cli:
+            raise CliExit(EXIT_GET_FAILED, f"Token refusé: {exc}") from exc
+        _log("Token refusé (401) : récupération d'un nouveau depuis le Swagger.")
+        args.token = None
+        client = connect(args, use_cache=False)
+        try:
+            return client, load_rows(client, args)
+        except TokenRejected as exc2:
+            raise CliExit(EXIT_GET_FAILED, f"Token refusé: {exc2}") from exc2
 
 
 def _confirm(question: str) -> bool:
@@ -1190,7 +1283,8 @@ def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
     if base_url != DEFAULT_BASE_URL:
         argv += ["--base-url", base_url]
     argv += _choose("Récupération du token (si $ORCHESTRATOR_TOKEN absent ou expiré) ?", [
-        ("Automatique : Chrome en navigation privée, login SSO Keycloak", []),
+        ("Token sauvegardé s'il est encore valide, sinon Chrome en navigation privée (Keycloak)", []),
+        ("Nouveau token via Chrome en navigation privée (Keycloak)", ["--new-token"]),
         ("Copier-coller manuel depuis le Swagger", ["--manual-token"]),
         ("Coller le token maintenant", ["--token", ""]),
     ], ask)
@@ -1228,9 +1322,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_bookmarklet:
         print(BOOKMARKLET)
         return EXIT_OK
+    if args.forget_token:
+        forget_cached_token(args.base_url)
+        _log(f"Token sauvegardé supprimé ({token_cache_path()}).")
+        return EXIT_OK
     try:
-        client = connect(args)
-        rows = load_rows(client, args)
+        client, rows = connect_and_list(args)
         return (run_on_error if args.on_error else run_cleanup)(args, client, rows)
     except CliExit as exc:
         if str(exc):
