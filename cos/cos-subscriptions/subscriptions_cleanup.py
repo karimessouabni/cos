@@ -509,16 +509,24 @@ def acquire_token_interactively(
     read_clip: Callable[[], str] = read_clipboard,
     ask: Callable[[str], str] = getpass.getpass,
     open_url: Callable[[str], Any] = webbrowser.open,
+    ask_url: Callable[[str], str] = input,
     attempts: int = 3,
 ) -> str:
-    """Ouvre le Swagger, attend que l'utilisateur copie le token puis le lit dans
-    le presse-papiers (ou le prend tel quel s'il est collé au prompt).
-    Retourne "" hors terminal interactif ou après `attempts` essais."""
+    """Ouvre le Swagger (URL demandée si non configurée), attend que l'utilisateur
+    copie le token puis le lit dans le presse-papiers (ou le prend tel quel s'il
+    est collé au prompt). Retourne "" hors terminal interactif ou après `attempts` essais."""
     if not sys.stdin.isatty():
+        _log("Terminal non interactif : impossible de récupérer le token depuis le Swagger "
+             "(lancer le script dans un terminal, ou passer --token).")
         return ""
+    if not swagger_url:
+        swagger_url = ask_url(f"URL du Swagger à ouvrir (${SWAGGER_URL_ENV} non défini, Entrée pour passer) : ").strip()
+        if swagger_url:
+            _log(f"Astuce : export {SWAGGER_URL_ENV}={swagger_url}")
     if swagger_url:
         _log(f"Ouverture du Swagger : {swagger_url}")
-        open_url(swagger_url)
+        if not open_url(swagger_url):
+            _log(f"Navigateur non ouvert : ouvrir {swagger_url} à la main.")
     _log("Se connecter en SSO, cliquer Authorize puis copier le token (bookmarklet : --print-bookmarklet).")
     for _ in range(attempts):
         pasted = clean_token(ask("Entrée pour lire le presse-papiers (ou coller le token) : "))

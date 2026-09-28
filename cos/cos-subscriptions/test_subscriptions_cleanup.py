@@ -624,19 +624,29 @@ class TokenTests(unittest.TestCase):
         opened = []
         with mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch("sys.stderr"):
             token = sc.acquire_token_interactively(
-                "https://swagger", read_clip=lambda: next(clips), ask=lambda prompt: "", open_url=opened.append)
+                "https://swagger", read_clip=lambda: next(clips), ask=lambda prompt: "", open_url=lambda url: opened.append(url) or True)
         self.assertEqual(token, _jwt(FAR_FUTURE))
         self.assertEqual(opened, ["https://swagger"])
 
     def test_acquire_accepts_pasted_token(self):
         with mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch("sys.stderr"):
             token = sc.acquire_token_interactively(
-                None, read_clip=lambda: "", ask=lambda prompt: "Bearer opaque-token")
+                None, read_clip=lambda: "", ask=lambda prompt: "Bearer opaque-token", ask_url=lambda prompt: "")
         self.assertEqual(token, "opaque-token")
+
+    def test_acquire_asks_swagger_url_when_not_configured(self):
+        opened = []
+        with mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch("sys.stderr"):
+            token = sc.acquire_token_interactively(
+                None, read_clip=lambda: _jwt(FAR_FUTURE), ask=lambda prompt: "",
+                open_url=lambda url: opened.append(url) or True, ask_url=lambda prompt: " https://swagger ")
+        self.assertEqual(token, _jwt(FAR_FUTURE))
+        self.assertEqual(opened, ["https://swagger"])
 
     def test_acquire_gives_up_outside_a_terminal(self):
         with mock.patch.object(sys.stdin, "isatty", return_value=False):
-            self.assertEqual(sc.acquire_token_interactively("https://swagger", open_url=self.fail), "")
+            with mock.patch("sys.stderr"):
+                self.assertEqual(sc.acquire_token_interactively("https://swagger", open_url=self.fail), "")
 
     def test_token_requested_only_when_needed(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
