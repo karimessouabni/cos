@@ -272,11 +272,23 @@ class TestSaveBucketInDb:
             "backup": data["immutability"]["backup"],
             "enable_custom_permissions": False,
             "immutability_choice": "object_lock",
+            "deprecations": [],
         })
         services.bucketService.process_bucket_update.assert_called_once_with(
             "sub-1", data["immutability"], False, "my bucket", "session"
         )
         services.bucketService.update_bucket_workspace_status.assert_called_once_with("sub-1", Status.SUCCESS, "session")
+
+    def test_legacy_retention_format_pushes_a_deprecation_notice(self, update_dag, services, make_payload, state_manager):
+        data = validated()
+        payload = make_payload(retention=BucketRetention(default=30, minimum=10, maximum=60))
+
+        update_dag.steps["save_bucket_in_db"](
+            validated=data, is_update_ws_done=True, payload=payload, state_manager=state_manager, session="session"
+        )
+
+        notices = state_manager.push_state.call_args.args[0]["deprecations"]
+        assert [n["code"] for n in notices] == ["retention.legacy_format"]
 
     def test_retention_state_echoes_the_unit_sent_by_the_client(self, update_dag, services, make_payload, state_manager):
         data = validated()

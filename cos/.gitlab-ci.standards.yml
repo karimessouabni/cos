@@ -1,6 +1,4 @@
-# Jobs de standards_check à inclure depuis .gitlab-ci.yml :
-#   include:
-#     - local: '.gitlab-ci.standards.yml'
+# Jobs de standards_check, inclus depuis .gitlab-ci.yml.
 # Ils s'appuient sur `.base_job` (Poetry) défini dans .gitlab-requirements.yml.
 
 # Aucun nom de branche de feature ne doit être codé en dur dans le service

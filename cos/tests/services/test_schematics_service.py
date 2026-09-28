@@ -112,7 +112,54 @@ class TestSettingsFor:
         assert "could not read Airflow Variable cos_tf_branch" in caplog.text
 
 
+class TestProductBranch:
+    """La branche de la demande l'emporte : Schematics clone celle sur laquelle le DAG tourne."""
+
+    def test_product_branch_is_used_on_int(self, no_overrides):
+        assert svc.settings_for("int", product_branch="feature/retention").branch == "feature/retention"
+
+    def test_product_branch_wins_over_the_overrides(self, airflow_variables, monkeypatch):
+        airflow_variables["cos_tf_branch"] = "feature/from-variable"
+        monkeypatch.setenv("COS_TF_BRANCH", "feature/from-env")
+
+        assert svc.settings_for("int", product_branch="feature/from-demand").branch == "feature/from-demand"
+
+    def test_without_product_branch_the_overrides_then_defaults_apply(self, no_overrides, monkeypatch):
+        assert svc.settings_for("int", product_branch=None).branch == "main"
+        monkeypatch.setenv("COS_TF_BRANCH", "feature/x")
+        assert svc.settings_for("int", product_branch="").branch == "feature/x"
+
+    @pytest.mark.parametrize("env, branch", [("preprod", "preprod"), ("prod", "prod")])
+    def test_environment_branch_is_accepted_in_pprod_and_prod(self, no_overrides, env, branch):
+        assert svc.settings_for(env, product_branch=branch).branch == branch
+
+    @pytest.mark.parametrize("env", ["preprod", "prod"])
+    def test_a_feature_branch_is_refused_in_pprod_and_prod(self, no_overrides, env):
+        with pytest.raises(ValueError, match=f"Environment '{env}' only runs Terraform from branch"):
+            svc.settings_for(env, product_branch="feature/oops")
+
+    @pytest.mark.parametrize("env", ["preprod", "prod"])
+    def test_overrides_cannot_redirect_pprod_and_prod_either(self, no_overrides, monkeypatch, env):
+        monkeypatch.setenv("COS_TF_BRANCH", "feature/oops")
+
+        with pytest.raises(ValueError, match="only runs Terraform from branch"):
+            svc.settings_for(env)
+
+
 class TestCreateOrUpdateWs:
+    def test_product_branch_is_forwarded_to_the_vcs(self, tf, no_overrides):
+        svc.create_or_update_ws(
+            tf, "ws", OrchestratorEnvironment.INT.value, "dir", {}, "d", "t", product_branch="feature/z"
+        )
+
+        assert tf.workspaces.create_or_update.call_args.kwargs["vcs"].branch == "feature/z"
+
+    def test_feature_branch_in_prod_does_not_reach_schematics(self, tf, no_overrides):
+        with pytest.raises(ValueError):
+            svc.create_or_update_ws(tf, "ws", "prod", "dir", {}, "d", "t", product_branch="feature/z")
+
+        tf.workspaces.create_or_update.assert_not_called()
+
     def test_builds_the_workspace_from_env_settings(self, tf, no_overrides):
         result = svc.create_or_update_ws(
             tf, "ws_bucket_sub-1", OrchestratorEnvironment.PROD.value,
@@ -155,6 +202,11 @@ class TestCreateOrUpdateWs:
 
 
 class TestUpdateWs:
+    def test_product_branch_is_forwarded(self, tf, no_overrides):
+        svc.update_ws(tf, "ws-1", "int", "dir", "desc", "tok", product_branch="feature/y")
+
+        assert tf.workspaces.update.call_args.kwargs["vcs"].branch == "feature/y"
+
     def test_updates_everything_but_the_variables(self, tf, no_overrides):
         svc.update_ws(tf, "ws-1", OrchestratorEnvironment.PREPROD.value, "dir", "desc", "tok")
 

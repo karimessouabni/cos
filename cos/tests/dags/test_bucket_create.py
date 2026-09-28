@@ -409,6 +409,24 @@ class TestCreateTfWorkspace:
         assert variables["cloud_type"] == "2"
         assert variables["target_backup_vault_crn"] is None
 
+
+    def test_schematics_clones_the_branch_the_dag_runs_on(self, dag, happy_services, make_payload, state_manager):
+        happy_services.bucketService.get_bucket_by_sub_id.return_value = {"workspace": {"workspace_id": None}}
+        happy_services.schematics_service.create_or_update_ws.return_value = {"id": "ws-1"}
+
+        self.run(dag, make_payload(product_branch="feature/retention"), state_manager)
+
+        call = happy_services.schematics_service.create_or_update_ws.call_args
+        assert call.kwargs["product_branch"] == "feature/retention"
+
+    def test_without_product_branch_the_service_falls_back_to_the_environment(self, dag, happy_services, make_payload, state_manager):
+        happy_services.bucketService.get_bucket_by_sub_id.return_value = {"workspace": {"workspace_id": None}}
+        happy_services.schematics_service.create_or_update_ws.return_value = {"id": "ws-1"}
+
+        self.run(dag, make_payload(), state_manager)
+
+        assert happy_services.schematics_service.create_or_update_ws.call_args.kwargs["product_branch"] is None
+
     def test_bucket_dict_without_workspace_key_still_creates_the_workspace(self, dag, happy_services, make_payload, state_manager):
         happy_services.bucketService.get_bucket_by_sub_id.return_value = {"subscription_id": "sub-1"}
         happy_services.schematics_service.create_or_update_ws.return_value = {"id": "ws-1"}
@@ -551,6 +569,23 @@ class TestSaveBucketInDb:
         assert state["immutability_choice"] == "none"
         assert state["retention"]["retention_enabled"] is False
         assert state["backup"]["backup_enabled"] is False
+        assert state["deprecations"] == []
+
+    def test_legacy_retention_format_pushes_a_deprecation_notice(self, dag, happy_services, make_payload, state_manager):
+        payload = make_payload(retention=BucketRetention(retention_enabled=True, default=30, minimum=10, maximum=60))
+
+        self.run(dag, payload, state_manager)
+
+        notices = state_manager.push_state.call_args.args[0]["deprecations"]
+        assert [n["code"] for n in notices] == ["retention.legacy_format"]
+        assert notices[0]["removal"] == "2027-03-31"
+
+    def test_current_retention_format_pushes_no_notice(self, dag, happy_services, make_payload, state_manager):
+        payload = make_payload(retention=BucketRetention(default_days=30, minimum_days=10, maximum_days=60))
+
+        self.run(dag, payload, state_manager)
+
+        assert state_manager.push_state.call_args.args[0]["deprecations"] == []
 
     def test_eu_de_only_has_host_style_endpoint(self, dag, happy_services, make_payload, state_manager):
         self.run(dag, make_payload(region="eu-de"), state_manager)

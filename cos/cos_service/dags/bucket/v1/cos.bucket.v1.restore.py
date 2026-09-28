@@ -323,6 +323,7 @@ def bucket_restore_backup_vault():
                     variables,
                     description,
                     secrets["gitlab_token"],
+                    product_branch=payload.product_branch,
                 )
 
                 # 3) No restore found =>  persist REQUESTED

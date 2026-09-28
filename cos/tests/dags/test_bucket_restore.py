@@ -191,9 +191,11 @@ class TestCreateTfWorkspaceAndLaunchRestore:
         state_manager = MagicMock()
         state_manager.get_subscription.return_value.description = "restore"
 
-        assert self.run(restore_dag, make_payload(), tf, state_manager) == "ws-1"
+        assert self.run(restore_dag, make_payload(product_branch="feature/restore"), tf, state_manager) == "ws-1"
 
-        variables = happy_services.schematics_service.create_or_update_ws.call_args.args[4]
+        call = happy_services.schematics_service.create_or_update_ws.call_args
+        assert call.kwargs["product_branch"] == "feature/restore"
+        variables = call.args[4]
         assert variables["restore_point_in_time"] == "2026-09-05T10:30:00.000Z"
         assert variables["restore_point_in_time"] != RANGE_OLD["range_end_time"]
         assert variables["recovery_range_id"] == "old"
