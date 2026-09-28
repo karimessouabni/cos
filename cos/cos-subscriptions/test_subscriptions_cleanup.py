@@ -624,14 +624,15 @@ class TokenTests(unittest.TestCase):
         opened = []
         with mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch("sys.stderr"):
             token = sc.acquire_token_interactively(
-                "https://swagger", read_clip=lambda: next(clips), ask=lambda prompt: "", open_url=lambda url: opened.append(url) or True)
+                "https://swagger", read_clip=lambda: next(clips), ask=lambda prompt: "", auto=False, open_url=lambda url: opened.append(url) or True)
         self.assertEqual(token, _jwt(FAR_FUTURE))
         self.assertEqual(opened, ["https://swagger"])
 
     def test_acquire_accepts_pasted_token(self):
         with mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch("sys.stderr"):
             token = sc.acquire_token_interactively(
-                None, read_clip=lambda: "", ask=lambda prompt: "Bearer opaque-token", ask_url=lambda prompt: "")
+                None, read_clip=lambda: "", ask=lambda prompt: "Bearer opaque-token", ask_url=lambda prompt: "",
+                auto_browser=self.fail)
         self.assertEqual(token, "opaque-token")
 
     def test_acquire_asks_swagger_url_when_not_configured(self):
@@ -639,14 +640,40 @@ class TokenTests(unittest.TestCase):
         with mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch("sys.stderr"):
             token = sc.acquire_token_interactively(
                 None, read_clip=lambda: _jwt(FAR_FUTURE), ask=lambda prompt: "",
-                open_url=lambda url: opened.append(url) or True, ask_url=lambda prompt: " https://swagger ")
+                open_url=lambda url: opened.append(url) or True, ask_url=lambda prompt: " https://swagger ",
+                auto=False)
         self.assertEqual(token, _jwt(FAR_FUTURE))
         self.assertEqual(opened, ["https://swagger"])
 
     def test_acquire_gives_up_outside_a_terminal(self):
         with mock.patch.object(sys.stdin, "isatty", return_value=False):
             with mock.patch("sys.stderr"):
-                self.assertEqual(sc.acquire_token_interactively("https://swagger", open_url=self.fail), "")
+                self.assertEqual(sc.acquire_token_interactively(
+                    "https://swagger", open_url=self.fail, auto_browser=lambda url: ""), "")
+
+    def test_acquire_uses_browser_first_even_outside_a_terminal(self):
+        with mock.patch.object(sys.stdin, "isatty", return_value=False):
+            token = sc.acquire_token_interactively(
+                "https://swagger", open_url=self.fail, auto_browser=lambda url: "from-browser")
+        self.assertEqual(token, "from-browser")
+
+    def test_acquire_falls_back_to_clipboard_when_browser_fails(self):
+        with mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch("sys.stderr"):
+            token = sc.acquire_token_interactively(
+                "https://swagger", read_clip=lambda: _jwt(FAR_FUTURE), ask=lambda prompt: "",
+                open_url=lambda url: True, auto_browser=lambda url: "")
+        self.assertEqual(token, _jwt(FAR_FUTURE))
+
+    def test_session_passes_browser_flags(self):
+        args = sc.parse_args(["--manual-token", "--no-private"])
+        with mock.patch.object(sc, "acquire_token_interactively", return_value="t") as acquire:
+            self.assertEqual(sc.Session(args)._acquire_token("https://swagger"), "t")
+        self.assertFalse(acquire.call_args.kwargs["auto"])
+
+    def test_browser_token_without_browser(self):
+        with mock.patch.object(sc, "find_chromium_browser", return_value=None), mock.patch("sys.stderr"):
+            self.assertEqual(sc.browser_token("https://swagger"), "")
+
 
     def test_token_requested_only_when_needed(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
@@ -663,6 +690,51 @@ class TokenTests(unittest.TestCase):
         with mock.patch("sys.stdout") as out:
             self.assertEqual(sc.main(["--print-bookmarklet"]), 0)
         self.assertTrue(out.write.call_args_list[0].args[0].startswith("javascript:"))
+
+
+@unittest.skipUnless(sc.find_chromium_browser() and os.environ.get("RUN_BROWSER_TESTS"),
+                     "Chrome / Edge absent ou RUN_BROWSER_TESTS non défini")
+class BrowserTokenTests(unittest.TestCase):
+    """Chrome headless contre un faux Swagger local qui expose le token après 1 s."""
+
+    def test_token_read_from_swagger_ui_state(self):
+        token = _jwt(FAR_FUTURE)
+        self.assertEqual(self._browse("setTimeout(()=>{window.ui={authSelectors:{authorized:()=>({toJS:()=>"
+                                      f"({{bearer:{{token:{{access_token:'{token}'}}}}}})}})}}}}}},1000)"), token)
+
+    def test_token_read_from_keycloak_js(self):
+        token = _jwt(FAR_FUTURE)
+        self.assertEqual(self._browse(f"setTimeout(()=>{{window.keycloak={{token:'{token}'}}}},1000)"), token)
+
+    def _browse(self, script: str) -> str:
+        page = f"<html><body><script>{script}</script></body></html>".encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = os.path.join(tmp, "browser.sh")
+            with open(wrapper, "w") as fh:
+                fh.write(f'#!/bin/sh\nexec "{sc.find_chromium_browser()}" --headless=new "$@"\n')
+            os.chmod(wrapper, 0o755)
+            try:
+                with mock.patch("sys.stderr"):
+                    found = sc.browser_token(f"http://127.0.0.1:{server.server_address[1]}/",
+                                             browser=wrapper, timeout=30, poll_interval=0.5)
+            finally:
+                server.shutdown()
+                server.server_close()
+        return found
 
 
 def _make_self_signed(tmpdir: str) -> tuple[str, str, str]:

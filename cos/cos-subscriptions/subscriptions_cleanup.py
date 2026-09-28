@@ -37,7 +37,11 @@ TOUTES les demandes sont en ON_ERROR.
 
 Token
     export ORCHESTRATOR_TOKEN=...            # ou --token
-Sans token valide (absent ou JWT expiré), le script ouvre le Swagger
+Sans token valide (absent ou JWT expiré), le script ouvre le Swagger dans un
+Chrome / Edge dédié, en navigation privée (--no-private pour l'éviter) : on se
+connecte en SSO, on clique Authorize, et le token est lu automatiquement dans
+la page puis le navigateur se ferme. Sans Chrome / Edge, ou avec --manual-token,
+le script ouvre le Swagger
 (--swagger-url, $ORCHESTRATOR_SWAGGER_URL ou DEFAULT_SWAGGER_URL en tête du
 script) : on s'y connecte en SSO, on copie
 le token, puis Entrée : il est lu dans le presse-papiers (ou collé au prompt).
@@ -79,9 +83,11 @@ import json
 import os
 import re
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -446,18 +452,27 @@ def filter_product(rows: Iterable[Row], product: str | None) -> list[Row]:
 
 _JWT_RE = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*")
 
-# Bookmarklet à mettre en favori : sur la page Swagger (après login SSO), il
-# copie le bearer token dans le presse-papiers. Il cherche d'abord dans l'état
-# Swagger UI (bouton Authorize : OAuth2 ou bearer collé), puis tout JWT présent
-# dans sessionStorage / localStorage (oidc-client, MSAL, ...).
-BOOKMARKLET = (
-    "javascript:(()=>{const J=/[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]+/;let t;"
+# Expression JS évaluée dans la page Swagger, dans l'ordre :
+# 1. l'état Swagger UI (bouton Authorize : OAuth2 Keycloak ou bearer collé) ;
+# 2. l'adaptateur keycloak-js de la page (window.keycloak / kc / _keycloak) ;
+# 3. un access_token dans le fragment de l'URL (retour Keycloak en implicit) ;
+# 4. le premier JWT de sessionStorage / localStorage ; sinon "".
+TOKEN_FINDER_JS = (
+    "(()=>{const J=/[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]+/;let t='';"
     "try{const a=(window.ui||ui).authSelectors.authorized().toJS();"
-    "for(const k in a){const v=a[k];t=(v.token&&v.token.access_token)||v.value;if(t)break}}catch(e){}"
+    "for(const k in a){const v=a[k];t=(v.token&&v.token.access_token)||v.value||'';if(t)break}}catch(e){}"
+    "for(const k of['keycloak','kc','_keycloak'])if(!t&&window[k]&&typeof window[k].token=='string')t=window[k].token;"
+    "if(!t)t=new URLSearchParams(location.hash.slice(1)).get('access_token')||'';"
     "if(!t)for(const s of[sessionStorage,localStorage])for(let i=0;i<s.length&&!t;i++){"
     "const m=(s.getItem(s.key(i))||'').match(J);if(m)t=m[0]}"
+    "return t.replace(/^Bearer\\s+/i,'')})()"
+)
+
+# Bookmarklet à mettre en favori : sur la page Swagger (après login SSO), il
+# copie le token trouvé par TOKEN_FINDER_JS dans le presse-papiers.
+BOOKMARKLET = (
+    f"javascript:(()=>{{const t={TOKEN_FINDER_JS};"
     "if(!t){alert('Aucun token trouvé : cliquer Authorize dans le Swagger');return}"
-    "t=t.replace(/^Bearer\\s+/i,'');"
     "navigator.clipboard.writeText(t).then("
     "()=>alert('Token copié ('+t.length+' car.)'),()=>prompt('Copier le token :',t))})()"
 )
@@ -507,6 +522,193 @@ def _log(message: str) -> None:
     print(message, file=sys.stderr)
 
 
+# --------------------------------------------------------------------------- #
+# Token : récupération automatique via Chrome / Edge (protocole DevTools)
+# --------------------------------------------------------------------------- #
+
+BROWSER_CANDIDATES = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+)
+BROWSER_LOGIN_TIMEOUT = 300  # secondes laissées pour le login SSO
+
+
+def _duration(seconds: float) -> str:
+    return f"{int(seconds)} s" if seconds < 60 else f"{int(seconds) // 60} min"
+
+
+def find_chromium_browser() -> str | None:
+    for candidate in BROWSER_CANDIDATES:
+        path = candidate if os.path.isabs(candidate) else shutil.which(candidate)
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+class _WebSocket:
+    """Client WebSocket minimal (texte, non fragmenté côté envoi) pour parler au
+    protocole DevTools de Chrome sans dépendance externe."""
+
+    def __init__(self, url: str, timeout: float = 10):
+        parts = urllib.parse.urlsplit(url)
+        self._sock = socket.create_connection((parts.hostname, parts.port), timeout=timeout)
+        self._buffer = b""
+        key = base64.b64encode(os.urandom(16)).decode()
+        self._sock.sendall((
+            f"GET {parts.path} HTTP/1.1\r\nHost: {parts.hostname}:{parts.port}\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        ).encode())
+        while b"\r\n\r\n" not in self._buffer:
+            self._buffer += self._recv()
+        head, self._buffer = self._buffer.split(b"\r\n\r\n", 1)
+        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+            raise ConnectionError(f"handshake WebSocket refusé: {head[:100]!r}")
+
+    def __enter__(self) -> "_WebSocket":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._sock.close()
+
+    def _recv(self) -> bytes:
+        chunk = self._sock.recv(65536)
+        if not chunk:
+            raise ConnectionError("WebSocket fermé")
+        return chunk
+
+    def _read(self, size: int) -> bytes:
+        while len(self._buffer) < size:
+            self._buffer += self._recv()
+        data, self._buffer = self._buffer[:size], self._buffer[size:]
+        return data
+
+    def send(self, text: str) -> None:
+        payload = text.encode()
+        size = len(payload)
+        if size < 126:
+            header = bytes([0x81, 0x80 | size])
+        elif size < 1 << 16:
+            header = bytes([0x81, 0x80 | 126]) + size.to_bytes(2, "big")
+        else:
+            header = bytes([0x81, 0x80 | 127]) + size.to_bytes(8, "big")
+        mask = os.urandom(4)
+        self._sock.sendall(header + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+    def receive(self) -> str:
+        message = b""
+        while True:
+            first, second = self._read(2)
+            size = second & 0x7F
+            if size >= 126:
+                size = int.from_bytes(self._read(2 if size == 126 else 8), "big")
+            mask = self._read(4) if second & 0x80 else b""
+            data = self._read(size)
+            if mask:
+                data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+            opcode = first & 0x0F
+            if opcode == 0x8:
+                raise ConnectionError("WebSocket fermé")
+            if opcode in (0x9, 0xA):  # ping / pong
+                continue
+            message += data
+            if first & 0x80:
+                return message.decode("utf-8", errors="replace")
+
+
+def devtools_evaluate(ws_url: str, expression: str, timeout: float = 10) -> Any:
+    """Runtime.evaluate d'une expression dans une page, retourne sa valeur."""
+    with _WebSocket(ws_url, timeout) as ws:
+        ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
+                            "params": {"expression": expression, "returnByValue": True}}))
+        while True:
+            reply = json.loads(ws.receive())
+            if reply.get("id") == 1:
+                return ((reply.get("result") or {}).get("result") or {}).get("value")
+
+
+def _devtools_port(profile_dir: str, process: subprocess.Popen, timeout: float = 30) -> int:
+    """Port DevTools choisi par Chrome (--remote-debugging-port=0), lu dans DevToolsActivePort."""
+    path = os.path.join(profile_dir, "DevToolsActivePort")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and process.poll() is None:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return int(fh.readline())
+        except (OSError, ValueError):
+            time.sleep(0.2)
+    raise RuntimeError("le navigateur n'a pas exposé le protocole DevTools "
+                       "(peut être bloqué par une politique d'entreprise)")
+
+
+def _find_token_in_pages(port: int) -> str:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
+        targets = json.load(response)
+    for target in targets:
+        ws_url = target.get("webSocketDebuggerUrl")
+        if target.get("type") != "page" or not ws_url:
+            continue
+        try:
+            token = clean_token(str(devtools_evaluate(ws_url, TOKEN_FINDER_JS) or ""))
+        except (OSError, ValueError):
+            continue
+        left = token_seconds_left(token)
+        if token and (left is None or left >= TOKEN_MIN_VALIDITY):
+            return token
+    return ""
+
+
+def browser_token(
+    swagger_url: str,
+    private: bool = True,
+    timeout: float = BROWSER_LOGIN_TIMEOUT,
+    browser: str | None = None,
+    poll_interval: float = 2,
+) -> str:
+    """Ouvre le Swagger dans un Chrome / Edge dédié (profil temporaire, navigation
+    privée par défaut), attend le login SSO + Authorize, lit le token dans la page
+    via le protocole DevTools puis ferme le navigateur. "" si échec ou délai dépassé."""
+    browser = browser or find_chromium_browser()
+    if not browser:
+        _log("Chrome / Edge introuvable : récupération automatique impossible.")
+        return ""
+    profile_dir = tempfile.mkdtemp(prefix="subscriptions-cleanup-")
+    command = [browser, f"--user-data-dir={profile_dir}", "--remote-debugging-port=0",
+               "--no-first-run", "--no-default-browser-check", "--new-window"]
+    if private:
+        command.append("--incognito")
+    process = subprocess.Popen(command + [swagger_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        port = _devtools_port(profile_dir, process)
+        _log(f"Navigateur ouvert{' en navigation privée' if private else ''} : se connecter en SSO "
+             f"puis cliquer Authorize (attente {_duration(timeout)} max, fermer la fenêtre pour annuler).")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and process.poll() is None:
+            try:
+                token = _find_token_in_pages(port)
+            except (OSError, ValueError):
+                token = ""
+            if token:
+                return token
+            time.sleep(poll_interval)
+        _log("Aucun token récupéré dans le navigateur.")
+        return ""
+    except RuntimeError as exc:
+        _log(f"Récupération automatique impossible : {exc}")
+        return ""
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        shutil.rmtree(profile_dir, ignore_errors=True)
+
+
 def acquire_token_interactively(
     swagger_url: str | None,
     read_clip: Callable[[], str] = read_clipboard,
@@ -514,18 +716,28 @@ def acquire_token_interactively(
     open_url: Callable[[str], Any] = webbrowser.open,
     ask_url: Callable[[str], str] = input,
     attempts: int = 3,
+    auto: bool = True,
+    auto_browser: Callable[[str], str] = browser_token,
 ) -> str:
-    """Ouvre le Swagger (URL demandée si non configurée), attend que l'utilisateur
-    copie le token puis le lit dans le presse-papiers (ou le prend tel quel s'il
-    est collé au prompt). Retourne "" hors terminal interactif ou après `attempts` essais."""
-    if not sys.stdin.isatty():
-        _log("Terminal non interactif : impossible de récupérer le token depuis le Swagger "
-             "(lancer le script dans un terminal, ou passer --token).")
-        return ""
-    if not swagger_url:
+    """Récupère un token depuis le Swagger (URL demandée si non configurée) :
+    - auto : via Chrome / Edge piloté (browser_token), sans copier-coller ;
+    - sinon, ou si ça échoue : ouvre le Swagger, attend que l'utilisateur copie
+      le token puis le lit dans le presse-papiers (ou le prend s'il est collé).
+    Retourne "" hors terminal interactif ou après `attempts` essais."""
+    interactive = sys.stdin.isatty()
+    if not swagger_url and interactive:
         swagger_url = ask_url(f"URL du Swagger à ouvrir (${SWAGGER_URL_ENV} non défini, Entrée pour passer) : ").strip()
         if swagger_url:
             _log(f"Astuce : export {SWAGGER_URL_ENV}={swagger_url}")
+    if swagger_url and auto:
+        token = auto_browser(swagger_url)
+        if token:
+            return token
+        _log("Passage à la copie manuelle du token.")
+    if not interactive:
+        _log("Terminal non interactif : impossible de demander le token "
+             "(lancer le script dans un terminal, ou passer --token).")
+        return ""
     if swagger_url:
         _log(f"Ouverture du Swagger : {swagger_url}")
         if not open_url(swagger_url):
@@ -737,6 +949,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     auth.add_argument("--swagger-url", default=os.environ.get(SWAGGER_URL_ENV) or DEFAULT_SWAGGER_URL,
                       help="page Swagger ouverte quand il faut un token "
                            f"(défaut: ${SWAGGER_URL_ENV}, sinon DEFAULT_SWAGGER_URL dans le script)")
+    auth.add_argument("--manual-token", action="store_true",
+                      help="ne pas piloter Chrome / Edge : copier le token à la main depuis le Swagger")
+    auth.add_argument("--no-private", action="store_true",
+                      help="ouvrir le Swagger hors navigation privée (profil temporaire quand même)")
     auth.add_argument("--print-bookmarklet", action="store_true",
                       help="affiche le bookmarklet qui copie le token depuis le Swagger, puis quitte")
 
@@ -812,12 +1028,17 @@ class Session:
     @property
     def client(self) -> OrchestratorClient:
         if self._client is None:
-            self.args.token = resolve_token(self.args.token, self.args.swagger_url)
+            self.args.token = resolve_token(self.args.token, self.args.swagger_url, self._acquire_token)
             try:
                 self._client = _make_client(self.args)
             except (OSError, ValueError) as exc:
                 raise CliExit(EXIT_USAGE, f"Certificat CA invalide: {exc}") from exc
         return self._client
+
+    def _acquire_token(self, swagger_url: str | None) -> str:
+        return acquire_token_interactively(
+            swagger_url, auto=not self.args.manual_token,
+            auto_browser=lambda url: browser_token(url, private=not self.args.no_private))
 
     def load_rows(self) -> list[Row]:
         """Listing des souscriptions : fichier --input, sinon GET paginé."""
