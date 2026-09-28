@@ -36,6 +36,8 @@ class FakeVault(http.server.BaseHTTPRequestHandler):
     requests: list[tuple[str, dict[str, str]]] = []
 
     def do_GET(self) -> None:  # noqa: N802
+        if self.path.startswith("http://"):  # requête reçue en tant que proxy HTTP
+            self.path = "/" + self.path.split("/", 3)[3]
         FakeVault.requests.append((self.path, {k.lower(): v for k, v in self.headers.items()}))
         if self.path.startswith("/v1/token/"):  # service token
             if self.path == f"/v1/token/{UID}?namespace=AP85135":
@@ -396,6 +398,20 @@ class ResolveApiKeyTest(VaultServerTest):
         te.resolve_api_key(args, self._client(args), acquire)
         acquire.assert_called_once()
         self.assertFalse(any(p.startswith("/v1/token/") for p, _ in FakeVault.requests))
+
+    def test_service_token_falls_back_to_proxy_route(self):
+        # direct injoignable (port fermé), puis via le "proxy" qui est en fait le faux serveur :
+        # le GET arrive bien et renvoie le token.
+        with mock.patch.dict(os.environ, {"https_proxy": self.url}, clear=False):
+            self.assertEqual(te.service_token("http://127.0.0.1:1", UID, "AP85135", timeout=5), TOKEN_OK)
+        self.assertEqual(FakeVault.requests[-1][0], f"/v1/token/{UID}?namespace=AP85135")
+        # ni direct ni proxy : message qui liste les deux essais
+        with mock.patch.dict(os.environ, {"https_proxy": "http://127.0.0.1:1"}, clear=False), \
+                self.assertRaises(te.VaultError) as ctx:
+            te.service_token("http://127.0.0.1:1", UID, "AP85135", timeout=5)
+        self.assertIn("injoignable", str(ctx.exception))
+        self.assertIn("direct", str(ctx.exception))
+        self.assertIn("via le proxy", str(ctx.exception))
 
     def test_service_token_helpers(self):
         self.assertEqual(te.token_service_url("https://s02:4430/", "la 1", "AP85135"),

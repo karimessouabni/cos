@@ -294,16 +294,25 @@ class VaultClient:
 
 
 def _http_get_json(url: str, timeout: int, context: ssl.SSLContext,
-                   headers: dict[str, str] | None = None) -> dict[str, Any]:
+                   headers: dict[str, str] | None = None,
+                   proxies: dict[str, str] | None = None) -> dict[str, Any]:
+    """GET JSON. proxies=None : proxy de l'environnement ; {} : connexion directe ;
+    {"https": url} : ce proxy-là."""
     request = urllib.request.Request(url, headers={"Accept": "application/json", **(headers or {})})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies),
+                                         urllib.request.HTTPSHandler(context=context))
+    # Un proxy imposé doit être utilisé même si l'hôte est dans no_proxy.
+    saved = {name: os.environ.pop(name) for name in ("no_proxy", "NO_PROXY") if proxies and name in os.environ}
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+        with opener.open(request, timeout=timeout) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:300]
         raise VaultError(f"HTTP {exc.code} sur GET {url}: {body}", exc.code) from exc
     except (urllib.error.URLError, OSError, ValueError) as exc:
         raise VaultError(f"GET {url} impossible: {exc}") from exc
+    finally:
+        os.environ.update(saved)
     try:
         body = json.loads(raw or b"{}")
     except ValueError as exc:
@@ -321,8 +330,40 @@ def service_token(base_url: str, uid: str, namespace: str, timeout: int = DEFAUL
     """Token Vault délivré par le service token : GET /v1/token/<uid>?namespace=<ns>,
     champ auth.client_token de la réponse (format Vault)."""
     url = token_service_url(base_url, uid, namespace)
-    _log(f"Token Vault demandé au service token : GET {url}")
-    body = _http_get_json(url, timeout, ssl.create_default_context() if verify_tls else insecure_ssl_context())
+    host = urllib.parse.urlsplit(url).hostname or ""
+    context = ssl.create_default_context() if verify_tls else insecure_ssl_context()
+    # Le service token est un hôte intranet : selon le poste il se joint en
+    # direct ou via le proxy. On essaie les deux (direct d'abord si le nom se
+    # résout, sinon le proxy d'abord) avec un délai court chacun.
+    proxy = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY") or ""
+    try:
+        socket.getaddrinfo(host, None)
+        resolves = True
+    except OSError:
+        resolves = False
+        _log(f"Service token : {host} ne se résout pas en DNS depuis ce poste"
+             + (" ; essai via le proxy." if proxy else " ; essayer le nom complet (FQDN) avec --token-service."))
+    routes: list[tuple[str, dict[str, str]]] = [("direct", {})]
+    if proxy:
+        routes.append((f"via le proxy {mask_url(proxy)}", {"https": proxy, "http": proxy}))
+    if not resolves:
+        routes.reverse()
+    attempt_timeout = max(5, min(timeout, 15))
+    errors: list[str] = []
+    body: dict[str, Any] = {}
+    for label, proxies in routes:
+        _log(f"Token Vault demandé au service token ({label}, {attempt_timeout} s max) : GET {url}")
+        try:
+            body = _http_get_json(url, attempt_timeout, context, proxies=proxies)
+            _log(f"Service token joint {label}.")
+            break
+        except VaultError as exc:
+            if exc.status_code is not None:  # réponse HTTP : l'hôte est joint, inutile d'insister
+                raise
+            errors.append(f"{label} : {exc}")
+    else:
+        raise VaultError("service token injoignable (" + " ; ".join(errors) + "). Vérifier le VPN, "
+                         "ou passer le nom complet avec --token-service, ou --browser-token.")
     token = clean_token(str((body.get("auth") or {}).get("client_token") or ""))
     if not _VAULT_TOKEN_RE.fullmatch(token):
         raise VaultError(f"pas de auth.client_token dans la réponse du service token "
