@@ -42,9 +42,8 @@ Chrome / Edge dédié, toujours en navigation privée : on se connecte en SSO
 Keycloak, on clique Authorize, et le token est lu automatiquement dans
 la page puis le navigateur se ferme. Sans Chrome / Edge, ou avec --manual-token,
 le script ouvre le Swagger
-(--swagger-url, $ORCHESTRATOR_SWAGGER_URL ou DEFAULT_SWAGGER_URL en tête du
-script) : on s'y connecte en SSO, on copie
-le token, puis Entrée : il est lu dans le presse-papiers (ou collé au prompt).
+(<base-url>/docs, ou --swagger-url / $ORCHESTRATOR_SWAGGER_URL) : on s'y
+connecte en SSO, on copie le token, puis Entrée : il est lu dans le presse-papiers (ou collé au prompt).
 Pour copier le token en un clic depuis le Swagger, mettre en favori le
 bookmarklet affiché par --print-bookmarklet.
 
@@ -97,8 +96,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Sequence, TypeVar
 
 DEFAULT_BASE_URL = "https://orchestrator-gw.int.staging.echonet"
-# Page Swagger ouverte dans le navigateur quand il faut un token : mettre ici son URL.
-DEFAULT_SWAGGER_URL = ""
+# Page Swagger ouverte dans le navigateur quand il faut un token : <base-url>/docs.
+SWAGGER_PATH = "/docs"
 DEFAULT_PRODUCT = "cos.bucket"
 DEFAULT_PRODUCT_BRANCH = "main"
 DEFAULT_USER = "h90871"
@@ -910,9 +909,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     auth = parser.add_argument_group("authentification")
     auth.add_argument("--token", default=os.environ.get(TOKEN_ENV),
                       help=f"bearer token (défaut: ${TOKEN_ENV}) ; absent ou expiré : copie depuis le Swagger")
-    auth.add_argument("--swagger-url", default=os.environ.get(SWAGGER_URL_ENV) or DEFAULT_SWAGGER_URL,
+    auth.add_argument("--swagger-url", default=os.environ.get(SWAGGER_URL_ENV),
                       help="page Swagger ouverte quand il faut un token "
-                           f"(défaut: ${SWAGGER_URL_ENV}, sinon DEFAULT_SWAGGER_URL dans le script)")
+                           f"(défaut: ${SWAGGER_URL_ENV}, sinon <base-url>{SWAGGER_PATH})")
     auth.add_argument("--manual-token", action="store_true",
                       help="ne pas piloter Chrome / Edge : copier le token à la main depuis le Swagger")
     auth.add_argument("--print-bookmarklet", action="store_true",
@@ -960,6 +959,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="sortie JSON (liste des éléments retenus)")
 
     args = parser.parse_args(argv)
+    args.swagger_url = args.swagger_url or args.base_url.rstrip("/") + SWAGGER_PATH
     if args.page_size < 1:
         parser.error("--page-size doit être >= 1")
     if args.workers < 1:

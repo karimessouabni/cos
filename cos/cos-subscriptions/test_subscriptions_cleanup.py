@@ -673,6 +673,15 @@ class TokenTests(unittest.TestCase):
         self.assertIn("--ignore-certificate-errors", command)
         self.assertEqual(command[-1], "https://swagger")
 
+    def test_swagger_url_defaults_to_base_url_docs(self):
+        with mock.patch.dict(os.environ, {"ORCHESTRATOR_SWAGGER_URL": ""}):
+            self.assertEqual(sc.parse_args([]).swagger_url, "https://orchestrator-gw.int.staging.echonet/docs")
+            self.assertEqual(sc.parse_args(["--base-url", "https://gw.example/"]).swagger_url,
+                             "https://gw.example/docs")
+            self.assertEqual(sc.parse_args(["--swagger-url", "https://x/ui"]).swagger_url, "https://x/ui")
+        with mock.patch.dict(os.environ, {"ORCHESTRATOR_SWAGGER_URL": "https://env/docs"}):
+            self.assertEqual(sc.parse_args([]).swagger_url, "https://env/docs")
+
     def test_session_passes_browser_flags(self):
         args = sc.parse_args(["--manual-token"])
         with mock.patch.object(sc, "acquire_token_interactively", return_value="t") as acquire:
