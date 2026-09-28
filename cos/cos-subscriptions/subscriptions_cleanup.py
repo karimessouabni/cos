@@ -49,7 +49,9 @@ Pour copier le token en un clic depuis le Swagger, mettre en favori le
 bookmarklet affiché par --print-bookmarklet.
 
 Usage:
-    python subscriptions_cleanup.py                       # dry-run: liste les souscriptions éligibles
+    python subscriptions_cleanup.py                       # sans argument : mode guidé (menus 1, 2, 3...)
+    python subscriptions_cleanup.py -i                    # idem
+    python subscriptions_cleanup.py --dry-run             # sans menu : liste les souscriptions éligibles
     python subscriptions_cleanup.py --delete              # supprime / relance réellement
     python subscriptions_cleanup.py --delete --yes        # sans confirmation
     python subscriptions_cleanup.py --delete --workers 8  # 8 appels en parallèle
@@ -962,6 +964,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     auth.add_argument("--print-bookmarklet", action="store_true",
                       help="affiche le bookmarklet qui copie le token depuis le Swagger, puis quitte")
 
+    parser.add_argument("-i", "--interactive", action="store_true",
+                        help="mode guidé : menus numérotés (défaut quand le script est lancé sans argument)")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--product", default=DEFAULT_PRODUCT,
                         help=f"filtre geninfo.product (défaut: {DEFAULT_PRODUCT})")
@@ -977,6 +981,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="pas de filtre sur context.user")
     parser.add_argument("--input", metavar="FILE",
                         help="lit le listing depuis un fichier JSON au lieu du GET")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="lister seulement, sans menu (comportement par défaut hors mode guidé)")
     parser.add_argument("--delete", action="store_true",
                         help="exécute les DELETE / retry (sinon dry-run)")
     parser.add_argument("--yes", action="store_true", help="ne pas demander de confirmation")
@@ -1016,6 +1022,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--page-size doit être >= 1")
     if args.workers < 1:
         parser.error("--workers doit être >= 1")
+    if args.dry_run and (args.delete or args.decline):
+        parser.error("--dry-run est incompatible avec --delete / --decline")
     if args.decline and not args.on_error:
         parser.error("--decline nécessite --on-error")
     if args.on_error and args.delete:
@@ -1187,7 +1195,134 @@ def run_on_error(args: argparse.Namespace, session: Session, rows: list[Row]) ->
     return EXIT_ACTION_FAILED if failures else EXIT_OK
 
 
+# --------------------------------------------------------------------------- #
+# Mode guidé : menus numérotés qui construisent la ligne de commande
+# --------------------------------------------------------------------------- #
+
+def _choose(question: str, options: Sequence[tuple[str, T]], ask: Callable[[str], str] = input,
+            default: int = 1) -> T:
+    """Affiche des options numérotées et retourne la valeur de celle choisie
+    (Entrée = option par défaut)."""
+    print(f"\n{question}")
+    for number, (label, _) in enumerate(options, 1):
+        print(f"  {number}) {label}{'  [défaut]' if number == default else ''}")
+    while True:
+        answer = ask(f"Choix [1-{len(options)}, Entrée = {default}] : ").strip()
+        if not answer:
+            return options[default - 1][1]
+        if answer.isdigit() and 1 <= int(answer) <= len(options):
+            return options[int(answer) - 1][1]
+        print(f"  Taper un nombre entre 1 et {len(options)}.")
+
+
+def _ask_text(question: str, default: str = "", ask: Callable[[str], str] = input) -> str:
+    suffix = f" [Entrée = {default}]" if default else ""
+    return ask(f"{question}{suffix} : ").strip() or default
+
+
+def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
+    """Pose les questions une à une et retourne les arguments équivalents
+    (None si l'utilisateur quitte)."""
+    print("Nettoyage des souscriptions orchestrator : mode guidé (Ctrl+C pour quitter).")
+    mode = _choose("Que veux-tu faire ?", [
+        ("Supprimer les souscriptions éligibles (et relancer les delete en échec)", "delete"),
+        (f"Décliner les demandes des souscriptions dont tout est en {DEMAND_ON_ERROR_STATUS}", "on-error"),
+        ("Afficher le bookmarklet qui copie le token depuis le Swagger", "bookmarklet"),
+        ("Quitter", None),
+    ], ask)
+    if mode is None:
+        return None
+    if mode == "bookmarklet":
+        return ["--print-bookmarklet"]
+
+    argv = ["--on-error"] if mode == "on-error" else []
+    execute = _choose("Exécution ?", [
+        ("Dry-run : lister seulement, sans rien modifier", False),
+        ("Exécuter pour de vrai (confirmation demandée avant les appels)", True),
+    ], ask)
+    if execute:
+        argv.append("--decline" if mode == "on-error" else "--delete")
+
+    user = _choose("Souscriptions de quel user ?", [
+        (f"{DEFAULT_USER} (défaut)", DEFAULT_USER), ("Un autre user", ""), ("Tous les users", None),
+    ], ask)
+    if user is None:
+        argv.append("--all-users")
+    elif not user:
+        argv += ["--user", _ask_text("User", ask=ask) or DEFAULT_USER]
+
+    product = _ask_text("Produit", DEFAULT_PRODUCT, ask)
+    if product != DEFAULT_PRODUCT:
+        argv += ["--product", product]
+
+    if mode == "on-error":
+        status = _choose("Filtrer sur le status de la souscription ?", [
+            ("Non, tous les status", None), ("LOCKED", "LOCKED"), ("Un autre status", ""),
+        ], ask)
+        if status is not None:
+            argv += ["--subscription-status", status or _ask_text("Status", ask=ask)]
+        if execute:
+            reason = _ask_text("Raison du DECLINED", DEFAULT_DECLINE_REASON, ask)
+            if reason != DEFAULT_DECLINE_REASON:
+                argv += ["--reason", reason]
+    elif execute:
+        branch = _ask_text("product_branch du DELETE", DEFAULT_PRODUCT_BRANCH, ask)
+        if branch != DEFAULT_PRODUCT_BRANCH:
+            argv += ["--product-branch", branch]
+
+    source = _choose("D'où viennent les souscriptions ?", [
+        ("De l'API orchestrator", None), ("D'un fichier JSON local", "file"),
+    ], ask)
+    if source:
+        argv += ["--input", _ask_text("Chemin du fichier JSON", ask=ask)]
+
+    if source is None or execute:
+        base_url = _ask_text("URL de l'orchestrator", DEFAULT_BASE_URL, ask)
+        if base_url != DEFAULT_BASE_URL:
+            argv += ["--base-url", base_url]
+        argv += _choose("Récupération du token (si $ORCHESTRATOR_TOKEN absent ou expiré) ?", [
+            ("Automatique : Chrome en navigation privée, login SSO Keycloak", []),
+            ("Automatique : Chrome sans navigation privée", ["--no-private"]),
+            ("Copier-coller manuel depuis le Swagger", ["--manual-token"]),
+            ("Coller le token maintenant", ["--token", ""]),
+        ], ask)
+        if argv[-2:] == ["--token", ""]:
+            argv[-1] = clean_token(getpass.getpass("Token : "))
+        argv += _choose("Vérification des certificats TLS ?", [
+            ("Non, ignorer (certificats internes)", ["--insecure"]),
+            ("Oui, avec les CA système", ["--verify-tls"]),
+            ("Oui, avec un fichier CA", ["--ca-cert", ""]),
+        ], ask)
+        if argv[-2:] == ["--ca-cert", ""]:
+            argv[-1] = _ask_text("Chemin du certificat CA (.cer / .pem)", ask=ask)
+        if execute:
+            workers = _ask_text("Appels en parallèle", str(DEFAULT_WORKERS), ask)
+            if workers != str(DEFAULT_WORKERS):
+                argv += ["--workers", workers]
+
+    shown = ["<token>" if i and argv[i - 1] == "--token" else a for i, a in enumerate(argv)]
+    print("\nCommande équivalente :\n  python subscriptions_cleanup.py "
+          + " ".join(_shell_quote(a) for a in shown) + "\n")
+    return argv
+
+
+def _shell_quote(arg: str) -> str:
+    return arg if re.fullmatch(r"[\w@%+=:,./-]+", arg) else "'" + arg.replace("'", "'\\''") + "'"
+
+
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+        if not argv and sys.stdin.isatty():
+            argv = ["--interactive"]
+    if argv in (["-i"], ["--interactive"]):
+        try:
+            argv = interactive_argv()
+        except (KeyboardInterrupt, EOFError):
+            print("\nAnnulé.")
+            return EXIT_OK
+        if argv is None:
+            return EXIT_OK
     args = parse_args(argv)
     if args.print_bookmarklet:
         print(BOOKMARKLET)

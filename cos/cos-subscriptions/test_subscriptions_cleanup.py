@@ -700,6 +700,71 @@ class TokenTests(unittest.TestCase):
         self.assertTrue(out.write.call_args_list[0].args[0].startswith("javascript:"))
 
 
+class InteractiveModeTests(unittest.TestCase):
+    def _wizard(self, answers):
+        replies = iter(answers)
+        with mock.patch("sys.stdout") as out:
+            argv = sc.interactive_argv(ask=lambda prompt: next(replies))
+        return argv, "".join(c.args[0] for c in out.write.call_args_list)
+
+    def test_all_defaults_is_a_dry_run(self):
+        argv, printed = self._wizard([""] * 8)
+        self.assertEqual(argv, ["--insecure"])
+        self.assertIn("1) Supprimer les souscriptions éligibles", printed)
+        self.assertIn("Commande équivalente", printed)
+        self.assertFalse(sc.parse_args(argv).delete)
+
+    def test_delete_for_real_with_choices(self):
+        answers = ["1", "2", "2", "h12345", "", "dev", "", "", "3", "2", "4"]
+        argv, _ = self._wizard(answers)
+        self.assertEqual(argv, ["--delete", "--user", "h12345", "--product-branch", "dev",
+                                "--manual-token", "--verify-tls", "--workers", "4"])
+        args = sc.parse_args(argv)
+        self.assertEqual((args.delete, args.user, args.workers, args.insecure), (True, "h12345", 4, False))
+
+    def test_on_error_decline_locked(self):
+        answers = ["2", "2", "3", "", "2", "", "", "", "2", "", ""]
+        argv, _ = self._wizard(answers)
+        self.assertEqual(argv, ["--on-error", "--decline", "--all-users", "--subscription-status", "LOCKED",
+                                "--no-private", "--insecure"])
+        self.assertTrue(sc.parse_args(argv).decline)
+
+    def test_local_file_dry_run_skips_network_questions(self):
+        argv, _ = self._wizard(["1", "1", "1", "", "2", "scratch.json"])
+        self.assertEqual(argv, ["--input", "scratch.json"])
+
+    def test_invalid_choice_is_asked_again(self):
+        argv, printed = self._wizard(["9", "abc", "4"])
+        self.assertIsNone(argv)
+        self.assertIn("Taper un nombre entre 1 et 4", printed)
+
+    def test_bookmarklet_choice(self):
+        self.assertEqual(self._wizard(["3"])[0], ["--print-bookmarklet"])
+
+    def test_token_is_masked_in_the_printed_command(self):
+        with mock.patch("getpass.getpass", return_value="Bearer secret-token"):
+            argv, printed = self._wizard(["1", "1", "1", "", "1", "", "4", "1"])
+        self.assertEqual(argv, ["--token", "secret-token", "--insecure"])
+        self.assertNotIn("secret-token", printed)
+        self.assertIn("--token '<token>'", printed)
+
+    def test_main_starts_wizard_without_arguments_in_a_terminal(self):
+        with mock.patch.object(sys, "argv", ["subscriptions_cleanup.py"]), \
+             mock.patch.object(sys.stdin, "isatty", return_value=True), \
+             mock.patch.object(sc, "interactive_argv", return_value=None) as wizard:
+            self.assertEqual(sc.main(), 0)
+        wizard.assert_called_once()
+
+    def test_main_ctrl_c_in_wizard(self):
+        with mock.patch.object(sc, "interactive_argv", side_effect=KeyboardInterrupt), mock.patch("sys.stdout"):
+            self.assertEqual(sc.main(["-i"]), 0)
+
+    def test_dry_run_flag(self):
+        self.assertTrue(sc.parse_args(["--dry-run"]).dry_run)
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            sc.parse_args(["--dry-run", "--delete"])
+
+
 @unittest.skipUnless(sc.find_chromium_browser() and os.environ.get("RUN_BROWSER_TESTS"),
                      "Chrome / Edge absent ou RUN_BROWSER_TESTS non défini")
 class BrowserTokenTests(unittest.TestCase):
