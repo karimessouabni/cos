@@ -25,6 +25,7 @@ TOKEN_OK = "hvs.CAESIEKO1gxUBXCdPSqoxyv5kr8P0bG4Mc5lgJEOsaVtqeTq"
 TOKEN_BAD = "hvs.CAESIFXQc9s9BYB1K9iDoRwwugBc3iFctwrVl30RdM9Ml4au"
 API_KEY = "YqGLLC6QTdV46Usp0ITQAuXGYAeKNRLRhnf9WH4G9KmK"
 SECRET_PATH = "ibm_ac002i000263/creds/rl002i000138_buhub"
+UID = "la90261"
 
 
 class FakeVault(http.server.BaseHTTPRequestHandler):
@@ -36,6 +37,11 @@ class FakeVault(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         FakeVault.requests.append((self.path, {k.lower(): v for k, v in self.headers.items()}))
+        if self.path.startswith("/v1/token/"):  # service token
+            if self.path == f"/v1/token/{UID}?namespace=AP85135":
+                return self._send(200, {"auth": {"client_token": TOKEN_OK, "policies": ["ap85135-ops"],
+                                                 "lease_duration": 2592000}, "data": None})
+            return self._send(404, {"detail": "Not Found"})
         token = self.headers.get("X-Vault-Token", "")
         if token != TOKEN_OK:
             return self._send(403, {"errors": ["permission denied"]})
@@ -63,7 +69,8 @@ def _fresh_cache() -> None:
 
 
 def _args(server_url: str, *extra: str, tests_dir: str | None = None) -> "te.argparse.Namespace":
-    argv = ["--env", "int", "--vault-url", server_url, "--skip-login", "--skip-init",
+    argv = ["--env", "int", "--vault-url", server_url, "--skip-login", "--skip-init", "--no-proxy",
+            "--token-service", server_url, "--uid", UID,
             "--dir", tests_dir or tempfile.mkdtemp(prefix="tfdir-"), *extra]
     return te.parse_args(argv)
 
@@ -120,11 +127,13 @@ class ExtractApiKeyTest(unittest.TestCase):
 
 class EnvVarsTest(unittest.TestCase):
     def test_build_and_export(self):
-        variables = te.build_env_vars("k'1", tf_log="debug", proxy="ncproxy:8080")
+        proxy = {"http_proxy": "http://u:p@ncproxy:8080", "https_proxy": "http://u:p@ncproxy:8080",
+                 "no_proxy": te.DEFAULT_NO_PROXY}
+        variables = te.build_env_vars("k'1", tf_log="debug", proxy_vars=proxy)
         self.assertEqual(variables["IBM_CLOUD_API_KEY"], "k'1")
         self.assertEqual(variables["ORCHESTRATOR_IBMCLOUD_API_KEY"], "k'1")
         self.assertEqual(variables["TF_LOG"], "debug")
-        self.assertEqual(variables["https_proxy"], "ncproxy:8080")
+        self.assertEqual(variables["https_proxy"], "http://u:p@ncproxy:8080")
         self.assertEqual(variables["no_proxy"], te.DEFAULT_NO_PROXY)
         lines = te.export_lines(variables)
         self.assertIn("export IBM_CLOUD_API_KEY='k'\"'\"'1'\n", lines)
@@ -216,6 +225,77 @@ class ParseArgsTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             te.parse_args(["--shell", "--run", "plan"])
 
+    def test_proxy_defaults(self):
+        args = te.parse_args([])
+        self.assertEqual(args.proxy, te.DEFAULT_PROXY)
+        self.assertFalse(args.proxy_from_cli)
+        self.assertEqual(args.token_service, te.TOKEN_SERVICES["dev"])
+        self.assertTrue(te.parse_args(["--proxy", "p:1"]).proxy_from_cli)
+        with self.assertRaises(SystemExit):
+            te.parse_args(["--no-proxy", "--proxy", "p:1"])
+
+
+class ProxyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        _fresh_cache()
+
+    def test_proxy_url_encodes_credentials(self):
+        self.assertEqual(te.proxy_url("ncproxy.fr.net.intra:8080", "h90871", "Ab@c!/d"),
+                         "http://h90871:Ab%40c%21%2Fd@ncproxy.fr.net.intra:8080")
+        self.assertEqual(te.proxy_url("http://p:1/", "", ""), "http://p:1")
+
+    def test_mask_url(self):
+        self.assertEqual(te.mask_url("http://h90871:Secret%21@ncproxy:8080"), "http://h90871:***@ncproxy:8080")
+        self.assertEqual(te.mask_url("http://ncproxy:8080"), "http://ncproxy:8080")
+
+    def test_no_proxy(self):
+        self.assertEqual(te.resolve_proxy(te.parse_args(["--no-proxy"]), environ={}), {})
+
+    def test_asks_user_and_password_and_remembers_user(self):
+        args = te.parse_args([])
+        asked = []
+        with mock.patch.object(sys.stdin, "isatty", return_value=True):
+            proxy = te.resolve_proxy(args, ask=lambda q: (asked.append(q), "h90871")[1],
+                                     ask_secret=lambda q: "Pass!", environ={})
+        self.assertEqual(proxy["https_proxy"], f"http://h90871:Pass%21@{te.DEFAULT_PROXY}")
+        self.assertEqual(proxy["http_proxy"], proxy["https_proxy"])
+        self.assertEqual(proxy["no_proxy"], te.DEFAULT_NO_PROXY)
+        self.assertEqual(te.load_setting("proxy_user"), "h90871")
+        self.assertNotIn("Pass!", json.dumps(te._read_state()))
+        # deuxième lancement : le user est proposé par défaut, le mot de passe redemandé
+        asked.clear()
+        with mock.patch.object(sys.stdin, "isatty", return_value=True):
+            proxy = te.resolve_proxy(te.parse_args([]), ask=lambda q: (asked.append(q), "")[1],
+                                     ask_secret=lambda q: "x", environ={})
+        self.assertIn("h90871", asked[0])
+        self.assertEqual(proxy["https_proxy"], f"http://h90871:x@{te.DEFAULT_PROXY}")
+
+    def test_cli_credentials_without_prompt(self):
+        args = te.parse_args(["--proxy-user", "u", "--proxy-password", "p", "--proxy", "p:1"])
+        proxy = te.resolve_proxy(args, ask=lambda q: self.fail("prompt"), ask_secret=lambda q: self.fail("prompt"),
+                                 environ={"https_proxy": "http://ignored:1"})
+        self.assertEqual(proxy["https_proxy"], "http://u:p@p:1")
+
+    def test_existing_shell_proxy_reused(self):
+        environ = {"https_proxy": "http://u:p@old:8080", "no_proxy": "a,b"}
+        proxy = te.resolve_proxy(te.parse_args([]), ask=lambda q: self.fail("prompt"),
+                                 ask_secret=lambda q: self.fail("prompt"), environ=environ)
+        self.assertEqual(proxy, {"http_proxy": "http://u:p@old:8080", "https_proxy": "http://u:p@old:8080",
+                                 "no_proxy": "a,b"})
+
+    def test_non_interactive_without_credentials(self):
+        with mock.patch.object(sys.stdin, "isatty", return_value=False), self.assertRaises(te.CliExit):
+            te.resolve_proxy(te.parse_args([]), environ={})
+
+    def test_apply_proxy_sets_process_env(self):
+        with mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://x", "no_proxy": "old"}, clear=False):
+            te.apply_proxy({"http_proxy": "http://p", "https_proxy": "http://p", "no_proxy": "n"})
+            self.assertEqual(os.environ["https_proxy"], "http://p")
+            self.assertNotIn("HTTPS_PROXY", os.environ)
+            te.apply_proxy({})
+            self.assertNotIn("https_proxy", os.environ)
+            self.assertNotIn("no_proxy", os.environ)
+
 
 # --------------------------------------------------------------------------- #
 # Enchaînement token -> API key contre le faux Vault
@@ -251,14 +331,57 @@ class ResolveApiKeyTest(VaultServerTest):
         self.assertEqual([p for p, _ in FakeVault.requests],
                          ["/v1/auth/token/lookup-self", f"/v1/{SECRET_PATH}"])
 
-    def test_rejected_cached_token_triggers_browser(self):
+    def test_no_token_uses_token_service(self):
+        args = _args(self.url)
+        acquire = mock.Mock(return_value="")
+        key = te.resolve_api_key(args, self._client(args), acquire)
+        self.assertEqual(key, API_KEY)
+        acquire.assert_not_called()
+        self.assertEqual([p for p, _ in FakeVault.requests],
+                         [f"/v1/token/{UID}?namespace=AP85135", "/v1/auth/token/lookup-self", f"/v1/{SECRET_PATH}"])
+        self.assertEqual(te.load_cached_token(self.url), TOKEN_OK)
+
+    def test_rejected_cached_token_uses_token_service(self):
         te.save_cached_token(self.url, TOKEN_BAD)
         args = _args(self.url)
+        key = te.resolve_api_key(args, self._client(args), acquire=mock.Mock(return_value=""))
+        self.assertEqual(key, API_KEY)
+        self.assertEqual(te.load_cached_token(self.url), TOKEN_OK)
+
+    def test_token_service_failure_falls_back_to_browser(self):
+        args = _args(self.url, "--uid", "unknown")
         acquire = mock.Mock(return_value=f"X-Vault-Token:{TOKEN_OK}")
         key = te.resolve_api_key(args, self._client(args), acquire)
         self.assertEqual(key, API_KEY)
         acquire.assert_called_once_with(args.ui_url)
-        self.assertEqual(te.load_cached_token(self.url), TOKEN_OK)
+
+    def test_no_token_service_configured_uses_browser(self):
+        args = _args(self.url, "--token-service", "")
+        acquire = mock.Mock(return_value=TOKEN_OK)
+        self.assertEqual(te.resolve_api_key(args, self._client(args), acquire), API_KEY)
+        acquire.assert_called_once()
+        self.assertFalse(any(p.startswith("/v1/token/") for p, _ in FakeVault.requests))
+
+    def test_browser_token_flag_skips_token_service(self):
+        args = _args(self.url, "--browser-token")
+        acquire = mock.Mock(return_value=TOKEN_OK)
+        te.resolve_api_key(args, self._client(args), acquire)
+        acquire.assert_called_once()
+        self.assertFalse(any(p.startswith("/v1/token/") for p, _ in FakeVault.requests))
+
+    def test_service_token_helpers(self):
+        self.assertEqual(te.token_service_url("https://s02:4430/", "la 1", "AP85135"),
+                         "https://s02:4430/v1/token/la%201?namespace=AP85135")
+        self.assertEqual(te.service_token(self.url, UID, "AP85135"), TOKEN_OK)
+        with self.assertRaises(te.VaultError):
+            te.service_token(self.url, "nobody", "AP85135")
+
+    def test_resolve_uid_prompt_then_remembered(self):
+        args = te.parse_args(["--no-proxy"])
+        with mock.patch.object(sys.stdin, "isatty", return_value=True):
+            self.assertEqual(te.resolve_uid(args, ask=lambda q: " la90261 "), "la90261")
+        self.assertEqual(te.resolve_uid(args, ask=lambda q: self.fail("prompt")), "la90261")
+        self.assertEqual(te.resolve_uid(te.parse_args(["--uid", "x"]), ask=lambda q: self.fail("prompt")), "x")
 
     def test_new_key_ignores_cached_key_but_keeps_token(self):
         te.save_cached_api_key(self.url, SECRET_PATH, "old", 7200)
@@ -270,7 +393,7 @@ class ResolveApiKeyTest(VaultServerTest):
     def test_new_token_ignores_everything_cached(self):
         te.save_cached_api_key(self.url, SECRET_PATH, "old", 7200)
         te.save_cached_token(self.url, TOKEN_OK)
-        args = _args(self.url, "--new-token")
+        args = _args(self.url, "--new-token", "--token-service", "")
         acquire = mock.Mock(return_value=TOKEN_OK)
         self.assertEqual(te.resolve_api_key(args, self._client(args), acquire), API_KEY)
         acquire.assert_called_once()
@@ -278,7 +401,7 @@ class ResolveApiKeyTest(VaultServerTest):
     def test_short_ttl_token_is_refreshed(self):
         FakeVault.ttl = 30
         te.save_cached_token(self.url, TOKEN_OK)
-        args = _args(self.url)
+        args = _args(self.url, "--token-service", "")
         acquire = mock.Mock(return_value=TOKEN_OK)
         with mock.patch.object(te, "TOKEN_MIN_VALIDITY", 60):
             with self.assertRaises(te.CliExit):  # le nouveau a aussi 30 s : refusé
@@ -292,7 +415,7 @@ class ResolveApiKeyTest(VaultServerTest):
         self.assertEqual(ctx.exception.code, te.EXIT_USAGE)
 
     def test_no_token_acquired(self):
-        args = _args(self.url)
+        args = _args(self.url, "--token-service", "")
         with self.assertRaises(te.CliExit) as ctx:
             te.resolve_api_key(args, self._client(args), acquire=lambda url: "")
         self.assertEqual(ctx.exception.code, te.EXIT_USAGE)
@@ -385,7 +508,7 @@ class MainTest(VaultServerTest):
         run = run or mock.Mock(return_value=0)
         tests_dir = tempfile.mkdtemp(prefix="tfdir-")
         argv = ["--env", "int", "--vault-url", self.url, "--skip-login", "--dir", tests_dir,
-                "--vault-token", TOKEN_OK, *extra]
+                "--vault-token", TOKEN_OK, "--no-proxy", *extra]
         import io
         out = io.StringIO()
         with mock.patch.object(te, "run_terraform", run), mock.patch.object(sys, "stdout", out):
@@ -401,11 +524,25 @@ class MainTest(VaultServerTest):
         self.assertTrue(all(line.startswith("export ") for line in out.splitlines()))
 
     def test_json_and_options(self):
-        code, out, _, _ = self._run_main("--json", "--tf-log", "--proxy", "--skip-init")
+        code, out, _, _ = self._run_main("--json", "--tf-log", "--skip-init")
         self.assertEqual(code, 0)
         variables = json.loads(out)
         self.assertEqual(variables["TF_LOG"], "debug")
-        self.assertEqual(variables["http_proxy"], te.DEFAULT_PROXY)
+        self.assertNotIn("http_proxy", variables)
+
+    def test_proxy_exported_and_used_for_vault(self):
+        tests_dir = tempfile.mkdtemp(prefix="tfdir-")
+        argv = ["--env", "int", "--vault-url", self.url, "--skip-login", "--skip-init", "--dir", tests_dir,
+                "--vault-token", TOKEN_OK, "--proxy", "127.0.0.1:9", "--proxy-user", "u", "--proxy-password", "p!",
+                "--no-proxy-hosts", "127.0.0.1", "--json"]
+        import io
+        out = io.StringIO()
+        with mock.patch.object(sys, "stdout", out), mock.patch.dict(os.environ, {}, clear=False):
+            code = te.main(argv)
+        self.assertEqual(code, 0)  # no_proxy=127.0.0.1 : le faux Vault est joint sans passer par le proxy
+        variables = json.loads(out.getvalue())
+        self.assertEqual(variables["https_proxy"], "http://u:p%21@127.0.0.1:9")
+        self.assertEqual(variables["no_proxy"], "127.0.0.1")
 
     def test_run_plan(self):
         run = mock.Mock(return_value=5)
@@ -420,7 +557,7 @@ class MainTest(VaultServerTest):
     def test_missing_dir(self):
         with mock.patch.object(te, "run_terraform", mock.Mock(return_value=0)):
             code = te.main(["--env", "int", "--vault-url", self.url, "--skip-login", "--dir", "/nope/nope",
-                            "--vault-token", TOKEN_OK])
+                            "--vault-token", TOKEN_OK, "--no-proxy"])
         self.assertEqual(code, te.EXIT_USAGE)
 
     def test_forget(self):
@@ -431,9 +568,9 @@ class MainTest(VaultServerTest):
 
 class InteractiveTest(unittest.TestCase):
     def test_menu_builds_argv(self):
-        answers = iter(["1", "1", "2", "4"])  # int, plan, nouveau token, TF_LOG + proxy
+        answers = iter(["1", "1", "2", "2", "2"])  # int, plan, nouveau token, sans proxy, TF_LOG
         argv = te.interactive_argv(ask=lambda q: next(answers))
-        self.assertEqual(argv, ["--new-token", "--tf-log", "--proxy", "--run", "plan"])
+        self.assertEqual(argv, ["--new-token", "--no-proxy", "--tf-log", "--run", "plan"])
         args = te.parse_args(argv)
         self.assertEqual(args.run, ["plan"])
         self.assertTrue(args.new_token)

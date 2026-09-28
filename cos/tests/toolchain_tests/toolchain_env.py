@@ -10,23 +10,30 @@ main avant un `terraform plan` est enchaîné par le script.
 2. terraform init                    dans le dossier de tests de l'environnement
                                      si .terraform/ n'existe pas encore (--reinit
                                      pour forcer)
-3. token Vault                       de l'instance Vault de l'environnement
+3. proxy                             http://<user>:<mot de passe>@ncproxy.fr.net.intra:8080
+                                     user et mot de passe demandés à chaque
+                                     lancement (le mot de passe n'est jamais
+                                     sauvegardé) ; utilisé pour les appels
+                                     suivants et exporté pour terraform
+4. token Vault                       de l'instance Vault de l'environnement
                                      (int -> hvault-dev) : token sauvegardé s'il
-                                     est encore valide, sinon Chrome / Edge en
-                                     navigation privée sur l'UI Vault (login
-                                     SSO), et le token est lu dans la page
-4. API key IBM Cloud                 GET <vault>/v1/<secret_path> avec le token
+                                     est encore valide, sinon
+                                     GET <service token>/v1/token/<uid>?namespace=AP85135
+                                     (le client_token renvoyé est un token Vault,
+                                     valable 30 jours), sinon Chrome / Edge sur
+                                     l'UI Vault en secours
+5. API key IBM Cloud                 GET <vault>/v1/<secret_path> avec le token
                                      (X-Vault-Namespace: AP85135) ; la clé est
                                      gardée tant que son lease est valide
-5. variables d'environnement         IBM_CLOUD_API_KEY, ORCHESTRATOR_IBMCLOUD_API_KEY
-                                     (+ TF_LOG, proxies si demandés)
+6. variables d'environnement         IBM_CLOUD_API_KEY, ORCHESTRATOR_IBMCLOUD_API_KEY,
+                                     http_proxy / https_proxy / no_proxy (+ TF_LOG)
 
 Utilisation
     # dans le shell courant : exporte les variables puis terraform plan/apply
     eval "$(python toolchain_env.py --env int)"
     terraform -chdir=int/new_version plan
 
-    # ou tout enchaîné : les étapes 1-5 puis terraform plan / apply
+    # ou tout enchaîné : les étapes 1-6 puis terraform plan / apply
     python toolchain_env.py --env int --run plan
     python toolchain_env.py --env int --run apply -- -auto-approve
 
@@ -36,15 +43,26 @@ Utilisation
     # sans argument dans un terminal : mode guidé (menus numérotés)
     python toolchain_env.py
 
+Proxy
+    export PROXY_USER=h12345 PROXY_PASSWORD=...   # ou --proxy-user / --proxy-password
+    --no-proxy                                    # pas de proxy du tout
+Si https_proxy est déjà exporté dans le shell, il est réutilisé tel quel sans
+rien demander. Le user est mémorisé (pas le mot de passe).
+
 Token Vault
     export VAULT_TOKEN=hvs....                # ou --vault-token
+    --uid la90261                             # uid passé au service token
+                                              # (défaut: $TOOLCHAIN_UID, sinon demandé
+                                              # une fois puis mémorisé)
 Le token récupéré est sauvegardé dans ~/.cache/cos-toolchain/state.json
 (lisible par toi seul) avec l'API key et réutilisé tant qu'il est valide
-(vérifié par lookup-self) : Chrome ne s'ouvre que s'il est expiré ou refusé.
---new-token force un nouveau token, --new-key une nouvelle API key,
+(vérifié par lookup-self) : le service token n'est rappelé que s'il est expiré
+ou refusé. --new-token force un nouveau token, --new-key une nouvelle API key,
 --forget efface tout ce qui est sauvegardé.
-Sans Chrome / Edge, ou avec --manual-token, l'UI Vault est ouverte dans le
-navigateur par défaut : on s'y connecte, "Copy token" dans le menu utilisateur,
+Sans service token pour l'instance Vault (--browser-token pour forcer), le
+token est lu dans un Chrome / Edge en navigation privée ouvert sur l'UI Vault
+(login SSO) ; sans Chrome / Edge, ou avec --manual-token, l'UI Vault est
+ouverte dans le navigateur par défaut : "Copy token" dans le menu utilisateur,
 puis Entrée dans le terminal (le token est lu dans le presse-papiers).
 
 Les appels HTTP vers Vault ignorent la vérification TLS (certificats internes),
@@ -89,6 +107,16 @@ VAULTS = {
     "group": "https://hvault.group.echonet",
 }
 
+# Service qui délivre un token Vault par uid : GET <url>/v1/token/<uid>?namespace=<ns>
+# (Swagger sur <url>/docs). Réponse au format Vault : auth.client_token.
+# Instance Vault -> URL du service ; "" : pas de service, passage par l'UI Vault.
+TOKEN_SERVICES = {
+    "dev": "https://s02vi9956141:4430",
+    "staging": "",  # URL à renseigner
+    "group": "",  # URL à renseigner
+}
+TOKEN_SERVICE_PATH = "/v1/token/"
+
 
 @dataclass(frozen=True)
 class Environment:
@@ -111,6 +139,7 @@ ENV_VAR = "TOOLCHAIN_ENV"
 DEFAULT_NAMESPACE = "AP85135"
 NAMESPACE_ENV = "VAULT_NAMESPACE"
 VAULT_TOKEN_ENV = "VAULT_TOKEN"
+UID_ENV = "TOOLCHAIN_UID"
 VAULT_UI_PATH = "/ui/"
 
 TERRAFORM_HOST = "repo.artifactory-dogen.group.echonet"
@@ -119,14 +148,27 @@ NEW_VERSION_DIR = "new_version"
 
 # Variables exportées pour terraform (le provider orchestrator et le provider ibm).
 API_KEY_VARS = ("IBM_CLOUD_API_KEY", "ORCHESTRATOR_IBMCLOUD_API_KEY")
-DEFAULT_PROXY = "ncproxy:8080"
-DEFAULT_NO_PROXY = "localhost,127.0.0.1,.echonet,.intra,0.0.0.0"
+# Proxy d'entreprise, authentifié par le compte de chaque utilisateur :
+# http://<user>:<mot de passe>@ncproxy.fr.net.intra:8080 (hvault-dev.fr.net.intra
+# passe par le proxy, les hôtes .echonet non).
+DEFAULT_PROXY = "ncproxy.fr.net.intra:8080"
+DEFAULT_NO_PROXY = "localhost,127.0.0.1,.echonet,0.0.0.0"
+PROXY_USER_ENV = "PROXY_USER"
+PROXY_PASSWORD_ENV = "PROXY_PASSWORD"
+PROXY_ENV_VARS = ("http_proxy", "https_proxy", "no_proxy")
 
 DEFAULT_TIMEOUT = 30
 TOKEN_MIN_VALIDITY = 120  # secondes : en dessous, token / API key considérés expirés
 BROWSER_LOGIN_TIMEOUT = 300  # secondes laissées pour le login SSO
 
 EXIT_OK, EXIT_USAGE, EXIT_VAULT_FAILED, EXIT_TERRAFORM_FAILED = 0, 1, 2, 3
+
+_MASK_RE = re.compile(r"://([^:/@]+):([^@/]+)@")
+
+
+def mask_url(url: str) -> str:
+    """Cache le mot de passe d'une URL de proxy pour les logs."""
+    return _MASK_RE.sub(r"://\1:***@", url)
 
 
 class CliExit(Exception):
@@ -243,6 +285,43 @@ class VaultClient:
         except (TypeError, ValueError):
             lease = None
         return data, lease
+
+
+def _http_get_json(url: str, timeout: int, context: ssl.SSLContext,
+                   headers: dict[str, str] | None = None) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers={"Accept": "application/json", **(headers or {})})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:300]
+        raise VaultError(f"HTTP {exc.code} sur GET {url}: {body}", exc.code) from exc
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise VaultError(f"GET {url} impossible: {exc}") from exc
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError as exc:
+        raise VaultError(f"réponse non JSON de GET {url}") from exc
+    return body if isinstance(body, dict) else {}
+
+
+def token_service_url(base_url: str, uid: str, namespace: str) -> str:
+    return (base_url.rstrip("/") + TOKEN_SERVICE_PATH + urllib.parse.quote(uid, safe="")
+            + "?" + urllib.parse.urlencode({"namespace": namespace}))
+
+
+def service_token(base_url: str, uid: str, namespace: str, timeout: int = DEFAULT_TIMEOUT,
+                  verify_tls: bool = False) -> str:
+    """Token Vault délivré par le service token : GET /v1/token/<uid>?namespace=<ns>,
+    champ auth.client_token de la réponse (format Vault)."""
+    url = token_service_url(base_url, uid, namespace)
+    _log(f"Token Vault demandé au service token : GET {url}")
+    body = _http_get_json(url, timeout, ssl.create_default_context() if verify_tls else insecure_ssl_context())
+    token = clean_token(str((body.get("auth") or {}).get("client_token") or ""))
+    if not _VAULT_TOKEN_RE.fullmatch(token):
+        raise VaultError(f"pas de auth.client_token dans la réponse du service token "
+                         f"(champs: {', '.join(sorted(body)) or 'aucun'})")
+    return token
 
 
 API_KEY_FIELDS = ("api_key", "apikey", "apiKey", "API_KEY", "value")
@@ -562,6 +641,17 @@ def save_cached_api_key(vault_url: str, secret_path: str, api_key: str, lease: i
     _write_state(state)
 
 
+def load_setting(name: str) -> str:
+    value = (_read_state().get("settings") or {}).get(name)
+    return value if isinstance(value, str) else ""
+
+
+def save_setting(name: str, value: str) -> None:
+    state = _read_state()
+    state.setdefault("settings", {})[name] = value
+    _write_state(state)
+
+
 def forget_all() -> None:
     try:
         os.remove(state_path())
@@ -644,14 +734,67 @@ def default_tests_dir(env: str, root: str | None = None) -> str:
 # Variables d'environnement
 # --------------------------------------------------------------------------- #
 
-def build_env_vars(api_key: str, tf_log: str | None = None, proxy: str | None = None,
-                   no_proxy: str = DEFAULT_NO_PROXY) -> dict[str, str]:
+def proxy_url(host_port: str, user: str, password: str) -> str:
+    """http://<user>:<mot de passe>@<host:port>, identifiants encodés (ex: ! -> %21)."""
+    host_port = re.sub(r"^https?://", "", host_port).rstrip("/")
+    if not user:
+        return f"http://{host_port}"
+    return f"http://{urllib.parse.quote(user, safe='')}:{urllib.parse.quote(password, safe='')}@{host_port}"
+
+
+def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
+                  ask_secret: Callable[[str], str] = getpass.getpass,
+                  environ: dict[str, str] | None = None) -> dict[str, str]:
+    """Variables http_proxy / https_proxy / no_proxy à utiliser : rien avec
+    --no-proxy ; celles déjà exportées dans le shell si --proxy n'est pas passé
+    explicitement ; sinon le proxy d'entreprise avec le user (--proxy-user,
+    $PROXY_USER, mémorisé, ou demandé) et le mot de passe (--proxy-password,
+    $PROXY_PASSWORD, ou demandé sans écho, jamais sauvegardé)."""
+    environ = os.environ if environ is None else environ
+    if args.no_proxy:
+        return {}
+    existing = environ.get("https_proxy") or environ.get("HTTPS_PROXY")
+    if existing and not args.proxy_from_cli:
+        _log(f"Proxy déjà exporté dans le shell, réutilisé : {mask_url(existing)}")
+        return {"http_proxy": environ.get("http_proxy") or environ.get("HTTP_PROXY") or existing,
+                "https_proxy": existing,
+                "no_proxy": environ.get("no_proxy") or environ.get("NO_PROXY") or args.no_proxy_hosts}
+    user = args.proxy_user or load_setting("proxy_user")
+    password = args.proxy_password
+    if not user or not password:
+        if not sys.stdin.isatty():
+            raise CliExit(EXIT_USAGE, f"proxy {args.proxy} : passer --proxy-user / --proxy-password "
+                                      f"(ou ${PROXY_USER_ENV} / ${PROXY_PASSWORD_ENV}), ou --no-proxy")
+        _log(f"Proxy {args.proxy} : identifiants de ton compte (le mot de passe n'est pas sauvegardé).")
+        user = (ask(f"User du proxy{f' [Entrée = {user}]' if user else ''} : ").strip() or user)
+        if not user:
+            raise CliExit(EXIT_USAGE, "user du proxy manquant")
+        password = password or ask_secret(f"Mot de passe du proxy pour {user} : ")
+        if not password:
+            raise CliExit(EXIT_USAGE, "mot de passe du proxy manquant")
+    if user != load_setting("proxy_user"):
+        save_setting("proxy_user", user)
+    url = proxy_url(args.proxy, user, password)
+    return {"http_proxy": url, "https_proxy": url, "no_proxy": args.no_proxy_hosts}
+
+
+def apply_proxy(proxy_vars: dict[str, str]) -> None:
+    """Exporte le proxy dans le process courant pour les appels urllib qui suivent
+    (service token, Vault) : urllib lit http_proxy / https_proxy / no_proxy."""
+    for name in PROXY_ENV_VARS:
+        os.environ.pop(name.upper(), None)
+        if name in proxy_vars:
+            os.environ[name] = proxy_vars[name]
+        else:
+            os.environ.pop(name, None)
+
+
+def build_env_vars(api_key: str, tf_log: str | None = None,
+                   proxy_vars: dict[str, str] | None = None) -> dict[str, str]:
     variables = {name: api_key for name in API_KEY_VARS}
     if tf_log:
         variables["TF_LOG"] = tf_log
-    if proxy:
-        variables["http_proxy"] = variables["https_proxy"] = proxy
-        variables["no_proxy"] = no_proxy
+    variables.update(proxy_vars or {})
     return variables
 
 
@@ -683,11 +826,25 @@ def _check_token(client: VaultClient, token: str, origin: str) -> int | None | b
     return ttl
 
 
+def resolve_uid(args: argparse.Namespace, ask: Callable[[str], str] = input) -> str:
+    """uid envoyé au service token : --uid / $TOOLCHAIN_UID, sinon celui mémorisé,
+    sinon demandé (puis mémorisé)."""
+    uid = args.uid or load_setting("uid")
+    if not uid:
+        if not sys.stdin.isatty():
+            raise CliExit(EXIT_USAGE, f"uid manquant pour le service token : --uid ou ${UID_ENV}")
+        uid = ask(f"uid pour le service token (ex: la90261) [Entrée = {getpass.getuser()}] : ").strip() \
+            or getpass.getuser()
+    if uid != load_setting("uid"):
+        save_setting("uid", uid)
+    return uid
+
+
 def resolve_vault_token(args: argparse.Namespace, client: VaultClient,
                         acquire: Callable[[str], str] | None = None) -> str:
     """Token Vault utilisable : --vault-token / $VAULT_TOKEN s'il est accepté,
-    sinon le token sauvegardé s'il l'est encore, sinon un nouveau via l'UI Vault
-    (puis sauvegardé). Chaque token est vérifié par lookup-self."""
+    sinon le token sauvegardé s'il l'est encore, sinon un nouveau via le service
+    token (ou l'UI Vault), puis sauvegardé. Chaque token est vérifié par lookup-self."""
     candidates: list[tuple[str, str]] = []
     if args.vault_token:
         candidates.append((clean_token(args.vault_token), "fourni"))
@@ -706,7 +863,15 @@ def resolve_vault_token(args: argparse.Namespace, client: VaultClient,
         elif args.vault_token_from_cli:
             raise CliExit(EXIT_USAGE, "le token passé par --vault-token est refusé par Vault")
 
-    token = (acquire or (lambda url: acquire_token_interactively(url, auto=not args.manual_token)))(args.ui_url)
+    token = ""
+    if args.token_service and not args.browser_token and not args.manual_token:
+        try:
+            token = service_token(args.token_service, resolve_uid(args), args.namespace,
+                                  args.timeout, args.verify_tls)
+        except VaultError as exc:
+            _log(f"Service token : {exc}\nPassage par l'UI Vault.")
+    if not token:
+        token = (acquire or (lambda url: acquire_token_interactively(url, auto=not args.manual_token)))(args.ui_url)
     if not token:
         raise CliExit(EXIT_USAGE, f"Token Vault manquant : --vault-token, ${VAULT_TOKEN_ENV}, "
                                   f"ou connexion sur {args.ui_url}")
@@ -767,9 +932,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     vault.add_argument("--namespace", default=os.environ.get(NAMESPACE_ENV) or DEFAULT_NAMESPACE,
                        help=f"X-Vault-Namespace (défaut: ${NAMESPACE_ENV}, sinon {DEFAULT_NAMESPACE})")
     vault.add_argument("--vault-token", default=os.environ.get(VAULT_TOKEN_ENV),
-                       help=f"token Vault (défaut: ${VAULT_TOKEN_ENV}) ; absent ou refusé : login dans l'UI Vault")
+                       help=f"token Vault (défaut: ${VAULT_TOKEN_ENV}) ; absent ou refusé : service token / UI Vault")
+    vault.add_argument("--token-service", metavar="URL",
+                       help="service token (défaut: celui de --vault dans TOKEN_SERVICES ; \"\" : aucun, UI Vault)")
+    vault.add_argument("--uid", default=os.environ.get(UID_ENV),
+                       help=f"uid passé au service token (défaut: ${UID_ENV}, sinon mémorisé ou demandé)")
+    vault.add_argument("--browser-token", action="store_true",
+                       help="ne pas appeler le service token : Chrome / Edge sur l'UI Vault")
     vault.add_argument("--manual-token", action="store_true",
-                       help="ne pas piloter Chrome / Edge : copier le token à la main depuis l'UI Vault")
+                       help="ni service token ni Chrome / Edge : copier le token à la main depuis l'UI Vault")
     vault.add_argument("--new-token", action="store_true",
                        help="ignorer le token et l'API key sauvegardés, se reconnecter à Vault")
     vault.add_argument("--new-key", action="store_true",
@@ -787,8 +958,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     terraform.add_argument("--reinit", action="store_true", help="refaire terraform init même si déjà fait")
     terraform.add_argument("--tf-log", nargs="?", const="debug", default=None,
                            help="exporter TF_LOG (défaut du niveau: debug)")
-    terraform.add_argument("--proxy", nargs="?", const=DEFAULT_PROXY, default=None,
-                           help=f"exporter http_proxy / https_proxy / no_proxy (défaut: {DEFAULT_PROXY})")
+
+    proxy = parser.add_argument_group("proxy (utilisé pour les appels Vault et exporté pour terraform)")
+    proxy.add_argument("--proxy", metavar="HOST:PORT", default=None,
+                       help=f"proxy d'entreprise (défaut: {DEFAULT_PROXY}, ou https_proxy déjà exporté)")
+    proxy.add_argument("--proxy-user", default=os.environ.get(PROXY_USER_ENV),
+                       help=f"user du proxy (défaut: ${PROXY_USER_ENV}, sinon mémorisé ou demandé)")
+    proxy.add_argument("--proxy-password", default=os.environ.get(PROXY_PASSWORD_ENV),
+                       help=f"mot de passe du proxy (défaut: ${PROXY_PASSWORD_ENV}, sinon demandé sans écho)")
+    proxy.add_argument("--no-proxy", action="store_true", help="aucun proxy")
+    proxy.add_argument("--no-proxy-hosts", default=DEFAULT_NO_PROXY, metavar="HOSTS",
+                       help=f"valeur de no_proxy (défaut: {DEFAULT_NO_PROXY})")
 
     output = parser.add_argument_group("sortie")
     output.add_argument("--run", metavar="COMMAND",
@@ -814,6 +994,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(f"chemin du secret non renseigné pour {args.env} : "
                      "le compléter dans ENVIRONMENTS en tête du script, ou passer --secret-path")
     args.ui_url = args.vault_url + VAULT_UI_PATH + "?" + urllib.parse.urlencode({"namespace": args.namespace})
+    if args.token_service is None:  # "" explicite : pas de service token
+        args.token_service = TOKEN_SERVICES.get(args.vault, "")
+    args.token_service = args.token_service.rstrip("/")
+    args.proxy_from_cli = args.proxy is not None
+    args.proxy = args.proxy or DEFAULT_PROXY
+    if args.no_proxy and args.proxy_from_cli:
+        parser.error("--no-proxy est incompatible avec --proxy")
     args.dir = os.path.abspath(args.dir or (environment.tests_dir and os.path.join(
         os.path.dirname(os.path.abspath(__file__)), environment.tests_dir)) or default_tests_dir(args.env))
     if args.terraform_args and not args.run:
@@ -865,18 +1052,21 @@ def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
         return None
 
     argv += _choose("Token Vault / API key ?", [
-        ("Réutiliser ce qui est sauvegardé s'il est encore valide, sinon Chrome en navigation privée", []),
-        ("Nouveau token via Chrome en navigation privée", ["--new-token"]),
+        ("Réutiliser ce qui est sauvegardé s'il est encore valide, sinon le service token", []),
+        ("Nouveau token via le service token (uid demandé s'il n'est pas mémorisé)", ["--new-token"]),
+        ("Nouveau token via Chrome en navigation privée sur l'UI Vault", ["--browser-token", "--new-token"]),
         ("Copier-coller manuel depuis l'UI Vault", ["--manual-token", "--new-token"]),
         ("Coller le token maintenant", ["--vault-token", ""]),
     ], ask)
     if argv[-2:] == ["--vault-token", ""]:
         argv[-1] = clean_token(getpass.getpass("Token Vault : "))
+    argv += _choose("Proxy ?", [
+        (f"{DEFAULT_PROXY} avec mon user / mot de passe (demandés ensuite)", []),
+        ("Aucun proxy", ["--no-proxy"]),
+    ], ask)
     argv += _choose("Options terraform ?", [
         ("Aucune", []),
         ("TF_LOG=debug", ["--tf-log"]),
-        (f"Proxy {DEFAULT_PROXY}", ["--proxy"]),
-        (f"TF_LOG=debug et proxy {DEFAULT_PROXY}", ["--tf-log", "--proxy"]),
     ], ask)
     argv += action  # --run doit rester en dernier (REMAINDER)
 
@@ -901,12 +1091,16 @@ def prepare(args: argparse.Namespace, acquire: Callable[[str], str] | None = Non
         ensure_terraform_login(args.terraform_host, args.dir, run)
     if not args.skip_init:
         ensure_terraform_init(args.dir, args.reinit, run)
+    proxy_vars = resolve_proxy(args)
+    apply_proxy(proxy_vars)
+    if proxy_vars:
+        _log(f"Proxy : {mask_url(proxy_vars['https_proxy'])}  no_proxy : {proxy_vars['no_proxy']}")
     client = VaultClient(args.vault_url, args.namespace, args.timeout, args.verify_tls)
     try:
         api_key = resolve_api_key(args, client, acquire)
     except VaultError as exc:
         raise CliExit(EXIT_VAULT_FAILED, f"Vault : {exc}") from exc
-    return build_env_vars(api_key, args.tf_log, args.proxy)
+    return build_env_vars(api_key, args.tf_log, proxy_vars)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -939,7 +1133,7 @@ def main(argv: list[str] | None = None) -> int:
 
     env = {**os.environ, **variables}
     if args.run:
-        _log("Variables exportées : " + ", ".join(variables))
+        _log("Variables exportées : " + ", ".join(variables))  # valeurs non affichées
         try:
             return run_terraform(args.run, args.dir, env, to_stderr=False)
         except CliExit as exc:
