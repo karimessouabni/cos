@@ -664,16 +664,17 @@ class TokenTests(unittest.TestCase):
                 open_url=lambda url: True, auto_browser=lambda url: "")
         self.assertEqual(token, _jwt(FAR_FUTURE))
 
-    def test_browser_ignores_certificate_errors_when_insecure(self):
+    def test_browser_is_always_private_and_ignores_certificates(self):
         with mock.patch.object(sc.subprocess, "Popen") as popen, \
              mock.patch.object(sc, "_devtools_port", side_effect=RuntimeError("stop")), mock.patch("sys.stderr"):
-            sc.browser_token("https://swagger", insecure=True, browser="/bin/chrome")
-            self.assertIn("--ignore-certificate-errors", popen.call_args.args[0])
-            sc.browser_token("https://swagger", insecure=False, browser="/bin/chrome")
-            self.assertNotIn("--ignore-certificate-errors", popen.call_args.args[0])
+            sc.browser_token("https://swagger", browser="/bin/chrome")
+        command = popen.call_args.args[0]
+        self.assertIn("--incognito", command)
+        self.assertIn("--ignore-certificate-errors", command)
+        self.assertEqual(command[-1], "https://swagger")
 
     def test_session_passes_browser_flags(self):
-        args = sc.parse_args(["--manual-token", "--no-private"])
+        args = sc.parse_args(["--manual-token"])
         with mock.patch.object(sc, "acquire_token_interactively", return_value="t") as acquire:
             self.assertEqual(sc.Session(args)._acquire_token("https://swagger"), "t")
         self.assertFalse(acquire.call_args.kwargs["auto"])
@@ -708,25 +709,24 @@ class InteractiveModeTests(unittest.TestCase):
         return argv, "".join(c.args[0] for c in out.write.call_args_list)
 
     def test_all_defaults_is_a_dry_run(self):
-        argv, printed = self._wizard([""] * 8)
-        self.assertEqual(argv, ["--insecure"])
+        argv, printed = self._wizard([""] * 7)
+        self.assertEqual(argv, [])
         self.assertIn("1) Supprimer les souscriptions éligibles", printed)
         self.assertIn("Commande équivalente", printed)
         self.assertFalse(sc.parse_args(argv).delete)
 
     def test_delete_for_real_with_choices(self):
-        answers = ["1", "2", "2", "h12345", "", "dev", "", "", "3", "2", "4"]
+        answers = ["1", "2", "2", "h12345", "", "dev", "", "", "2", "4"]
         argv, _ = self._wizard(answers)
         self.assertEqual(argv, ["--delete", "--user", "h12345", "--product-branch", "dev",
-                                "--manual-token", "--verify-tls", "--workers", "4"])
+                                "--manual-token", "--workers", "4"])
         args = sc.parse_args(argv)
-        self.assertEqual((args.delete, args.user, args.workers, args.insecure), (True, "h12345", 4, False))
+        self.assertEqual((args.delete, args.user, args.workers), (True, "h12345", 4))
 
     def test_on_error_decline_locked(self):
-        answers = ["2", "2", "3", "", "2", "", "", "", "2", "", ""]
+        answers = ["2", "2", "3", "", "2", "", "", "", "", ""]
         argv, _ = self._wizard(answers)
-        self.assertEqual(argv, ["--on-error", "--decline", "--all-users", "--subscription-status", "LOCKED",
-                                "--no-private", "--insecure"])
+        self.assertEqual(argv, ["--on-error", "--decline", "--all-users", "--subscription-status", "LOCKED"])
         self.assertTrue(sc.parse_args(argv).decline)
 
     def test_local_file_dry_run_skips_network_questions(self):
@@ -743,8 +743,8 @@ class InteractiveModeTests(unittest.TestCase):
 
     def test_token_is_masked_in_the_printed_command(self):
         with mock.patch("getpass.getpass", return_value="Bearer secret-token"):
-            argv, printed = self._wizard(["1", "1", "1", "", "1", "", "4", "1"])
-        self.assertEqual(argv, ["--token", "secret-token", "--insecure"])
+            argv, printed = self._wizard(["1", "1", "1", "", "1", "", "3"])
+        self.assertEqual(argv, ["--token", "secret-token"])
         self.assertNotIn("secret-token", printed)
         self.assertIn("--token '<token>'", printed)
 
@@ -828,82 +828,13 @@ def _make_self_signed(tmpdir: str) -> tuple[str, str, str]:
 
 @unittest.skipUnless(shutil.which("openssl"), "openssl absent")
 class TlsTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.tmpdir = tempfile.mkdtemp()
-        cls.key, cls.pem, cls.der = _make_self_signed(cls.tmpdir)
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmpdir, ignore_errors=True)
-
-    def test_default_is_none(self):
-        self.assertIsNone(sc.build_ssl_context())
-        self.assertIsNone(sc.build_ssl_context([]))
-        self.assertIsNone(sc.build_ssl_context([""]))
-
-    def test_insecure_disables_verification(self):
-        ctx = sc.build_ssl_context(insecure=True)
+    def test_ssl_context_never_verifies(self):
+        ctx = sc.insecure_ssl_context()
         self.assertFalse(ctx.check_hostname)
         self.assertEqual(ctx.verify_mode, ssl.CERT_NONE)
 
-    def test_insecure_wins_over_ca_certs(self):
-        ctx = sc.build_ssl_context(["/nonexistent.cer"], insecure=True)
-        self.assertEqual(ctx.verify_mode, ssl.CERT_NONE)
-
-    def test_loads_pem_and_der(self):
-        for path in (self.pem, self.der):
-            ctx = sc.build_ssl_context([path])
-            self.assertTrue(ctx.check_hostname)
-            self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
-            subjects = [dict(x[0] for x in c["subject"]) for c in ctx.get_ca_certs()]
-            self.assertIn({"commonName": "localhost"}, subjects, path)
-
-    def test_expands_user_home(self):
-        home = os.path.dirname(self.der)
-        with mock.patch.dict(os.environ, {"HOME": home}):
-            ctx = sc.build_ssl_context(["~/cert.der"])
-        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
-
-    def test_missing_or_invalid_file(self):
-        with self.assertRaises(OSError):
-            sc.build_ssl_context(["/nonexistent.cer"])
-        bad = os.path.join(self.tmpdir, "bad.cer")
-        with open(bad, "wb") as fh:
-            fh.write(b"not a certificate")
-        with self.assertRaises(ValueError):
-            sc.build_ssl_context([bad])
-        empty = os.path.join(self.tmpdir, "empty.cer")
-        open(empty, "wb").close()
-        with self.assertRaises(ValueError):
-            sc.build_ssl_context([empty])
-
-    def test_env_parsing(self):
-        self.assertEqual(sc.ca_certs_from_env(None), [])
-        self.assertEqual(sc.ca_certs_from_env(""), [])
-        self.assertEqual(sc.ca_certs_from_env(os.pathsep.join(["a.cer", " ", "b.cer"])), ["a.cer", "b.cer"])
-
-    def test_cli_flags(self):
-        self.assertEqual(sc.parse_args(["--ca-cert", "a.cer", "b.cer", "--delete"]).ca_certs, ["a.cer", "b.cer"])
-        with mock.patch.dict(os.environ, {sc.CA_CERTS_ENV: "x.cer"}):
-            self.assertEqual(sc.parse_args([]).ca_certs, ["x.cer"])
-        with mock.patch.dict(os.environ, {sc.CA_CERTS_ENV: ""}):
-            self.assertEqual(sc.parse_args([]).ca_certs, [])
-        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
-            sc.parse_args(["--ca-cert", "a.cer", "--insecure"])
-
-    def test_insecure_by_default(self):
-        with mock.patch.dict(os.environ, {sc.CA_CERTS_ENV: ""}):
-            self.assertTrue(sc.parse_args([]).insecure)
-            self.assertFalse(sc.parse_args(["--verify-tls"]).insecure)
-            self.assertFalse(sc.parse_args(["--ca-cert", "a.cer"]).insecure)
-        with mock.patch.dict(os.environ, {sc.CA_CERTS_ENV: "x.cer"}):
-            self.assertFalse(sc.parse_args([]).insecure)
-        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
-            sc.parse_args(["--verify-tls", "--insecure"])
-
     def test_end_to_end_against_self_signed_server(self):
-        """Sans le CA : CERTIFICATE_VERIFY_FAILED ; avec --ca-cert (DER) : OK."""
+        """Serveur HTTPS auto-signé : le client passe sans aucun certificat CA."""
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 body = json.dumps({"result": {"rows": []}}).encode()
@@ -916,24 +847,24 @@ class TlsTests(unittest.TestCase):
             def log_message(self, *a):
                 pass
 
-        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-        srv_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        srv_ctx.load_cert_chain(self.pem, self.key)
-        server.socket = srv_ctx.wrap_socket(server.socket, server_side=True)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        base = f"https://localhost:{server.server_address[1]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            key, pem, _ = _make_self_signed(tmp)
+            server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+            srv_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            srv_ctx.load_cert_chain(pem, key)
+            server.socket = srv_ctx.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
-            with self.assertRaises(sc.OrchestratorApiError) as cm:
-                sc.OrchestratorClient("tok", base).get_subscriptions()
-            self.assertIn("CERTIFICATE_VERIFY_FAILED", str(cm.exception))
-            body = sc.OrchestratorClient("tok", base, ca_certs=[self.der]).get_subscriptions()
-            self.assertEqual(body, {"result": {"rows": []}})
-            body = sc.OrchestratorClient("tok", base, insecure=True).get_subscriptions()
+            body = sc.OrchestratorClient("tok", f"https://localhost:{server.server_address[1]}").get_subscriptions()
             self.assertEqual(body, {"result": {"rows": []}})
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_tls_options_are_gone(self):
+        for flag in ("--insecure", "--verify-tls", "--ca-cert", "--no-private"):
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+                sc.parse_args([flag])
 
 
 if __name__ == "__main__":

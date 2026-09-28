@@ -38,8 +38,8 @@ TOUTES les demandes sont en ON_ERROR.
 Token
     export ORCHESTRATOR_TOKEN=...            # ou --token
 Sans token valide (absent ou JWT expiré), le script ouvre le Swagger dans un
-Chrome / Edge dédié, en navigation privée (--no-private pour l'éviter) : on se
-connecte en SSO, on clique Authorize, et le token est lu automatiquement dans
+Chrome / Edge dédié, toujours en navigation privée : on se connecte en SSO
+Keycloak, on clique Authorize, et le token est lu automatiquement dans
 la page puis le navigateur se ferme. Sans Chrome / Edge, ou avec --manual-token,
 le script ouvre le Swagger
 (--swagger-url, $ORCHESTRATOR_SWAGGER_URL ou DEFAULT_SWAGGER_URL en tête du
@@ -66,12 +66,8 @@ Usage:
     python subscriptions_cleanup.py --on-error --subscription-status LOCKED   # restreint aux LOCKED
     python subscriptions_cleanup.py --print-bookmarklet         # bookmarklet de copie du token
 
-TLS (certificat interne BNPP, sinon "CERTIFICATE_VERIFY_FAILED: self-signed
-certificate in certificate chain") :
-    python subscriptions_cleanup.py --ca-cert ~/Root-Certificats-Internes/*.cer
-    export ORCHESTRATOR_CA_CERTS=~/Root-Certificats-Internes/2014-2044\ BNPP\ Root.cer
-    # par défaut : pas de vérification TLS (DEFAULT_INSECURE) ; pour vérifier :
-    python subscriptions_cleanup.py --verify-tls
+TLS : les certificats ne sont jamais vérifiés (certificats internes), ni par
+le script ni par le navigateur ouvert pour le token.
 
 Codes de sortie: 0 OK, 1 erreur args/token, 2 erreur HTTP sur le GET,
 3 au moins un DELETE / retry / decline en échec.
@@ -114,9 +110,6 @@ MAX_PAGES = 10_000
 
 TOKEN_ENV = "ORCHESTRATOR_TOKEN"
 SWAGGER_URL_ENV = "ORCHESTRATOR_SWAGGER_URL"
-CA_CERTS_ENV = "ORCHESTRATOR_CA_CERTS"  # chemins séparés par os.pathsep (":" sur macOS/Linux)
-# TLS non vérifié par défaut (certificats internes) ; --verify-tls ou --ca-cert pour vérifier.
-DEFAULT_INSECURE = True
 TOKEN_MIN_VALIDITY = 60  # secondes : en dessous, le token est considéré expiré
 
 STATE_MANAGER_PREFIX = "/state_manager/api/v1"
@@ -669,30 +662,26 @@ def _find_token_in_pages(port: int) -> str:
 
 def browser_token(
     swagger_url: str,
-    private: bool = True,
-    insecure: bool = False,
     timeout: float = BROWSER_LOGIN_TIMEOUT,
     browser: str | None = None,
     poll_interval: float = 2,
 ) -> str:
     """Ouvre le Swagger dans un Chrome / Edge dédié (profil temporaire, navigation
-    privée par défaut), attend le login SSO + Authorize, lit le token dans la page
-    via le protocole DevTools puis ferme le navigateur. "" si échec ou délai dépassé."""
+    privée, erreurs de certificat ignorées), attend le login SSO Keycloak +
+    Authorize, lit le token dans la page via le protocole DevTools puis ferme le
+    navigateur. "" si échec ou délai dépassé."""
     browser = browser or find_chromium_browser()
     if not browser:
         _log("Chrome / Edge introuvable : récupération automatique impossible.")
         return ""
     profile_dir = tempfile.mkdtemp(prefix="subscriptions-cleanup-")
     command = [browser, f"--user-data-dir={profile_dir}", "--remote-debugging-port=0",
-               "--no-first-run", "--no-default-browser-check", "--new-window"]
-    if private:
-        command.append("--incognito")
-    if insecure:
-        command.append("--ignore-certificate-errors")
-    process = subprocess.Popen(command + [swagger_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+               "--no-first-run", "--no-default-browser-check", "--new-window",
+               "--incognito", "--ignore-certificate-errors", swagger_url]
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         port = _devtools_port(profile_dir, process)
-        _log(f"Navigateur ouvert{' en navigation privée' if private else ''} : se connecter en SSO "
+        _log("Navigateur ouvert en navigation privée : se connecter en SSO Keycloak "
              f"puis cliquer Authorize (attente {_duration(timeout)} max, fermer la fenêtre pour annuler).")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and process.poll() is None:
@@ -795,43 +784,12 @@ def resolve_token(
 # TLS
 # --------------------------------------------------------------------------- #
 
-def _load_ca_cert(context: ssl.SSLContext, path: str) -> None:
-    """Ajoute un certificat CA (fichier .cer/.crt/.pem, encodé PEM ou DER) au contexte."""
-    with open(path, "rb") as fh:
-        data = fh.read()
-    if not data.strip():
-        raise ValueError(f"certificat vide: {path}")
-    try:
-        context.load_verify_locations(cadata=data.decode("ascii") if b"-----BEGIN" in data else data)
-    except (ssl.SSLError, UnicodeDecodeError, ValueError) as exc:
-        raise ValueError(f"certificat illisible: {path} ({exc})") from exc
-
-
-def build_ssl_context(ca_certs: Iterable[str] | None = None, insecure: bool = False) -> ssl.SSLContext | None:
-    """Contexte TLS pour urlopen.
-
-    - insecure : aucune vérification (check_hostname=False, CERT_NONE) ;
-    - ca_certs : CA système + chaque fichier (PEM ou DER), typiquement les
-      "Root-Certificats-Internes" BNPP ;
-    - sinon None : comportement par défaut de urllib (CA système / $SSL_CERT_FILE).
-    """
-    if insecure:
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-        return context
-    paths = [os.path.expanduser(p) for p in (ca_certs or []) if p]
-    if not paths:
-        return None
+def insecure_ssl_context() -> ssl.SSLContext:
+    """Contexte TLS sans aucune vérification (certificats internes auto-signés)."""
     context = ssl.create_default_context()
-    for path in paths:
-        _load_ca_cert(context, path)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
     return context
-
-
-def ca_certs_from_env(value: str | None) -> list[str]:
-    """Découpe $ORCHESTRATOR_CA_CERTS (séparateur os.pathsep) en liste de chemins."""
-    return [p.strip() for p in (value or "").split(os.pathsep) if p.strip()]
 
 
 # --------------------------------------------------------------------------- #
@@ -866,15 +824,13 @@ class OrchestratorClient:
         token: str,
         base_url: str = DEFAULT_BASE_URL,
         timeout: int = DEFAULT_TIMEOUT,
-        insecure: bool = False,
-        ca_certs: Iterable[str] | None = None,
     ):
         if not token:
             raise ValueError("Bearer token manquant")
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._ssl_context = build_ssl_context(ca_certs, insecure)
+        self._ssl_context = insecure_ssl_context()
 
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}{path}"
@@ -959,8 +915,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                            f"(défaut: ${SWAGGER_URL_ENV}, sinon DEFAULT_SWAGGER_URL dans le script)")
     auth.add_argument("--manual-token", action="store_true",
                       help="ne pas piloter Chrome / Edge : copier le token à la main depuis le Swagger")
-    auth.add_argument("--no-private", action="store_true",
-                      help="ouvrir le Swagger hors navigation privée (profil temporaire quand même)")
     auth.add_argument("--print-bookmarklet", action="store_true",
                       help="affiche le bookmarklet qui copie le token depuis le Swagger, puis quitte")
 
@@ -1001,23 +955,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     on_error.add_argument("--demand-status", default=DEMAND_ON_ERROR_STATUS,
                           help=f"status que doivent avoir toutes les demandes (défaut: {DEMAND_ON_ERROR_STATUS})")
 
-    tls = parser.add_mutually_exclusive_group()
-    tls.add_argument("--ca-cert", nargs="+", metavar="FILE", dest="ca_certs",
-                     default=ca_certs_from_env(os.environ.get(CA_CERTS_ENV)),
-                     help="certificat(s) CA interne(s) à ajouter aux CA système, .cer/.pem en PEM ou DER "
-                          f"(défaut: ${CA_CERTS_ENV}, chemins séparés par '{os.pathsep}')")
-    tls.add_argument("--insecure", action="store_true", default=None,
-                     help="désactive la vérification TLS "
-                          f"(défaut: {'oui' if DEFAULT_INSECURE else 'non'}, sauf avec --ca-cert / ${CA_CERTS_ENV})")
-    tls.add_argument("--verify-tls", action="store_true",
-                     help="vérifie les certificats TLS avec les CA système")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--json", action="store_true", dest="as_json",
                         help="sortie JSON (liste des éléments retenus)")
 
     args = parser.parse_args(argv)
-    if args.insecure is None:
-        args.insecure = DEFAULT_INSECURE and not args.verify_tls and not args.ca_certs
     if args.page_size < 1:
         parser.error("--page-size doit être >= 1")
     if args.workers < 1:
@@ -1032,8 +974,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _make_client(args: argparse.Namespace) -> OrchestratorClient:
-    return OrchestratorClient(args.token, args.base_url, args.timeout,
-                              insecure=args.insecure, ca_certs=args.ca_certs)
+    return OrchestratorClient(args.token, args.base_url, args.timeout)
 
 
 class Session:
@@ -1048,19 +989,16 @@ class Session:
     def client(self) -> OrchestratorClient:
         if self._client is None:
             self.args.token = resolve_token(self.args.token, self.args.swagger_url, self._acquire_token)
-            if self.args.insecure:
-                _log("TLS non vérifié (--verify-tls ou --ca-cert pour vérifier les certificats).")
             try:
                 self._client = _make_client(self.args)
-            except (OSError, ValueError) as exc:
-                raise CliExit(EXIT_USAGE, f"Certificat CA invalide: {exc}") from exc
+            except ValueError as exc:
+                raise CliExit(EXIT_USAGE, str(exc)) from exc
         return self._client
 
     def _acquire_token(self, swagger_url: str | None) -> str:
         return acquire_token_interactively(
             swagger_url, auto=not self.args.manual_token,
-            auto_browser=lambda url: browser_token(url, private=not self.args.no_private,
-                                                   insecure=self.args.insecure))
+            auto_browser=browser_token)
 
     def load_rows(self) -> list[Row]:
         """Listing des souscriptions : fichier --input, sinon GET paginé."""
@@ -1072,10 +1010,7 @@ class Session:
                 self.args.product, self.args.page_size, self.args.first_page,
                 lambda page, count: _log(f"page {page}: {count} row(s)"))
         except OrchestratorApiError as exc:
-            hint = ""
-            if "CERTIFICATE_VERIFY_FAILED" in str(exc):
-                hint = f"\nAstuce: passer le CA interne avec --ca-cert <fichier.cer> (ou ${CA_CERTS_ENV})."
-            raise CliExit(EXIT_GET_FAILED, f"GET échoué: {exc}{hint}") from exc
+            raise CliExit(EXIT_GET_FAILED, f"GET échoué: {exc}") from exc
         return extract_rows(body)
 
 
@@ -1282,19 +1217,11 @@ def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
             argv += ["--base-url", base_url]
         argv += _choose("Récupération du token (si $ORCHESTRATOR_TOKEN absent ou expiré) ?", [
             ("Automatique : Chrome en navigation privée, login SSO Keycloak", []),
-            ("Automatique : Chrome sans navigation privée", ["--no-private"]),
             ("Copier-coller manuel depuis le Swagger", ["--manual-token"]),
             ("Coller le token maintenant", ["--token", ""]),
         ], ask)
         if argv[-2:] == ["--token", ""]:
             argv[-1] = clean_token(getpass.getpass("Token : "))
-        argv += _choose("Vérification des certificats TLS ?", [
-            ("Non, ignorer (certificats internes)", ["--insecure"]),
-            ("Oui, avec les CA système", ["--verify-tls"]),
-            ("Oui, avec un fichier CA", ["--ca-cert", ""]),
-        ], ask)
-        if argv[-2:] == ["--ca-cert", ""]:
-            argv[-1] = _ask_text("Chemin du certificat CA (.cer / .pem)", ask=ask)
         if execute:
             workers = _ask_text("Appels en parallèle", str(DEFAULT_WORKERS), ask)
             if workers != str(DEFAULT_WORKERS):
