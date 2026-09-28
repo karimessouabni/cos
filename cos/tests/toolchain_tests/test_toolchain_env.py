@@ -287,6 +287,24 @@ class ProxyTest(unittest.TestCase):
         with mock.patch.object(sys.stdin, "isatty", return_value=False), self.assertRaises(te.CliExit):
             te.resolve_proxy(te.parse_args([]), environ={})
 
+    def test_check_proxy(self):
+        proxy = {"http_proxy": "http://u:p@px:1", "https_proxy": "http://u:p@px:1", "no_proxy": ""}
+        import urllib.error
+        te.check_proxy({})  # aucun proxy : rien à vérifier
+        with mock.patch.object(te.urllib.request, "urlopen", side_effect=urllib.error.HTTPError(
+                "u", 407, "authenticationrequired", {}, None)), self.assertRaises(te.CliExit) as ctx:
+            te.check_proxy(proxy)
+        self.assertIn("identifiants refusés", str(ctx.exception))
+        self.assertNotIn(":p@", str(ctx.exception))
+        with mock.patch.object(te.urllib.request, "urlopen", side_effect=urllib.error.HTTPError(
+                "u", 405, "Method Not Allowed", {}, None)):
+            te.check_proxy(proxy)  # le proxy laisse passer : pas d'erreur
+        with mock.patch.object(te.urllib.request, "urlopen", side_effect=urllib.error.URLError("timed out")):
+            te.check_proxy(proxy)  # injoignable : avertissement seulement
+        with mock.patch.object(te.urllib.request, "urlopen", side_effect=urllib.error.URLError(
+                "Tunnel connection failed: 407 authenticationrequired")), self.assertRaises(te.CliExit):
+            te.check_proxy(proxy)
+
     def test_apply_proxy_sets_process_env(self):
         with mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://x", "no_proxy": "old"}, clear=False):
             te.apply_proxy({"http_proxy": "http://p", "https_proxy": "http://p", "no_proxy": "n"})
@@ -534,7 +552,7 @@ class MainTest(VaultServerTest):
         tests_dir = tempfile.mkdtemp(prefix="tfdir-")
         argv = ["--env", "int", "--vault-url", self.url, "--skip-login", "--skip-init", "--dir", tests_dir,
                 "--vault-token", TOKEN_OK, "--proxy", "127.0.0.1:9", "--proxy-user", "u", "--proxy-password", "p!",
-                "--no-proxy-hosts", "127.0.0.1", "--json"]
+                "--no-proxy-hosts", "127.0.0.1", "--skip-proxy-check", "--json"]
         import io
         out = io.StringIO()
         with mock.patch.object(sys, "stdout", out), mock.patch.dict(os.environ, {}, clear=False):

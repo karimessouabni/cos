@@ -13,8 +13,10 @@ main avant un `terraform plan` est enchaîné par le script.
 3. proxy                             http://<user>:<mot de passe>@ncproxy.fr.net.intra:8080
                                      user et mot de passe demandés à chaque
                                      lancement (le mot de passe n'est jamais
-                                     sauvegardé) ; utilisé pour les appels
-                                     suivants et exporté pour terraform
+                                     sauvegardé), vérifiés tout de suite sur
+                                     iam.cloud.ibm.com (407 = refusés) ; utilisé
+                                     pour les appels suivants et exporté pour
+                                     terraform
 4. token Vault                       de l'instance Vault de l'environnement
                                      (int -> hvault-dev) : token sauvegardé s'il
                                      est encore valide, sinon
@@ -156,6 +158,9 @@ DEFAULT_NO_PROXY = "localhost,127.0.0.1,.echonet,0.0.0.0"
 PROXY_USER_ENV = "PROXY_USER"
 PROXY_PASSWORD_ENV = "PROXY_PASSWORD"
 PROXY_ENV_VARS = ("http_proxy", "https_proxy", "no_proxy")
+# URL publique appelée à travers le proxy pour vérifier les identifiants avant
+# terraform (c'est l'hôte que le provider ibm joint en premier).
+PROXY_CHECK_URL = "https://iam.cloud.ibm.com/identity/.well-known/openid-configuration"
 
 DEFAULT_TIMEOUT = 30
 TOKEN_MIN_VALIDITY = 120  # secondes : en dessous, token / API key considérés expirés
@@ -789,6 +794,31 @@ def apply_proxy(proxy_vars: dict[str, str]) -> None:
             os.environ.pop(name, None)
 
 
+def check_proxy(proxy_vars: dict[str, str], url: str = PROXY_CHECK_URL, timeout: int = 15) -> None:
+    """Vérifie que le proxy laisse passer vers `url` : 407 = user / mot de passe
+    refusés (CliExit) ; les autres erreurs réseau ne sont que signalées."""
+    if not proxy_vars:
+        return
+    request = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout, context=insecure_ssl_context()):
+            pass
+    except urllib.error.HTTPError as exc:
+        if exc.code == 407:
+            raise CliExit(EXIT_USAGE, f"proxy {mask_url(proxy_vars['https_proxy'])} : identifiants refusés "
+                                      f"(HTTP 407 {exc.reason}). Vérifier le user et le mot de passe "
+                                      "(--proxy-user / --proxy-password), ou le compte bloqué.")
+        _log(f"Proxy OK ({url} répond HTTP {exc.code}).")
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        if "407" in str(reason) or "authenticationrequired" in str(reason).lower():
+            raise CliExit(EXIT_USAGE, f"proxy {mask_url(proxy_vars['https_proxy'])} : identifiants refusés "
+                                      f"({reason}). Vérifier le user et le mot de passe.")
+        _log(f"Proxy non vérifié ({url} : {reason}) ; terraform échouera si le proxy refuse.")
+    else:
+        _log(f"Proxy OK ({url} joignable).")
+
+
 def build_env_vars(api_key: str, tf_log: str | None = None,
                    proxy_vars: dict[str, str] | None = None) -> dict[str, str]:
     variables = {name: api_key for name in API_KEY_VARS}
@@ -969,6 +999,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     proxy.add_argument("--no-proxy", action="store_true", help="aucun proxy")
     proxy.add_argument("--no-proxy-hosts", default=DEFAULT_NO_PROXY, metavar="HOSTS",
                        help=f"valeur de no_proxy (défaut: {DEFAULT_NO_PROXY})")
+    proxy.add_argument("--skip-proxy-check", action="store_true",
+                       help=f"ne pas tester le proxy sur {PROXY_CHECK_URL} avant de continuer")
 
     output = parser.add_argument_group("sortie")
     output.add_argument("--run", metavar="COMMAND",
@@ -1095,6 +1127,8 @@ def prepare(args: argparse.Namespace, acquire: Callable[[str], str] | None = Non
     apply_proxy(proxy_vars)
     if proxy_vars:
         _log(f"Proxy : {mask_url(proxy_vars['https_proxy'])}  no_proxy : {proxy_vars['no_proxy']}")
+        if not args.skip_proxy_check:
+            check_proxy(proxy_vars)
     client = VaultClient(args.vault_url, args.namespace, args.timeout, args.verify_tls)
     try:
         api_key = resolve_api_key(args, client, acquire)
