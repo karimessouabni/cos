@@ -848,6 +848,47 @@ class TokenCacheTests(unittest.TestCase):
         self.assertIsNone(sc.load_cached_token(self.BASE))
 
 
+class EnvironmentTests(unittest.TestCase):
+    ENVS = {"staging": "https://staging.example", "preprod": "https://preprod.example", "prod": ""}
+
+    def setUp(self):
+        patches = [mock.patch.dict(sc.ENVIRONMENTS, self.ENVS),
+                   mock.patch.dict(os.environ, {"ORCHESTRATOR_ENV": "", "ORCHESTRATOR_SWAGGER_URL": ""})]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_env_selects_the_url(self):
+        self.assertEqual(sc.parse_args([]).env, "staging")
+        args = sc.parse_args(["--env", "preprod"])
+        self.assertEqual((args.base_url, args.swagger_url), ("https://preprod.example", "https://preprod.example/docs"))
+        self.assertEqual(sc.parse_args(["--env", "preprod", "--base-url", "https://x"]).base_url, "https://x")
+
+    def test_env_from_environment_variable(self):
+        with mock.patch.dict(os.environ, {"ORCHESTRATOR_ENV": "preprod"}):
+            self.assertEqual(sc.parse_args([]).base_url, "https://preprod.example")
+
+    def test_env_without_url_is_rejected(self):
+        for argv in (["--env", "prod"], ["--env", "dev"]):
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+                sc.parse_args(argv)
+        self.assertEqual(sc.parse_args(["--env", "prod", "--base-url", "https://prod.example"]).base_url,
+                         "https://prod.example")
+
+    def test_wizard_env_choice(self):
+        replies = iter(["1", "1", "1", "", "2", "", ""])
+        with mock.patch("sys.stdout"):
+            argv = sc.interactive_argv(ask=lambda prompt: next(replies))
+        self.assertEqual(argv, ["--env", "preprod"])
+
+    def test_wizard_asks_url_when_env_has_none(self):
+        replies = iter(["1", "1", "1", "", "3", "https://prod.example", "", ""])
+        with mock.patch("sys.stdout"):
+            argv = sc.interactive_argv(ask=lambda prompt: next(replies))
+        self.assertEqual(argv, ["--env", "prod", "--base-url", "https://prod.example"])
+        self.assertEqual(sc.parse_args(argv).base_url, "https://prod.example")
+
+
 @unittest.skipUnless(sc.find_chromium_browser() and os.environ.get("RUN_BROWSER_TESTS"),
                      "Chrome / Edge absent ou RUN_BROWSER_TESTS non défini")
 class BrowserTokenTests(unittest.TestCase):

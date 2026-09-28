@@ -58,7 +58,8 @@ Usage:
     python subscriptions_cleanup.py --delete --workers 8  # 8 appels en parallèle
     python subscriptions_cleanup.py --user h12345               # autre user
     python subscriptions_cleanup.py --all-users                 # sans filtre user
-    python subscriptions_cleanup.py --product cos.bucket --base-url https://...
+    python subscriptions_cleanup.py --env preprod               # environnement (staging, preprod, prod)
+    python subscriptions_cleanup.py --product cos.bucket --base-url https://...   # URL hors ENVIRONMENTS
     python subscriptions_cleanup.py --page-size 50 --first-page 0   # pagination
     python subscriptions_cleanup.py --on-error                  # liste les demandes à décliner (dry-run)
     python subscriptions_cleanup.py --on-error --decline        # POST DECLINED sur chacune
@@ -95,7 +96,15 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Sequence, TypeVar
 
-DEFAULT_BASE_URL = "https://orchestrator-gw.int.staging.echonet"
+# URL de l'orchestrator par environnement (sélection : --env).
+ENVIRONMENTS = {
+    "staging": "https://orchestrator-gw.int.staging.echonet",
+    "preprod": "",  # URL à renseigner
+    "prod": "",  # URL à renseigner
+}
+DEFAULT_ENV = "staging"
+ENV_VAR = "ORCHESTRATOR_ENV"
+DEFAULT_BASE_URL = ENVIRONMENTS[DEFAULT_ENV]
 # Page Swagger ouverte dans le navigateur quand il faut un token : <base-url>/docs.
 SWAGGER_PATH = "/docs"
 DEFAULT_PRODUCT = "cos.bucket"
@@ -969,7 +978,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     parser.add_argument("-i", "--interactive", action="store_true",
                         help="mode guidé : menus numérotés (défaut quand le script est lancé sans argument)")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument("--env", choices=list(ENVIRONMENTS), default=os.environ.get(ENV_VAR) or DEFAULT_ENV,
+                        help=f"environnement orchestrator (défaut: ${ENV_VAR}, sinon {DEFAULT_ENV})")
+    parser.add_argument("--base-url", help="URL de l'orchestrator (défaut: celle de --env dans ENVIRONMENTS)")
     parser.add_argument("--product", default=DEFAULT_PRODUCT,
                         help=f"filtre geninfo.product (défaut: {DEFAULT_PRODUCT})")
     parser.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE,
@@ -1008,6 +1019,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     args = parser.parse_args(argv)
     args.token_from_cli = bool(args.token)
+    if args.env not in ENVIRONMENTS:
+        parser.error(f"${ENV_VAR}={args.env} inconnu (choix: {', '.join(ENVIRONMENTS)})")
+    args.base_url = args.base_url or ENVIRONMENTS[args.env]
+    if not args.base_url:
+        parser.error(f"URL de l'environnement {args.env} non renseignée : "
+                     "la compléter dans ENVIRONMENTS en tête du script, ou passer --base-url")
     args.swagger_url = args.swagger_url or args.base_url.rstrip("/") + SWAGGER_PATH
     if args.page_size < 1:
         parser.error("--page-size doit être >= 1")
@@ -1033,6 +1050,7 @@ def _acquire_token(args: argparse.Namespace, swagger_url: str | None) -> str:
 def connect(args: argparse.Namespace, use_cache: bool = True) -> OrchestratorClient:
     """Client HTTP avec un token valide : --token / $ORCHESTRATOR_TOKEN, sinon le
     token sauvegardé, sinon un nouveau récupéré depuis le Swagger (puis sauvegardé)."""
+    _log(f"Environnement : {args.env} ({args.base_url})")
     cached = load_cached_token(args.base_url) if use_cache and not args.new_token else None
     if not args.token and cached:
         _log(f"Token sauvegardé réutilisé ({token_cache_path()}).")
@@ -1114,7 +1132,7 @@ def run_cleanup(args: argparse.Namespace, client: OrchestratorClient, rows: list
     if not args.delete:
         print("\nDry-run: relancer avec --delete pour exécuter.")
         return EXIT_OK
-    if not args.yes and not _confirm(f"Exécuter {len(eligible) - retry_count} DELETE et {retry_count} retry ?"):
+    if not args.yes and not _confirm(f"[{args.env}] Exécuter {len(eligible) - retry_count} DELETE et {retry_count} retry ?"):
         print("Annulé.")
         return EXIT_OK
 
@@ -1171,7 +1189,7 @@ def run_on_error(args: argparse.Namespace, client: OrchestratorClient, rows: lis
     if not args.decline:
         print("\nDry-run: relancer avec --on-error --decline pour exécuter.")
         return EXIT_OK
-    if not args.yes and not _confirm(f"Passer {len(demands)} demande(s) en {DECLINED_STATUS} ?"):
+    if not args.yes and not _confirm(f"[{args.env}] Passer {len(demands)} demande(s) en {DECLINED_STATUS} ?"):
         print("Annulé.")
         return EXIT_OK
 
@@ -1262,9 +1280,13 @@ def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
         if branch != DEFAULT_PRODUCT_BRANCH:
             argv += ["--product-branch", branch]
 
-    base_url = _ask_text("URL de l'orchestrator", DEFAULT_BASE_URL, ask)
-    if base_url != DEFAULT_BASE_URL:
-        argv += ["--base-url", base_url]
+    env = _choose("Environnement ?", [
+        (f"{name} ({url or 'URL à renseigner'})", name) for name, url in ENVIRONMENTS.items()
+    ], ask, default=list(ENVIRONMENTS).index(DEFAULT_ENV) + 1)
+    if env != DEFAULT_ENV:
+        argv += ["--env", env]
+    if not ENVIRONMENTS[env]:
+        argv += ["--base-url", _ask_text(f"URL de l'orchestrator {env}", ask=ask)]
     argv += _choose("Récupération du token (si $ORCHESTRATOR_TOKEN absent ou expiré) ?", [
         ("Token sauvegardé s'il est encore valide, sinon Chrome en navigation privée (Keycloak)", []),
         ("Nouveau token via Chrome en navigation privée (Keycloak)", ["--new-token"]),
