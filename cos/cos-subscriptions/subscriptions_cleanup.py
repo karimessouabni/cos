@@ -58,7 +58,6 @@ Usage:
     python subscriptions_cleanup.py --all-users                 # sans filtre user
     python subscriptions_cleanup.py --product cos.bucket --base-url https://...
     python subscriptions_cleanup.py --page-size 50 --first-page 0   # pagination
-    python subscriptions_cleanup.py --input scratch.json  # lit un JSON local au lieu du GET
     python subscriptions_cleanup.py --on-error                  # liste les demandes à décliner (dry-run)
     python subscriptions_cleanup.py --on-error --decline        # POST DECLINED sur chacune
     python subscriptions_cleanup.py --on-error --decline --yes --reason "cleanup sprint 12"
@@ -932,8 +931,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help=f"ne garder que context.user == USER (défaut: {DEFAULT_USER})")
     parser.add_argument("--all-users", action="store_true",
                         help="pas de filtre sur context.user")
-    parser.add_argument("--input", metavar="FILE",
-                        help="lit le listing depuis un fichier JSON au lieu du GET")
     parser.add_argument("--dry-run", action="store_true",
                         help="lister seulement, sans menu (comportement par défaut hors mode guidé)")
     parser.add_argument("--delete", action="store_true",
@@ -977,41 +974,27 @@ def _make_client(args: argparse.Namespace) -> OrchestratorClient:
     return OrchestratorClient(args.token, args.base_url, args.timeout)
 
 
-class Session:
-    """Client HTTP créé à la demande : pas de token demandé tant qu'aucun appel
-    réseau n'est nécessaire (--input en dry-run)."""
+def _acquire_token(args: argparse.Namespace, swagger_url: str | None) -> str:
+    return acquire_token_interactively(swagger_url, auto=not args.manual_token, auto_browser=browser_token)
 
-    def __init__(self, args: argparse.Namespace):
-        self.args = args
-        self._client: OrchestratorClient | None = None
 
-    @property
-    def client(self) -> OrchestratorClient:
-        if self._client is None:
-            self.args.token = resolve_token(self.args.token, self.args.swagger_url, self._acquire_token)
-            try:
-                self._client = _make_client(self.args)
-            except ValueError as exc:
-                raise CliExit(EXIT_USAGE, str(exc)) from exc
-        return self._client
+def connect(args: argparse.Namespace) -> OrchestratorClient:
+    """Client HTTP avec un token valide (récupéré depuis le Swagger au besoin)."""
+    args.token = resolve_token(args.token, args.swagger_url, lambda url: _acquire_token(args, url))
+    try:
+        return _make_client(args)
+    except ValueError as exc:
+        raise CliExit(EXIT_USAGE, str(exc)) from exc
 
-    def _acquire_token(self, swagger_url: str | None) -> str:
-        return acquire_token_interactively(
-            swagger_url, auto=not self.args.manual_token,
-            auto_browser=browser_token)
 
-    def load_rows(self) -> list[Row]:
-        """Listing des souscriptions : fichier --input, sinon GET paginé."""
-        if self.args.input:
-            with open(self.args.input, encoding="utf-8") as fh:
-                return extract_rows(json.load(fh))
-        try:
-            body = self.client.get_subscriptions(
-                self.args.product, self.args.page_size, self.args.first_page,
-                lambda page, count: _log(f"page {page}: {count} row(s)"))
-        except OrchestratorApiError as exc:
-            raise CliExit(EXIT_GET_FAILED, f"GET échoué: {exc}") from exc
-        return extract_rows(body)
+def load_rows(client: OrchestratorClient, args: argparse.Namespace) -> list[Row]:
+    """Listing des souscriptions depuis l'API (GET paginé)."""
+    try:
+        body = client.get_subscriptions(args.product, args.page_size, args.first_page,
+                                        lambda page, count: _log(f"page {page}: {count} row(s)"))
+    except OrchestratorApiError as exc:
+        raise CliExit(EXIT_GET_FAILED, f"GET échoué: {exc}") from exc
+    return extract_rows(body)
 
 
 def _confirm(question: str) -> bool:
@@ -1029,7 +1012,7 @@ def _run_all(items: Sequence[T], action: Callable[[T], bool], workers: int) -> i
     return results.count(False)
 
 
-def run_cleanup(args: argparse.Namespace, session: Session, rows: list[Row]) -> int:
+def run_cleanup(args: argparse.Namespace, client: OrchestratorClient, rows: list[Row]) -> int:
     """Mode delete : DELETE des souscriptions éligibles, retry des deletes en échec."""
     user_filter = None if args.all_users else args.user
     eligible = find_eligible_subscriptions({"result": {"rows": rows}}, user_filter)
@@ -1052,7 +1035,6 @@ def run_cleanup(args: argparse.Namespace, session: Session, rows: list[Row]) -> 
     if not args.delete:
         print("\nDry-run: relancer avec --delete pour exécuter.")
         return EXIT_OK
-    client = session.client
     if not args.yes and not _confirm(f"Exécuter {len(eligible) - retry_count} DELETE et {retry_count} retry ?"):
         print("Annulé.")
         return EXIT_OK
@@ -1083,7 +1065,7 @@ def run_cleanup(args: argparse.Namespace, session: Session, rows: list[Row]) -> 
     return EXIT_ACTION_FAILED if failures else EXIT_OK
 
 
-def run_on_error(args: argparse.Namespace, session: Session, rows: list[Row]) -> int:
+def run_on_error(args: argparse.Namespace, client: OrchestratorClient, rows: list[Row]) -> int:
     """Mode --on-error : liste (et avec --decline, décline) les demandes des
     souscriptions dont toutes les demandes sont en ON_ERROR."""
     user_filter = None if args.all_users else args.user
@@ -1110,7 +1092,6 @@ def run_on_error(args: argparse.Namespace, session: Session, rows: list[Row]) ->
     if not args.decline:
         print("\nDry-run: relancer avec --on-error --decline pour exécuter.")
         return EXIT_OK
-    client = session.client
     if not args.yes and not _confirm(f"Passer {len(demands)} demande(s) en {DECLINED_STATUS} ?"):
         print("Annulé.")
         return EXIT_OK
@@ -1205,27 +1186,20 @@ def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
         if branch != DEFAULT_PRODUCT_BRANCH:
             argv += ["--product-branch", branch]
 
-    source = _choose("D'où viennent les souscriptions ?", [
-        ("De l'API orchestrator", None), ("D'un fichier JSON local", "file"),
+    base_url = _ask_text("URL de l'orchestrator", DEFAULT_BASE_URL, ask)
+    if base_url != DEFAULT_BASE_URL:
+        argv += ["--base-url", base_url]
+    argv += _choose("Récupération du token (si $ORCHESTRATOR_TOKEN absent ou expiré) ?", [
+        ("Automatique : Chrome en navigation privée, login SSO Keycloak", []),
+        ("Copier-coller manuel depuis le Swagger", ["--manual-token"]),
+        ("Coller le token maintenant", ["--token", ""]),
     ], ask)
-    if source:
-        argv += ["--input", _ask_text("Chemin du fichier JSON", ask=ask)]
-
-    if source is None or execute:
-        base_url = _ask_text("URL de l'orchestrator", DEFAULT_BASE_URL, ask)
-        if base_url != DEFAULT_BASE_URL:
-            argv += ["--base-url", base_url]
-        argv += _choose("Récupération du token (si $ORCHESTRATOR_TOKEN absent ou expiré) ?", [
-            ("Automatique : Chrome en navigation privée, login SSO Keycloak", []),
-            ("Copier-coller manuel depuis le Swagger", ["--manual-token"]),
-            ("Coller le token maintenant", ["--token", ""]),
-        ], ask)
-        if argv[-2:] == ["--token", ""]:
-            argv[-1] = clean_token(getpass.getpass("Token : "))
-        if execute:
-            workers = _ask_text("Appels en parallèle", str(DEFAULT_WORKERS), ask)
-            if workers != str(DEFAULT_WORKERS):
-                argv += ["--workers", workers]
+    if argv[-2:] == ["--token", ""]:
+        argv[-1] = clean_token(getpass.getpass("Token : "))
+    if execute:
+        workers = _ask_text("Appels en parallèle", str(DEFAULT_WORKERS), ask)
+        if workers != str(DEFAULT_WORKERS):
+            argv += ["--workers", workers]
 
     shown = ["<token>" if i and argv[i - 1] == "--token" else a for i, a in enumerate(argv)]
     print("\nCommande équivalente :\n  python subscriptions_cleanup.py "
@@ -1254,10 +1228,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_bookmarklet:
         print(BOOKMARKLET)
         return EXIT_OK
-    session = Session(args)
     try:
-        rows = session.load_rows()
-        return (run_on_error if args.on_error else run_cleanup)(args, session, rows)
+        client = connect(args)
+        rows = load_rows(client, args)
+        return (run_on_error if args.on_error else run_cleanup)(args, client, rows)
     except CliExit as exc:
         if str(exc):
             _log(str(exc))

@@ -476,19 +476,6 @@ class OnErrorModeTests(unittest.TestCase):
         self.assertEqual(json.loads(printed),
                          [{"subscription_id": "s1", "demand_id": "s1-d0", "action": "create", "status": "ON_ERROR"}])
 
-    def test_main_input_file(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-            json.dump({"result": {"rows": [_err_row("s1")]}}, fh)
-        try:
-            with mock.patch.dict(os.environ, {"ORCHESTRATOR_TOKEN": ""}), _no_browser(), mock.patch("sys.stdout") as out:
-                self.assertEqual(sc.main(["--on-error", "--input", fh.name]), 0)
-            self.assertIn("demand=s1-d0", "".join(c.args[0] for c in out.write.call_args_list))
-            with mock.patch.dict(os.environ, {"ORCHESTRATOR_TOKEN": ""}), _no_browser(), mock.patch("sys.stdout"), \
-                 mock.patch("sys.stderr"):
-                self.assertEqual(sc.main(["--on-error", "--input", fh.name, "--decline", "--yes"]), 1)
-        finally:
-            os.unlink(fh.name)
-
     def test_main_decline_posts_each_demand(self):
         client = self._fake_client([_err_row("s1"), _err_row("s2", ["ON_ERROR", "ON_ERROR"])])
         code, _ = self._run(["--on-error", "--decline", "--yes", "--token", "t", "--reason", "bye"], client)
@@ -685,24 +672,13 @@ class TokenTests(unittest.TestCase):
     def test_session_passes_browser_flags(self):
         args = sc.parse_args(["--manual-token"])
         with mock.patch.object(sc, "acquire_token_interactively", return_value="t") as acquire:
-            self.assertEqual(sc.Session(args)._acquire_token("https://swagger"), "t")
+            self.assertEqual(sc._acquire_token(args, "https://swagger"), "t")
         self.assertFalse(acquire.call_args.kwargs["auto"])
 
     def test_browser_token_without_browser(self):
         with mock.patch.object(sc, "find_chromium_browser", return_value=None), mock.patch("sys.stderr"):
             self.assertEqual(sc.browser_token("https://swagger"), "")
 
-
-    def test_token_requested_only_when_needed(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-            json.dump({"result": {"rows": [_row("s1", [_demand("create")])]}}, fh)
-        try:
-            with mock.patch.dict(os.environ, {"ORCHESTRATOR_TOKEN": ""}), \
-                 mock.patch.object(sc, "acquire_token_interactively") as acquire, mock.patch("sys.stdout"):
-                self.assertEqual(sc.main(["--input", fh.name]), 0)
-            acquire.assert_not_called()
-        finally:
-            os.unlink(fh.name)
 
     def test_print_bookmarklet(self):
         with mock.patch("sys.stdout") as out:
@@ -718,14 +694,14 @@ class InteractiveModeTests(unittest.TestCase):
         return argv, "".join(c.args[0] for c in out.write.call_args_list)
 
     def test_all_defaults_is_a_dry_run(self):
-        argv, printed = self._wizard([""] * 7)
+        argv, printed = self._wizard([""] * 6)
         self.assertEqual(argv, [])
         self.assertIn("1) Supprimer les souscriptions éligibles", printed)
         self.assertIn("Commande équivalente", printed)
         self.assertFalse(sc.parse_args(argv).delete)
 
     def test_delete_for_real_with_choices(self):
-        answers = ["1", "2", "2", "h12345", "", "dev", "", "", "2", "4"]
+        answers = ["1", "2", "2", "h12345", "", "dev", "", "2", "4"]
         argv, _ = self._wizard(answers)
         self.assertEqual(argv, ["--delete", "--user", "h12345", "--product-branch", "dev",
                                 "--manual-token", "--workers", "4"])
@@ -733,14 +709,10 @@ class InteractiveModeTests(unittest.TestCase):
         self.assertEqual((args.delete, args.user, args.workers), (True, "h12345", 4))
 
     def test_on_error_decline_locked(self):
-        answers = ["2", "2", "3", "", "2", "", "", "", "", ""]
+        answers = ["2", "2", "3", "", "2", "", "", "", ""]
         argv, _ = self._wizard(answers)
         self.assertEqual(argv, ["--on-error", "--decline", "--all-users", "--subscription-status", "LOCKED"])
         self.assertTrue(sc.parse_args(argv).decline)
-
-    def test_local_file_dry_run_skips_network_questions(self):
-        argv, _ = self._wizard(["1", "1", "1", "", "2", "scratch.json"])
-        self.assertEqual(argv, ["--input", "scratch.json"])
 
     def test_invalid_choice_is_asked_again(self):
         argv, printed = self._wizard(["9", "abc", "4"])
@@ -752,7 +724,7 @@ class InteractiveModeTests(unittest.TestCase):
 
     def test_token_is_masked_in_the_printed_command(self):
         with mock.patch("getpass.getpass", return_value="Bearer secret-token"):
-            argv, printed = self._wizard(["1", "1", "1", "", "1", "", "3"])
+            argv, printed = self._wizard(["1", "1", "1", "", "", "3"])
         self.assertEqual(argv, ["--token", "secret-token"])
         self.assertNotIn("secret-token", printed)
         self.assertIn("--token '<token>'", printed)
@@ -767,6 +739,12 @@ class InteractiveModeTests(unittest.TestCase):
     def test_main_ctrl_c_in_wizard(self):
         with mock.patch.object(sc, "interactive_argv", side_effect=KeyboardInterrupt), mock.patch("sys.stdout"):
             self.assertEqual(sc.main(["-i"]), 0)
+
+    def test_no_json_input_step(self):
+        argv, printed = self._wizard([""] * 6)
+        self.assertNotIn("JSON", printed)
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            sc.parse_args(["--input", "scratch.json"])
 
     def test_dry_run_flag(self):
         self.assertTrue(sc.parse_args(["--dry-run"]).dry_run)
