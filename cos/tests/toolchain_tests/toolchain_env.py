@@ -320,6 +320,40 @@ def _http_get_json(url: str, timeout: int, context: ssl.SSLContext,
     return body if isinstance(body, dict) else {}
 
 
+class _ipv4_only:
+    """Pendant le bloc, socket.getaddrinfo ne renvoie que des adresses IPv4 :
+    Python se connecte à la première adresse résolue et attend si c'est une
+    IPv6 injoignable, là où curl bascule seul sur l'IPv4."""
+
+    def __enter__(self) -> None:
+        self._original = socket.getaddrinfo
+
+        def ipv4(*args: Any, **kwargs: Any) -> list:
+            results = self._original(*args, **kwargs)
+            return [r for r in results if r[0] == socket.AF_INET] or results
+        socket.getaddrinfo = ipv4
+
+    def __exit__(self, *exc: Any) -> None:
+        socket.getaddrinfo = self._original
+
+
+def tcp_probe(host: str, port: int, timeout: float = 5) -> list[str]:
+    """Une ligne par adresse résolue : 'IPv4 1.2.3.4:4430 OK' ou 'IPv6 ... timed out'."""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        return [f"{host} : résolution DNS impossible ({exc})"]
+    lines = []
+    for family, _, _, _, sockaddr in infos:
+        label = "IPv6" if family == socket.AF_INET6 else "IPv4"
+        try:
+            with socket.create_connection(sockaddr[:2], timeout=timeout):
+                lines.append(f"{label} {sockaddr[0]}:{port} OK")
+        except OSError as exc:
+            lines.append(f"{label} {sockaddr[0]}:{port} {exc}")
+    return lines
+
+
 def token_service_url(base_url: str, uid: str, namespace: str) -> str:
     return (base_url.rstrip("/") + TOKEN_SERVICE_PATH + urllib.parse.quote(uid, safe="")
             + "?" + urllib.parse.urlencode({"namespace": namespace}))
@@ -337,13 +371,15 @@ def service_token(base_url: str, uid: str, namespace: str, timeout: int = DEFAUL
     # résout, sinon le proxy d'abord) avec un délai court chacun.
     proxy = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY") or ""
     try:
-        socket.getaddrinfo(host, None)
+        families = {info[0] for info in socket.getaddrinfo(host, None)}
         resolves = True
     except OSError:
-        resolves = False
+        families, resolves = set(), False
         _log(f"Service token : {host} ne se résout pas en DNS depuis ce poste"
              + (" ; essai via le proxy." if proxy else " ; essayer le nom complet (FQDN) avec --token-service."))
-    routes: list[tuple[str, dict[str, str]]] = [("direct", {})]
+    routes: list[tuple[str, dict[str, str] | None]] = [("direct", {})]
+    if socket.AF_INET6 in families and socket.AF_INET in families:
+        routes.append(("direct en IPv4 seulement", None))
     if proxy:
         routes.append((f"via le proxy {mask_url(proxy)}", {"https": proxy, "http": proxy}))
     if not resolves:
@@ -354,7 +390,11 @@ def service_token(base_url: str, uid: str, namespace: str, timeout: int = DEFAUL
     for label, proxies in routes:
         _log(f"Token Vault demandé au service token ({label}, {attempt_timeout} s max) : GET {url}")
         try:
-            body = _http_get_json(url, attempt_timeout, context, proxies=proxies)
+            if proxies is None:
+                with _ipv4_only():
+                    body = _http_get_json(url, attempt_timeout, context, proxies={})
+            else:
+                body = _http_get_json(url, attempt_timeout, context, proxies=proxies)
             _log(f"Service token joint {label}.")
             break
         except VaultError as exc:
@@ -362,8 +402,10 @@ def service_token(base_url: str, uid: str, namespace: str, timeout: int = DEFAUL
                 raise
             errors.append(f"{label} : {exc}")
     else:
-        raise VaultError("service token injoignable (" + " ; ".join(errors) + "). Vérifier le VPN, "
-                         "ou passer le nom complet avec --token-service, ou --browser-token.")
+        port = urllib.parse.urlsplit(url).port or 443
+        probe = "\n  ".join(tcp_probe(host, port))
+        raise VaultError("service token injoignable (" + " ; ".join(errors) + f").\n  Sondage TCP :\n  {probe}"
+                         "\n  Vérifier le VPN, ou passer le nom complet avec --token-service, ou --browser-token.")
     token = clean_token(str((body.get("auth") or {}).get("client_token") or ""))
     if not _VAULT_TOKEN_RE.fullmatch(token):
         raise VaultError(f"pas de auth.client_token dans la réponse du service token "

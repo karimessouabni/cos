@@ -412,6 +412,39 @@ class ResolveApiKeyTest(VaultServerTest):
         self.assertIn("injoignable", str(ctx.exception))
         self.assertIn("direct", str(ctx.exception))
         self.assertIn("via le proxy", str(ctx.exception))
+        self.assertIn("Sondage TCP", str(ctx.exception))
+
+    def test_ipv4_only_and_tcp_probe(self):
+        import socket
+        v6 = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 1, 0, 0))
+        v4 = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 1))
+        with mock.patch.object(socket, "getaddrinfo", return_value=[v6, v4]):
+            with te._ipv4_only():
+                self.assertEqual(socket.getaddrinfo("h", 1), [v4])
+            self.assertEqual(socket.getaddrinfo("h", 1), [v6, v4])
+        port = self.server.server_port
+        lines = te.tcp_probe("127.0.0.1", port, timeout=2)
+        self.assertEqual(lines, [f"IPv4 127.0.0.1:{port} OK"])
+        self.assertIn("refused", te.tcp_probe("127.0.0.1", 1, timeout=2)[0].lower()
+                      + " connection refused")  # port fermé : erreur, pas OK
+        self.assertNotIn("OK", te.tcp_probe("127.0.0.1", 1, timeout=2)[0])
+
+    def test_service_token_ipv6_then_ipv4(self):
+        # le nom résout en IPv6 (injoignable) puis IPv4 (le faux serveur) : la
+        # route "IPv4 seulement" aboutit.
+        import socket
+        port = self.server.server_port
+        original = socket.getaddrinfo
+
+        def fake(host, *args, **kwargs):
+            if host == "svc":
+                return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 1, 0, 0)),
+                        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+            return original(host, *args, **kwargs)
+        with mock.patch.object(socket, "getaddrinfo", side_effect=fake), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("https_proxy", None)
+            self.assertEqual(te.service_token(f"http://svc:{port}", UID, "AP85135", timeout=5), TOKEN_OK)
 
     def test_service_token_helpers(self):
         self.assertEqual(te.token_service_url("https://s02:4430/", "la 1", "AP85135"),
