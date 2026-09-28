@@ -638,6 +638,12 @@ class MainTest(VaultServerTest):
                             "--vault-token", TOKEN_OK, "--no-proxy"])
         self.assertEqual(code, te.EXIT_USAGE)
 
+    def test_probe(self):
+        code = te.main(["--env", "int", "--no-proxy", "--token-service", self.url, "--uid", UID, "--probe"])
+        self.assertEqual(code, 0)
+        self.assertEqual(te.main(["--env", "int", "--no-proxy", "--token-service", "http://127.0.0.1:1",
+                                  "--uid", UID, "--probe", "--timeout", "5"]), te.EXIT_VAULT_FAILED)
+
     def test_forget(self):
         te.save_cached_token(self.url, TOKEN_OK)
         self.assertEqual(te.main(["--forget"]), 0)

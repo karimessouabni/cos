@@ -1077,6 +1077,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                        help="ignorer le token et l'API key sauvegardés, se reconnecter à Vault")
     vault.add_argument("--new-key", action="store_true",
                        help="ignorer l'API key sauvegardée, la relire dans Vault")
+    vault.add_argument("--probe", action="store_true",
+                       help="diagnostic réseau du service token (sondage TCP + GET direct / IPv4 / proxy), puis quitter")
     vault.add_argument("--forget", action="store_true",
                        help="supprimer tout ce qui est sauvegardé (tokens, API keys), puis quitter")
     vault.add_argument("--verify-tls", action="store_true",
@@ -1240,6 +1242,28 @@ def prepare(args: argparse.Namespace, acquire: Callable[[str], str] | None = Non
     return build_env_vars(api_key, args.tf_log, proxy_vars)
 
 
+def probe(args: argparse.Namespace) -> int:
+    """--probe : sondage TCP du service token puis GET du token par chaque chemin."""
+    if not args.token_service:
+        _log(f"Pas de service token configuré pour le Vault {args.vault}.")
+        return EXIT_USAGE
+    parts = urllib.parse.urlsplit(args.token_service)
+    host, port = parts.hostname or "", parts.port or 443
+    _log(f"Service token : {args.token_service}\nSondage TCP :\n  " + "\n  ".join(tcp_probe(host, port)))
+    try:
+        proxy_vars = with_no_proxy(resolve_proxy(args), args.token_service)
+        apply_proxy(proxy_vars)
+        token = service_token(args.token_service, resolve_uid(args), args.namespace, args.timeout, args.verify_tls)
+    except CliExit as exc:
+        _log(str(exc))
+        return exc.code
+    except VaultError as exc:
+        _log(f"Échec : {exc}")
+        return EXIT_VAULT_FAILED
+    _log(f"OK : token {_mask(token)} obtenu.")
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -1258,6 +1282,8 @@ def main(argv: list[str] | None = None) -> int:
         forget_all()
         _log(f"Cache supprimé ({state_path()}).")
         return EXIT_OK
+    if args.probe:
+        return probe(args)
     try:
         variables = prepare(args)
     except CliExit as exc:

@@ -77,6 +77,32 @@ trouvé, le navigateur est fermé et le profil supprimé. Sans Chrome, ou avec
 `--manual-token`, l'UI s'ouvre dans le navigateur par défaut : « Copy token » dans le
 menu utilisateur, puis Entrée dans le terminal.
 
+## Diagnostic : le service token ne répond pas
+
+Le script essaie de le joindre en direct, en direct IPv4 seulement, puis via le proxy,
+et affiche un sondage TCP par adresse quand tout échoue. Pour ne faire que ce test :
+
+```bash
+python toolchain_env.py --env int --probe
+```
+
+À la main, les trois commandes équivalentes (direct, direct depuis Python, via le proxy) :
+
+```bash
+curl -k -m 10 --noproxy '*' "https://s02vl9956141:4430/v1/token/lh90871?namespace=AP85135"
+
+python3 -c "import urllib.request as u,ssl; o=u.build_opener(u.ProxyHandler({}),u.HTTPSHandler(context=ssl._create_unverified_context())); print(o.open('https://s02vl9956141:4430/v1/token/lh90871?namespace=AP85135',timeout=15).read()[:120])"
+
+curl -k -m 10 -x "$https_proxy" "https://s02vl9956141:4430/v1/token/lh90871?namespace=AP85135"
+```
+
+| Résultat | Cause | Quoi faire |
+|---|---|---|
+| curl direct OK, Python pend, sondage `IPv6 … timed out` | Python attend sur l'adresse IPv6 | rien : la route « IPv4 seulement » du script passe |
+| `résolution DNS impossible` | nom court inconnu du poste | passer le nom complet : `--token-service https://s02vl9956141.<domaine>:4430` |
+| tout pend, curl aussi | VPN / réseau | `--browser-token` en attendant |
+| `HTTP 4xx` | hôte joint, uid ou namespace refusé | `--uid`, `--namespace` |
+
 ## Tests du script
 
 ```bash
