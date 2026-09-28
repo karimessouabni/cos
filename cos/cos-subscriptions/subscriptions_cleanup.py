@@ -45,11 +45,9 @@ Sans token valide (absent ou JWT expiré), le script ouvre le Swagger dans un
 Chrome / Edge dédié, toujours en navigation privée : on se connecte en SSO
 Keycloak, on clique Authorize, et le token est lu automatiquement dans
 la page puis le navigateur se ferme. Sans Chrome / Edge, ou avec --manual-token,
-le script ouvre le Swagger
-(<base-url>/docs, ou --swagger-url / $ORCHESTRATOR_SWAGGER_URL) : on s'y
-connecte en SSO, on copie le token, puis Entrée : il est lu dans le presse-papiers (ou collé au prompt).
-Pour copier le token en un clic depuis le Swagger, mettre en favori le
-bookmarklet affiché par --print-bookmarklet.
+le script ouvre le Swagger (<base-url>/docs, ou --swagger-url /
+$ORCHESTRATOR_SWAGGER_URL) : on s'y connecte en SSO, on copie le token, puis
+Entrée : il est lu dans le presse-papiers (ou collé au prompt).
 
 Usage:
     python subscriptions_cleanup.py                       # sans argument : mode guidé (menus 1, 2, 3...)
@@ -66,7 +64,6 @@ Usage:
     python subscriptions_cleanup.py --on-error --decline        # POST DECLINED sur chacune
     python subscriptions_cleanup.py --on-error --decline --yes --reason "cleanup sprint 12"
     python subscriptions_cleanup.py --on-error --subscription-status LOCKED   # restreint aux LOCKED
-    python subscriptions_cleanup.py --print-bookmarklet         # bookmarklet de copie du token
 
 TLS : les certificats ne sont jamais vérifiés (certificats internes), ni par
 le script ni par le navigateur ouvert pour le token.
@@ -472,15 +469,6 @@ TOKEN_FINDER_JS = (
     "return t.replace(/^Bearer\\s+/i,'')})()"
 )
 
-# Bookmarklet à mettre en favori : sur la page Swagger (après login SSO), il
-# copie le token trouvé par TOKEN_FINDER_JS dans le presse-papiers.
-BOOKMARKLET = (
-    f"javascript:(()=>{{const t={TOKEN_FINDER_JS};"
-    "if(!t){alert('Aucun token trouvé : cliquer Authorize dans le Swagger');return}"
-    "navigator.clipboard.writeText(t).then("
-    "()=>alert('Token copié ('+t.length+' car.)'),()=>prompt('Copier le token :',t))})()"
-)
-
 
 def clean_token(raw: str) -> str:
     """Nettoie un copier-coller : guillemets, 'Authorization:', 'Bearer ', espaces."""
@@ -745,7 +733,7 @@ def acquire_token_interactively(
         _log(f"Ouverture du Swagger : {swagger_url}")
         if not open_url(swagger_url):
             _log(f"Navigateur non ouvert : ouvrir {swagger_url} à la main.")
-    _log("Se connecter en SSO, cliquer Authorize puis copier le token (bookmarklet : --print-bookmarklet).")
+    _log("Se connecter en SSO, cliquer Authorize puis copier le token.")
     for _ in range(attempts):
         pasted = clean_token(ask("Entrée pour lire le presse-papiers (ou coller le token) : "))
         token = pasted or clean_token(read_clip())
@@ -978,8 +966,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                       help="ignorer le token sauvegardé et en récupérer un nouveau")
     auth.add_argument("--forget-token", action="store_true",
                       help="supprimer le token sauvegardé, puis quitter")
-    auth.add_argument("--print-bookmarklet", action="store_true",
-                      help="affiche le bookmarklet qui copie le token depuis le Swagger, puis quitte")
 
     parser.add_argument("-i", "--interactive", action="store_true",
                         help="mode guidé : menus numérotés (défaut quand le script est lancé sans argument)")
@@ -1236,13 +1222,10 @@ def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
     mode = _choose("Que veux-tu faire ?", [
         ("Supprimer les souscriptions éligibles (et relancer les delete en échec)", "delete"),
         (f"Décliner les demandes des souscriptions dont tout est en {DEMAND_ON_ERROR_STATUS}", "on-error"),
-        ("Afficher le bookmarklet qui copie le token depuis le Swagger", "bookmarklet"),
         ("Quitter", None),
     ], ask)
     if mode is None:
         return None
-    if mode == "bookmarklet":
-        return ["--print-bookmarklet"]
 
     argv = ["--on-error"] if mode == "on-error" else []
     execute = _choose("Exécution ?", [
@@ -1319,9 +1302,6 @@ def main(argv: list[str] | None = None) -> int:
         if argv is None:
             return EXIT_OK
     args = parse_args(argv)
-    if args.print_bookmarklet:
-        print(BOOKMARKLET)
-        return EXIT_OK
     if args.forget_token:
         forget_cached_token(args.base_url)
         _log(f"Token sauvegardé supprimé ({token_cache_path()}).")

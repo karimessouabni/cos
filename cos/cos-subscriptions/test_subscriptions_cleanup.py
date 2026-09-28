@@ -683,10 +683,9 @@ class TokenTests(unittest.TestCase):
             self.assertEqual(sc.browser_token("https://swagger"), "")
 
 
-    def test_print_bookmarklet(self):
-        with mock.patch("sys.stdout") as out:
-            self.assertEqual(sc.main(["--print-bookmarklet"]), 0)
-        self.assertTrue(out.write.call_args_list[0].args[0].startswith("javascript:"))
+    def test_bookmarklet_option_is_gone(self):
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            sc.parse_args(["--print-bookmarklet"])
 
 
 class InteractiveModeTests(unittest.TestCase):
@@ -718,12 +717,14 @@ class InteractiveModeTests(unittest.TestCase):
         self.assertTrue(sc.parse_args(argv).decline)
 
     def test_invalid_choice_is_asked_again(self):
-        argv, printed = self._wizard(["9", "abc", "4"])
+        argv, printed = self._wizard(["9", "abc", "3"])
         self.assertIsNone(argv)
-        self.assertIn("Taper un nombre entre 1 et 4", printed)
+        self.assertIn("Taper un nombre entre 1 et 3", printed)
 
-    def test_bookmarklet_choice(self):
-        self.assertEqual(self._wizard(["3"])[0], ["--print-bookmarklet"])
+    def test_no_bookmarklet_choice(self):
+        argv, printed = self._wizard(["3"])
+        self.assertIsNone(argv)
+        self.assertNotIn("bookmarklet", printed)
 
     def test_token_is_masked_in_the_printed_command(self):
         with mock.patch("getpass.getpass", return_value="Bearer secret-token"):
