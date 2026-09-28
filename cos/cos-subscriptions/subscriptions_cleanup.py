@@ -68,7 +68,8 @@ TLS (certificat interne BNPP, sinon "CERTIFICATE_VERIFY_FAILED: self-signed
 certificate in certificate chain") :
     python subscriptions_cleanup.py --ca-cert ~/Root-Certificats-Internes/*.cer
     export ORCHESTRATOR_CA_CERTS=~/Root-Certificats-Internes/2014-2044\ BNPP\ Root.cer
-    python subscriptions_cleanup.py --insecure   # dernier recours : pas de vérification
+    # par défaut : pas de vérification TLS (DEFAULT_INSECURE) ; pour vérifier :
+    python subscriptions_cleanup.py --verify-tls
 
 Codes de sortie: 0 OK, 1 erreur args/token, 2 erreur HTTP sur le GET,
 3 au moins un DELETE / retry / decline en échec.
@@ -112,6 +113,8 @@ MAX_PAGES = 10_000
 TOKEN_ENV = "ORCHESTRATOR_TOKEN"
 SWAGGER_URL_ENV = "ORCHESTRATOR_SWAGGER_URL"
 CA_CERTS_ENV = "ORCHESTRATOR_CA_CERTS"  # chemins séparés par os.pathsep (":" sur macOS/Linux)
+# TLS non vérifié par défaut (certificats internes) ; --verify-tls ou --ca-cert pour vérifier.
+DEFAULT_INSECURE = True
 TOKEN_MIN_VALIDITY = 60  # secondes : en dessous, le token est considéré expiré
 
 STATE_MANAGER_PREFIX = "/state_manager/api/v1"
@@ -665,6 +668,7 @@ def _find_token_in_pages(port: int) -> str:
 def browser_token(
     swagger_url: str,
     private: bool = True,
+    insecure: bool = False,
     timeout: float = BROWSER_LOGIN_TIMEOUT,
     browser: str | None = None,
     poll_interval: float = 2,
@@ -681,6 +685,8 @@ def browser_token(
                "--no-first-run", "--no-default-browser-check", "--new-window"]
     if private:
         command.append("--incognito")
+    if insecure:
+        command.append("--ignore-certificate-errors")
     process = subprocess.Popen(command + [swagger_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         port = _devtools_port(profile_dir, process)
@@ -994,13 +1000,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                      default=ca_certs_from_env(os.environ.get(CA_CERTS_ENV)),
                      help="certificat(s) CA interne(s) à ajouter aux CA système, .cer/.pem en PEM ou DER "
                           f"(défaut: ${CA_CERTS_ENV}, chemins séparés par '{os.pathsep}')")
-    tls.add_argument("--insecure", action="store_true",
-                     help="désactive la vérification TLS (dernier recours)")
+    tls.add_argument("--insecure", action="store_true", default=None,
+                     help="désactive la vérification TLS "
+                          f"(défaut: {'oui' if DEFAULT_INSECURE else 'non'}, sauf avec --ca-cert / ${CA_CERTS_ENV})")
+    tls.add_argument("--verify-tls", action="store_true",
+                     help="vérifie les certificats TLS avec les CA système")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--json", action="store_true", dest="as_json",
                         help="sortie JSON (liste des éléments retenus)")
 
     args = parser.parse_args(argv)
+    if args.insecure is None:
+        args.insecure = DEFAULT_INSECURE and not args.verify_tls and not args.ca_certs
     if args.page_size < 1:
         parser.error("--page-size doit être >= 1")
     if args.workers < 1:
@@ -1029,6 +1040,8 @@ class Session:
     def client(self) -> OrchestratorClient:
         if self._client is None:
             self.args.token = resolve_token(self.args.token, self.args.swagger_url, self._acquire_token)
+            if self.args.insecure:
+                _log("TLS non vérifié (--verify-tls ou --ca-cert pour vérifier les certificats).")
             try:
                 self._client = _make_client(self.args)
             except (OSError, ValueError) as exc:
@@ -1038,7 +1051,8 @@ class Session:
     def _acquire_token(self, swagger_url: str | None) -> str:
         return acquire_token_interactively(
             swagger_url, auto=not self.args.manual_token,
-            auto_browser=lambda url: browser_token(url, private=not self.args.no_private))
+            auto_browser=lambda url: browser_token(url, private=not self.args.no_private,
+                                                   insecure=self.args.insecure))
 
     def load_rows(self) -> list[Row]:
         """Listing des souscriptions : fichier --input, sinon GET paginé."""

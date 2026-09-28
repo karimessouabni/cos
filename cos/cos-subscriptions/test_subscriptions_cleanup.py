@@ -664,6 +664,14 @@ class TokenTests(unittest.TestCase):
                 open_url=lambda url: True, auto_browser=lambda url: "")
         self.assertEqual(token, _jwt(FAR_FUTURE))
 
+    def test_browser_ignores_certificate_errors_when_insecure(self):
+        with mock.patch.object(sc.subprocess, "Popen") as popen, \
+             mock.patch.object(sc, "_devtools_port", side_effect=RuntimeError("stop")), mock.patch("sys.stderr"):
+            sc.browser_token("https://swagger", insecure=True, browser="/bin/chrome")
+            self.assertIn("--ignore-certificate-errors", popen.call_args.args[0])
+            sc.browser_token("https://swagger", insecure=False, browser="/bin/chrome")
+            self.assertNotIn("--ignore-certificate-errors", popen.call_args.args[0])
+
     def test_session_passes_browser_flags(self):
         args = sc.parse_args(["--manual-token", "--no-private"])
         with mock.patch.object(sc, "acquire_token_interactively", return_value="t") as acquire:
@@ -818,6 +826,16 @@ class TlsTests(unittest.TestCase):
             self.assertEqual(sc.parse_args([]).ca_certs, [])
         with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
             sc.parse_args(["--ca-cert", "a.cer", "--insecure"])
+
+    def test_insecure_by_default(self):
+        with mock.patch.dict(os.environ, {sc.CA_CERTS_ENV: ""}):
+            self.assertTrue(sc.parse_args([]).insecure)
+            self.assertFalse(sc.parse_args(["--verify-tls"]).insecure)
+            self.assertFalse(sc.parse_args(["--ca-cert", "a.cer"]).insecure)
+        with mock.patch.dict(os.environ, {sc.CA_CERTS_ENV: "x.cer"}):
+            self.assertFalse(sc.parse_args([]).insecure)
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            sc.parse_args(["--verify-tls", "--insecure"])
 
     def test_end_to_end_against_self_signed_server(self):
         """Sans le CA : CERTIFICATE_VERIFY_FAILED ; avec --ca-cert (DER) : OK."""
