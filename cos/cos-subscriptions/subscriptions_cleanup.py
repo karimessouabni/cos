@@ -36,6 +36,9 @@ TOUTES les demandes sont en ON_ERROR.
 
 Usage:
     export ORCHESTRATOR_TOKEN=...            # ou --token
+    # sans token : le script ouvre le Swagger (--swagger-url / $ORCHESTRATOR_SWAGGER_URL),
+    # on s'y connecte en SSO, on copie le token (bookmarklet : --print-bookmarklet)
+    # puis Entrée : il est lu dans le presse-papiers, et son expiration est vérifiée
     python subscriptions_cleanup.py                       # liste seulement (dry-run)
     python subscriptions_cleanup.py --delete              # supprime / relance réellement
     python subscriptions_cleanup.py --delete --yes        # sans confirmation
@@ -62,13 +65,20 @@ Codes de sortie: 0 OK, 1 erreur args/token, 2 erreur HTTP sur le GET,
 from __future__ import annotations
 
 import argparse
+import base64
+import getpass
 import json
 import os
+import re
+import shutil
 import ssl
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
@@ -80,6 +90,7 @@ DEFAULT_TIMEOUT = 60
 DEFAULT_PAGE_SIZE = 100
 DEFAULT_FIRST_PAGE = 1
 MAX_PAGES = 10_000
+SWAGGER_URL_ENV = "ORCHESTRATOR_SWAGGER_URL"
 CA_CERTS_ENV = "ORCHESTRATOR_CA_CERTS"  # chemins séparés par os.pathsep (":" sur macOS/Linux)
 
 STATE_MANAGER_PREFIX = "/state_manager/api/v1"
@@ -452,6 +463,119 @@ def ca_certs_from_env(value: str | None) -> list[str]:
     return [p.strip() for p in value.split(os.pathsep) if p.strip()]
 
 
+_JWT_RE = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*")
+
+# Bookmarklet à mettre en favori : sur la page Swagger (après login SSO), il
+# copie le bearer token dans le presse-papiers. Il cherche d'abord dans l'état
+# Swagger UI (bouton Authorize, OAuth2 ou bearer collé), puis tout JWT présent
+# dans sessionStorage / localStorage (oidc-client, MSAL, ...).
+BOOKMARKLET = (
+    "javascript:(()=>{const J=/[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]+/;let t;"
+    "try{const a=(window.ui||ui).authSelectors.authorized().toJS();"
+    "for(const k in a){const v=a[k];t=(v.token&&v.token.access_token)||v.value;if(t)break}}catch(e){}"
+    "if(!t)for(const s of[sessionStorage,localStorage])for(let i=0;i<s.length&&!t;i++){"
+    "const m=(s.getItem(s.key(i))||'').match(J);if(m)t=m[0]}"
+    "if(!t){alert('Aucun token trouvé : cliquer Authorize dans le Swagger');return}"
+    "navigator.clipboard.writeText(t.replace(/^Bearer\\s+/i,'')).then("
+    "()=>alert('Token copié ('+t.length+' car.)'),()=>prompt('Copier le token :',t))})()"
+)
+
+
+def jwt_expiry(token: str) -> int | None:
+    """Timestamp exp du JWT (sans vérifier la signature), None si illisible."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded))
+        return int(claims["exp"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def token_seconds_left(token: str, now: float | None = None) -> int | None:
+    exp = jwt_expiry(token)
+    if exp is None:
+        return None
+    return int(exp - (time.time() if now is None else now))
+
+
+def clean_token(raw: str) -> str:
+    """Nettoie un copier-coller : 'Bearer ', guillemets, en-tête complet, espaces."""
+    value = raw.strip().strip('"').strip("'").strip()
+    if value.lower().startswith("authorization:"):
+        value = value.split(":", 1)[1].strip()
+    if value.lower().startswith("bearer "):
+        value = value[7:].strip()
+    match = _JWT_RE.search(value) if "." in value else None
+    return match.group(0) if match else value
+
+
+def read_clipboard() -> str:
+    commands = [["pbpaste"], ["wl-paste", "-n"], ["xclip", "-selection", "clipboard", "-o"],
+                ["powershell", "-NoProfile", "-Command", "Get-Clipboard"]]
+    for cmd in commands:
+        if shutil.which(cmd[0]):
+            try:
+                return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+            except (OSError, subprocess.SubprocessError):
+                continue
+    return ""
+
+
+def acquire_token_interactively(swagger_url: str | None,
+                                read_clip: Callable[[], str] = read_clipboard,
+                                ask: Callable[[str], str] = getpass.getpass,
+                                open_url: Callable[[str], Any] = webbrowser.open) -> str:
+    """Ouvre le Swagger, attend que l'utilisateur copie le token, le lit dans le
+    presse-papiers (ou le fait coller si le presse-papiers ne contient pas de JWT)."""
+    if not sys.stdin.isatty():
+        return ""
+    if swagger_url:
+        print(f"Ouverture du Swagger : {swagger_url}", file=sys.stderr)
+        open_url(swagger_url)
+    print("Se connecter en SSO, cliquer Authorize, puis copier le token "
+          "(bookmarklet : --print-bookmarklet).", file=sys.stderr)
+    for _ in range(3):
+        typed = clean_token(ask("Entrée pour lire le presse-papiers (ou coller le token) : "))
+        token = typed or clean_token(read_clip())
+        if not token:
+            print("Presse-papiers vide.", file=sys.stderr)
+            continue
+        left = token_seconds_left(token)
+        if left is not None and left <= 0:
+            print(f"Token expiré depuis {-left // 60} min, en copier un nouveau.", file=sys.stderr)
+            continue
+        if jwt_expiry(token) is None and not typed:
+            print("Le presse-papiers ne contient pas de JWT.", file=sys.stderr)
+            continue
+        return token
+    return ""
+
+
+def ensure_token(args: argparse.Namespace, acquire: Callable[[str | None], str] = acquire_token_interactively) -> bool:
+    """Vérifie args.token (expiration JWT) ; sinon le récupère depuis le navigateur."""
+    if args.token:
+        args.token = clean_token(args.token)
+        left = token_seconds_left(args.token)
+        if left is None or left > 60:
+            if left is not None:
+                print(f"Token valide encore {left // 60} min.", file=sys.stderr)
+            return True
+        print("Token fourni expiré (ou < 1 min) : récupération d'un nouveau.", file=sys.stderr)
+        args.token = None
+    args.token = acquire(args.swagger_url) or None
+    if not args.token:
+        print("Token manquant: --token, $ORCHESTRATOR_TOKEN, ou copie depuis le Swagger "
+              "(--swagger-url / $ORCHESTRATOR_SWAGGER_URL)", file=sys.stderr)
+        return False
+    left = token_seconds_left(args.token)
+    if left is not None:
+        print(f"Token récupéré, valide encore {left // 60} min.", file=sys.stderr)
+    return True
+
+
 class OrchestratorClient:
     def __init__(
         self,
@@ -567,6 +691,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--token", default=os.environ.get("ORCHESTRATOR_TOKEN"),
                         help="bearer token (défaut: $ORCHESTRATOR_TOKEN)")
+    parser.add_argument("--swagger-url", default=os.environ.get(SWAGGER_URL_ENV),
+                        help="page Swagger ouverte quand il faut un token "
+                             f"(défaut: ${SWAGGER_URL_ENV})")
+    parser.add_argument("--print-bookmarklet", action="store_true",
+                        help="affiche le bookmarklet qui copie le token depuis le Swagger, puis quitte")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--product", default=DEFAULT_PRODUCT,
                         help=f"ne garder que les rows dont geninfo.product vaut cette valeur (défaut: {DEFAULT_PRODUCT})")
@@ -618,6 +747,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.print_bookmarklet:
+        print(BOOKMARKLET)
+        return 0
     if args.on_error:
         return main_on_error(args)
 
@@ -626,8 +758,7 @@ def main(argv: list[str] | None = None) -> int:
             body = json.load(fh)
         client = None
     else:
-        if not args.token:
-            print("Token manquant: --token ou $ORCHESTRATOR_TOKEN", file=sys.stderr)
+        if not ensure_token(args):
             return 1
         try:
             client = _make_client(args)
@@ -667,8 +798,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if client is None:
-        if not args.token:
-            print("Token manquant pour les DELETE/retry: --token ou $ORCHESTRATOR_TOKEN", file=sys.stderr)
+        if not ensure_token(args):
             return 1
         try:
             client = _make_client(args)
@@ -716,8 +846,7 @@ def main_on_error(args: argparse.Namespace) -> int:
         with open(args.input, encoding="utf-8") as fh:
             body = json.load(fh)
     else:
-        if not args.token:
-            print("Token manquant: --token ou $ORCHESTRATOR_TOKEN", file=sys.stderr)
+        if not ensure_token(args):
             return 1
         try:
             client = _make_client(args)
@@ -759,8 +888,7 @@ def main_on_error(args: argparse.Namespace) -> int:
         return 0
 
     if client is None:
-        if not args.token:
-            print("Token manquant pour les POST status: --token ou $ORCHESTRATOR_TOKEN", file=sys.stderr)
+        if not ensure_token(args):
             return 1
         try:
             client = _make_client(args)
