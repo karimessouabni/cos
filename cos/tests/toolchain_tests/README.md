@@ -64,7 +64,7 @@ l'UI Vault), `--vault` / `--vault-url` / `--token-service` / `--secret-path` /
 
 Namespace Vault : `AP85135`. Tout est dans `ENVIRONMENTS`, `VAULTS` et `TOKEN_SERVICES`
 en tête du script. `no_proxy` vaut `localhost,127.0.0.1,.echonet,0.0.0.0` : les Vault
-`.echonet` sont joints en direct, `hvault-dev.fr.net.intra` et le service token via le proxy.
+`.echonet` sont joints en direct, `hvault-dev.fr.net.intra` via le proxy, et l'hôte du service token (`s02vi9956141`) est ajouté automatiquement à `no_proxy` : il n'est joignable qu'en direct.
 
 ### Secours : token lu dans Chrome
 

@@ -784,6 +784,19 @@ def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
     return {"http_proxy": url, "https_proxy": url, "no_proxy": args.no_proxy_hosts}
 
 
+def with_no_proxy(proxy_vars: dict[str, str], *urls: str) -> dict[str, str]:
+    """Ajoute l'hôte de chaque URL à no_proxy (hôtes intranet joints en direct,
+    comme le service token, que le proxy ne sait pas résoudre)."""
+    if not proxy_vars:
+        return proxy_vars
+    hosts = [h.strip() for h in proxy_vars.get("no_proxy", "").split(",") if h.strip()]
+    for url in urls:
+        host = urllib.parse.urlsplit(url).hostname if url else None
+        if host and host not in hosts and not any(host.endswith(h) for h in hosts if h.startswith(".")):
+            hosts.append(host)
+    return {**proxy_vars, "no_proxy": ",".join(hosts)}
+
+
 def apply_proxy(proxy_vars: dict[str, str]) -> None:
     """Exporte le proxy dans le process courant pour les appels urllib qui suivent
     (service token, Vault) : urllib lit http_proxy / https_proxy / no_proxy."""
@@ -1004,7 +1017,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                        help=f"mot de passe du proxy (défaut: ${PROXY_PASSWORD_ENV}, sinon demandé sans écho)")
     proxy.add_argument("--no-proxy", action="store_true", help="aucun proxy")
     proxy.add_argument("--no-proxy-hosts", default=DEFAULT_NO_PROXY, metavar="HOSTS",
-                       help=f"valeur de no_proxy (défaut: {DEFAULT_NO_PROXY})")
+                       help=f"valeur de no_proxy (défaut: {DEFAULT_NO_PROXY} ; l'hôte du service token "
+                            "y est toujours ajouté)")
     proxy.add_argument("--skip-proxy-check", action="store_true",
                        help=f"ne pas tester le proxy sur {PROXY_CHECK_URL} avant de continuer")
 
@@ -1129,7 +1143,7 @@ def prepare(args: argparse.Namespace, acquire: Callable[[str], str] | None = Non
         ensure_terraform_login(args.terraform_host, args.dir, run)
     if not args.skip_init:
         ensure_terraform_init(args.dir, args.reinit, run)
-    proxy_vars = resolve_proxy(args)
+    proxy_vars = with_no_proxy(resolve_proxy(args), args.token_service)
     apply_proxy(proxy_vars)
     if proxy_vars:
         _log(f"Proxy : {mask_url(proxy_vars['https_proxy'])}  no_proxy : {proxy_vars['no_proxy']}")

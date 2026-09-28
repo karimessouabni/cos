@@ -289,6 +289,14 @@ class ProxyTest(unittest.TestCase):
         with mock.patch.object(sys.stdin, "isatty", return_value=False), self.assertRaises(te.CliExit):
             te.resolve_proxy(te.parse_args([]), environ={})
 
+    def test_with_no_proxy_adds_token_service_host(self):
+        proxy = {"https_proxy": "http://p", "no_proxy": "localhost,.echonet"}
+        self.assertEqual(te.with_no_proxy(proxy, "https://s02vi9956141:4430")["no_proxy"],
+                         "localhost,.echonet,s02vi9956141")
+        self.assertEqual(te.with_no_proxy(proxy, "https://x.echonet/")["no_proxy"], "localhost,.echonet")
+        self.assertEqual(te.with_no_proxy(proxy, "")["no_proxy"], "localhost,.echonet")
+        self.assertEqual(te.with_no_proxy({}, "https://s02:1"), {})
+
     def test_check_proxy(self):
         proxy = {"http_proxy": "http://u:p@px:1", "https_proxy": "http://u:p@px:1", "no_proxy": ""}
         import urllib.error
@@ -563,7 +571,7 @@ class MainTest(VaultServerTest):
         variables = json.loads(out.getvalue())
         self.assertEqual(variables["https_proxy"], "http://u:p%21@127.0.0.1:9")
         self.assertEqual(variables["HTTP_PROXY"], "http://u:p%21@127.0.0.1:9")
-        self.assertEqual(variables["no_proxy"], "127.0.0.1")
+        self.assertEqual(variables["no_proxy"], "127.0.0.1,s02vi9956141")  # + hôte du service token
 
     def test_run_plan(self):
         run = mock.Mock(return_value=5)
