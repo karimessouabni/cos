@@ -22,9 +22,9 @@ branche de feature codé en dur pour l'INT. Une seule feature Terraform pouvait 
 1. **Schematics clone la branche sur laquelle le DAG tourne.** `settings_for(env,
    product_branch)` reçoit la branche de la demande et la transmet au VCS du workspace.
    DAG et Terraform sont toujours à la même version.
-2. **La branche de la demande est lue par `current_product_branch`** : d'abord sur la
-   souscription (`product_branch`), sinon sur le checkout git qui contient le code
-   (`.git/HEAD`). Rien n'est écrit dans le code ni posé à la main.
+2. **La branche de la demande est `payload.product_branch`**, le champ que le client (ou
+   la gateway) envoie avec chaque demande à côté du `payload` produit. Le DAG le passe tel
+   quel au service Schematics. Rien n'est écrit dans le code ni posé à la main.
 3. **Défauts par environnement alignés sur les branches de la CI** quand la demande ne
    porte pas de branche : `main` (int), `preprod` (pprod), `prod` (prod).
 4. **Garde-fou en pprod et prod** : toute branche autre que celle de l'environnement est
@@ -44,7 +44,6 @@ branche de feature codé en dur pour l'INT. Une seule feature Terraform pouvait 
 - Un workspace créé sur une branche de feature garde cette branche dans son VCS : les
   mises à jour suivantes du même bucket sur l'INT continuent de la cloner tant qu'elle
   existe. Supprimer les buckets de test avant de supprimer la branche.
-- Point à confirmer sur la plateforme : sous quel nom l'orchestrateur expose la branche de
-  la demande au DAG. `product_branch_of` lit l'attribut ou la clé `product_branch` de la
-  souscription ; à adapter si le nom diffère. À défaut, la lecture du checkout suffit si
-  l'orchestrateur clone chaque branche avec son `.git`.
+- Le champ `product_branch` fait partie du payload de base fourni par
+  `bp2i_airflow_library` ; il est aussi porté par la doublure de test
+  (`tests/stubs/bp2i.py`).

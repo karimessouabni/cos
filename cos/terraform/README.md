@@ -312,9 +312,8 @@ Les anciens dossiers restent pour les workspaces existants créés avec eux.
 le dépôt `cos` lui-même. La règle est simple : il clone **la branche de la
 demande**, celle que la gateway de l'orchestrateur a donnée pour exécuter le
 DAG (`product_branch`). DAG et Terraform sont donc toujours à la même version,
-et chaque développeur teste sa branche sur l'INT sans réglage
-(`current_product_branch` la lit sur la souscription, sinon sur le checkout git
-du code).
+et chaque développeur teste sa branche sur l'INT sans réglage : le DAG passe
+`payload.product_branch` au service Schematics.
 
 Quand la demande ne porte pas de branche, le défaut de l'environnement
 s'applique. Il est aligné sur les branches de la CI :
@@ -339,7 +338,7 @@ immédiatement ce que le prochain apply fera.
 ```mermaid
 flowchart LR
     ENV["ENVIRONMENT = int | preprod | prod"] --> S["settings_for(env)"]
-    PB["product_branch de la demande<br/>(souscription ou checkout git)"] --> S
+    PB["payload.product_branch<br/>de la demande"] --> S
     S --> BR["branche git"]
     S --> TL["TF_LOG"]
     S --> TG["tags workspace"]

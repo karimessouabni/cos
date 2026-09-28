@@ -189,11 +189,7 @@ def bucket_create():
         vault: Vault = depends(vault_dependency),
     ) -> str:
         from bp2i_terraform.backends.schematics import TerraformVar
-        from cos_service.services.schematics_service import (
-            TERRAFORM_VERSION,
-            create_or_update_ws,
-            current_product_branch,
-        )
+        from cos_service.services.schematics_service import TERRAFORM_VERSION, create_or_update_ws
         from cos_service.services.bucketService import (
             get_bucket_by_sub_id,
             process_bucket_creation,
@@ -273,7 +269,7 @@ def bucket_create():
                     description=description,
                     gitlab_token=secrets["gitlab_token"],
                     # Schematics clone la branche sur laquelle ce DAG tourne.
-                    product_branch=current_product_branch(state_manager),
+                    product_branch=payload.product_branch,
                 )
 
                 update_bucket_status(payload.subscription_id, SubscriptionStatus.CREATING, session)

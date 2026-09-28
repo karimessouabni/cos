@@ -146,66 +146,6 @@ class TestProductBranch:
             svc.settings_for(env)
 
 
-class TestProductBranchOf:
-    def test_attribute(self):
-        assert svc.product_branch_of(types.SimpleNamespace(product_branch="feature/a")) == "feature/a"
-
-    def test_dict(self):
-        assert svc.product_branch_of({"product_branch": "feature/b"}) == "feature/b"
-
-    def test_missing_empty_or_not_a_string(self):
-        assert svc.product_branch_of(None) is None
-        assert svc.product_branch_of(types.SimpleNamespace()) is None
-        assert svc.product_branch_of({"product_branch": ""}) is None
-        assert svc.product_branch_of(MagicMock()) is None  # attribut auto-créé, pas une chaîne
-
-
-class TestCheckoutBranch:
-    def test_reads_the_branch_of_the_enclosing_checkout(self, tmp_path):
-        (tmp_path / ".git").mkdir()
-        (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/feature/retention\n")
-        nested = tmp_path / "cos_service" / "services" / "schematics_service.py"
-        nested.parent.mkdir(parents=True)
-        nested.write_text("")
-
-        assert svc.checkout_branch(nested) == "feature/retention"
-
-    def test_detached_head_gives_none(self, tmp_path):
-        (tmp_path / ".git").mkdir()
-        (tmp_path / ".git" / "HEAD").write_text("0123456789abcdef0123456789abcdef01234567\n")
-
-        assert svc.checkout_branch(tmp_path / "x.py") is None
-
-    def test_no_git_dir_gives_none(self, tmp_path):
-        assert svc.checkout_branch(tmp_path / "x.py") is None
-
-
-class TestCurrentProductBranch:
-    def test_subscription_first(self, monkeypatch):
-        monkeypatch.setattr(svc, "checkout_branch", lambda start=None: "from-checkout")
-        state_manager = MagicMock()
-        state_manager.get_subscription.return_value = types.SimpleNamespace(product_branch="feature/a")
-
-        assert svc.current_product_branch(state_manager) == "feature/a"
-
-    def test_falls_back_to_the_checkout(self, monkeypatch):
-        monkeypatch.setattr(svc, "checkout_branch", lambda start=None: "from-checkout")
-        state_manager = MagicMock()
-        state_manager.get_subscription.return_value = types.SimpleNamespace()
-
-        assert svc.current_product_branch(state_manager) == "from-checkout"
-        assert svc.current_product_branch(None) == "from-checkout"
-
-    def test_unreadable_subscription_is_logged_and_skipped(self, monkeypatch, caplog):
-        monkeypatch.setattr(svc, "checkout_branch", lambda start=None: None)
-        state_manager = MagicMock()
-        state_manager.get_subscription.side_effect = RuntimeError("no subscription")
-        caplog.set_level("WARNING", logger=svc.logger.name)
-
-        assert svc.current_product_branch(state_manager) is None
-        assert "could not read the subscription" in caplog.text
-
-
 class TestCreateOrUpdateWs:
     def test_product_branch_is_forwarded_to_the_vcs(self, tf, no_overrides):
         svc.create_or_update_ws(

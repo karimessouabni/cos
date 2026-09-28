@@ -9,7 +9,6 @@ ci-dessous sont déduits des symboles utilisés (``SchematicsBackend``, ``VCS``,
 """
 import logging
 import os
-from pathlib import Path
 from typing import NamedTuple
 
 from bp2i_airflow_library.config import OrchestratorEnvironment
@@ -53,7 +52,7 @@ DEFAULT_TF_LOG = {
 # gateway (``product_branch``) ; le DAG et son Terraform vivent dans le même
 # dépôt, ils doivent être à la même version. Voir docs/adr/0002.
 # Ordre de résolution de la branche, à chaque appel (jamais à l'import) :
-# 1. ``product_branch`` de la demande (current_product_branch) ;
+# 1. ``payload.product_branch`` de la demande, transmis par le DAG ;
 # 2. Airflow Variable `cos_tf_branch` (roue de secours, INT seulement) ;
 # 3. variable d'environnement COS_TF_BRANCH ;
 # 4. défaut de l'environnement ci-dessus.
@@ -83,46 +82,11 @@ def _setting(name: str, default: str) -> str:
         return fallback
 
 
-def product_branch_of(subscription) -> str | None:
-    """``product_branch`` porté par la souscription / demande en cours, si l'orchestrateur l'expose."""
-    if subscription is None:
-        return None
-    value = getattr(subscription, "product_branch", None)
-    if value is None and isinstance(subscription, dict):
-        value = subscription.get("product_branch")
-    return value if isinstance(value, str) and value else None
-
-
-def checkout_branch(start: Path | None = None) -> str | None:
-    """Branche du checkout git qui contient ce code, si l'orchestrateur a cloné avec ``.git``.
-
-    None si aucun ``.git`` n'est trouvé ou si HEAD est détaché (clone par commit).
-    """
-    here = (start or Path(__file__)).resolve()
-    for parent in (here, *here.parents):
-        head = parent / ".git" / "HEAD"
-        if head.is_file():
-            ref = head.read_text().strip()
-            return ref.removeprefix("ref: refs/heads/") if ref.startswith("ref: refs/heads/") else None
-    return None
-
-
-def current_product_branch(state_manager=None) -> str | None:
-    """Branche de la demande en cours : la souscription d'abord, sinon le checkout."""
-    subscription = None
-    if state_manager is not None:
-        try:
-            subscription = state_manager.get_subscription()
-        except Exception as exc:  # pas de souscription accessible : on retombe sur le checkout
-            logger.warning("could not read the subscription to find its product branch: %s", exc)
-    return product_branch_of(subscription) or checkout_branch()
-
-
 def settings_for(orchestrator_env, product_branch: str | None = None) -> EnvSettings:
     """Tags, branche Terraform et TF_LOG d'un environnement (enum ou sa valeur).
 
-    ``product_branch`` est la branche sur laquelle le DAG tourne : Schematics
-    clone la même. Sans elle, les surcharges puis le défaut de l'environnement
+    ``product_branch`` est la branche sur laquelle le DAG tourne
+    (``payload.product_branch``) : Schematics clone la même. Sans elle, les surcharges puis le défaut de l'environnement
     s'appliquent. Lève une ``ValueError`` explicite sur un environnement
     inconnu, et en pprod/prod sur une branche autre que celle de
     l'environnement, au lieu d'envoyer une mauvaise branche à Schematics.
@@ -170,7 +134,7 @@ def create_or_update_ws(
 ) -> dict:
     """Crée le workspace, ou le met à jour s'il existe déjà sous ce nom.
 
-    ``product_branch`` : branche de la demande (voir ``current_product_branch``),
+    ``product_branch`` : branche de la demande (``payload.product_branch``),
     clonée par Schematics à la place du défaut de l'environnement.
     """
     settings = settings_for(orchestrator_env, product_branch)

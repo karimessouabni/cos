@@ -94,6 +94,8 @@ class ProductCreatePayload:
     environment: str = None
     region: str = None
     subscription_id: str = None
+    # Branche du produit donnée à la gateway de l'orchestrateur pour cette demande.
+    product_branch: str = None
 
     def __init__(self, **kwargs):
         for cls in reversed(type(self).__mro__):
