@@ -569,6 +569,23 @@ class TestSaveBucketInDb:
         assert state["immutability_choice"] == "none"
         assert state["retention"]["retention_enabled"] is False
         assert state["backup"]["backup_enabled"] is False
+        assert state["deprecations"] == []
+
+    def test_legacy_retention_format_pushes_a_deprecation_notice(self, dag, happy_services, make_payload, state_manager):
+        payload = make_payload(retention=BucketRetention(retention_enabled=True, default=30, minimum=10, maximum=60))
+
+        self.run(dag, payload, state_manager)
+
+        notices = state_manager.push_state.call_args.args[0]["deprecations"]
+        assert [n["code"] for n in notices] == ["retention.legacy_format"]
+        assert notices[0]["removal"] == "2027-03-31"
+
+    def test_current_retention_format_pushes_no_notice(self, dag, happy_services, make_payload, state_manager):
+        payload = make_payload(retention=BucketRetention(default_days=30, minimum_days=10, maximum_days=60))
+
+        self.run(dag, payload, state_manager)
+
+        assert state_manager.push_state.call_args.args[0]["deprecations"] == []
 
     def test_eu_de_only_has_host_style_endpoint(self, dag, happy_services, make_payload, state_manager):
         self.run(dag, make_payload(region="eu-de"), state_manager)

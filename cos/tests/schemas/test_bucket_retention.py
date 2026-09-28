@@ -188,11 +188,21 @@ class TestLegacyFormat:
 
         assert BucketRetention.model_validate(r) == r
 
-    def test_same_model_as_the_days_format(self):
+    def test_same_exported_model_as_the_days_format(self):
         legacy = BucketRetention(retention_enabled=True, default=30, minimum=10, maximum=60)
         days = BucketRetention(retention_enabled=True, default_days=30, minimum_days=10, maximum_days=60)
 
-        assert legacy == days
+        assert legacy.model_dump() == days.model_dump()
+        assert dict(legacy) == dict(days)
+
+    def test_sets_the_legacy_marker_without_exporting_it(self):
+        legacy = BucketRetention(default=30, minimum=10, maximum=60)
+        current = BucketRetention(default_days=30, minimum_days=10, maximum_days=60)
+
+        assert legacy.legacy_format is True
+        assert current.legacy_format is False
+        assert "legacy_format" not in legacy.model_dump()
+        assert "legacy_format" not in legacy.model_dump(by_alias=True, exclude_none=True)
 
     def test_raw_dict_like_the_orchestrator_payload(self):
         r = BucketRetention.model_validate({"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 60})

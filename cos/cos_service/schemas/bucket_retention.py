@@ -18,7 +18,7 @@ import logging
 from datetime import date
 
 from dateutil.relativedelta import relativedelta
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,9 @@ class BucketRetention(BaseModel):
     minimum_years: int | None = None
     maximum_days: int | None = None
     maximum_years: int | None = None
+    # Posé par _accept_legacy_format quand le client a envoyé l'ancien format.
+    # Jamais exporté (state, Terraform) : sert à remonter une notice de dépréciation.
+    legacy_format: bool = Field(default=False, exclude=True)
 
     # -- helpers ------------------------------------------------------------
     @staticmethod
@@ -99,7 +102,7 @@ class BucketRetention(BaseModel):
             legacy,
         )
         values = {k: v for k, v in values.items() if k not in _RETENTION_KEYS}
-        values.update({f"{k}_{DAYS}": v for k, v in legacy.items()})
+        values.update({f"{k}_{DAYS}": v for k, v in legacy.items()}, legacy_format=True)
         return values
 
     # -- 1. Auto-enable si un paramètre est fourni sans le flag ---------------

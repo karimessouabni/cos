@@ -270,8 +270,12 @@ flowchart TD
     A --> C["_validate : signe, ordre, plafond<br/>dans l'unité saisie, erreurs accumulées"]
     C --> J["Conversion en jours"]
     J --> DB[("base + Terraform<br/>toujours en jours")]
-    J --> ST["state client : clés en jours<br/>+ unit + bornes telles que saisies"]
+    J --> ST["state client : clés en jours<br/>+ unit + bornes telles que saisies<br/>+ deprecations[] si format historique"]
 ```
+
+Un client qui utilise encore l'ancien format relit dans son state une notice
+`deprecations[]` (code, message, date de retrait). C'est le contrat que le provider
+Terraform `orchestrator` peut transformer en `Warning:` dans `plan` et `apply`.
 
 Pourquoi pas une `v2` : ajouter une unité est additif pour le client. Une `v2` aurait imposé
 une migration de ressource Terraform à chacun, pour un gain nul. La décision et ses points
@@ -356,7 +360,8 @@ Ce que le client relit dans le state après une création :
   "retention": { "retention_enabled": true, "default": 730, "minimum": 365, "maximum": 1826,
                  "unit": "years", "default_years": 2, "minimum_years": 1, "maximum_years": 5 },
   "enable_versioning": false,
-  "backup": { "backup_enabled": false, "backup_vault_sub_id": null, "backup_retention_days": null }
+  "backup": { "backup_enabled": false, "backup_vault_sub_id": null, "backup_retention_days": null },
+  "deprecations": []
 }
 ```
 

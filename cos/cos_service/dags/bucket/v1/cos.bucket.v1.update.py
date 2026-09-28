@@ -207,7 +207,7 @@ def bucket_update():
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> dict:
         from cos_service.services.bucketService import process_bucket_update, update_bucket_workspace_status
-        from cos_service.services.immutability_service import retention_state_for_client
+        from cos_service.services.immutability_service import deprecations_for_client, retention_state_for_client
 
         immutability = validated["immutability"]
         enable_custom_permissions = validated["enable_custom_permissions"]
@@ -224,6 +224,8 @@ def bucket_update():
             "backup": immutability["backup"],
             "enable_custom_permissions": enable_custom_permissions,
             "immutability_choice": immutability["immutability_choice"],
+            # Notices de dépréciation (format historique de rétention…), relues par le provider.
+            "deprecations": deprecations_for_client(payload.retention),
         })
 
         process_bucket_update(

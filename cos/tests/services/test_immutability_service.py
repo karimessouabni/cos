@@ -513,3 +513,28 @@ class TestRetentionStateForClient:
         disabled = {"retention_enabled": False, "default": None, "minimum": None, "maximum": None}
 
         assert svc.retention_state_for_client(BucketRetention(), disabled) == disabled
+
+
+class TestDeprecationsForClient:
+    def test_legacy_retention_format_is_reported(self):
+        notices = svc.deprecations_for_client(retention_legacy())
+
+        assert notices == [{
+            "code": "retention.legacy_format",
+            "message": svc.RETENTION_LEGACY_FORMAT_DEPRECATION["message"],
+            "removal": "2027-03-31",
+        }]
+        assert "default_days" in notices[0]["message"]
+
+    def test_current_format_reports_nothing(self):
+        assert svc.deprecations_for_client(retention_days()) == []
+        assert svc.deprecations_for_client(retention_years()) == []
+
+    def test_no_retention_reports_nothing(self):
+        assert svc.deprecations_for_client(None) == []
+
+    def test_each_call_returns_a_fresh_list(self):
+        first = svc.deprecations_for_client(retention_legacy())
+        first[0]["message"] = "mutated"
+
+        assert svc.deprecations_for_client(retention_legacy())[0]["message"] != "mutated"

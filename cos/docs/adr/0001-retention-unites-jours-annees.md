@@ -35,6 +35,20 @@ DAG (`BucketCreatePayload` / `BucketRetention`) connaît ces champs.
    n'est pas typé sur `retention` ; mineur (`2.1.0`) si des `optional()` sont ajoutés ;
    `3.0.0` seulement le jour du retrait de l'ancien format.
 
+## Signalement au client
+
+Le DAG pousse dans le state de la souscription une liste `deprecations`, toujours
+présente, vide par défaut. Un payload au format historique y ajoute :
+
+```json
+{ "code": "retention.legacy_format", "message": "…use default_days/… or *_years", "removal": "2027-03-31" }
+```
+
+C'est le contrat lu par le provider Terraform `orchestrator` pour émettre un `Warning:`
+dans `plan` et `apply`, à implémenter côté provider de façon générique pour tous les
+produits. En attendant, la liste est visible dans `terraform state show`. Ni le Terraform
+exécuté par Schematics ni le module client `dmzrasc/cos` ne sont concernés.
+
 ## Retrait de l'ancien format
 
 Le format historique sera retiré après une période d'annonce (cible : six mois, à

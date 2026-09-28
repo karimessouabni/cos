@@ -350,7 +350,7 @@ def bucket_create():
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> dict | None:
         from cos_service.services.bucketService import complete_bucket_create
-        from cos_service.services.immutability_service import retention_state_for_client
+        from cos_service.services.immutability_service import deprecations_for_client, retention_state_for_client
 
         bucket_name = apply_tf_result["bucket_name"]["value"]
         vpe = f"s3.direct.{payload.region}.cloud-object-storage.appdomain.cloud"
@@ -381,6 +381,8 @@ def bucket_create():
             "object_lock_duration_years": immutability["object_lock_duration_years"],
             "enable_versioning": immutability["object_versioning_enabled"],
             "backup": immutability["backup"],
+            # Notices de dépréciation (format historique de rétention…), relues par le provider.
+            "deprecations": deprecations_for_client(payload.retention),
         })
 
         complete_bucket_create(payload.subscription_id, vip, apply_tf_result, session)

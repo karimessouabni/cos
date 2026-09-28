@@ -420,6 +420,27 @@ def retention_state_for_client(payload_retention: BucketRetention | None, retent
     return state
 
 
+# Notices de dépréciation remontées au client dans le state de la souscription
+# (clé ``deprecations``, liste toujours présente). Contrat lu par le provider
+# Terraform ``orchestrator`` pour émettre un ``Warning:`` dans plan/apply.
+RETENTION_LEGACY_FORMAT_REMOVAL = "2027-03-31"
+RETENTION_LEGACY_FORMAT_DEPRECATION = {
+    "code": "retention.legacy_format",
+    "message": (
+        "retention.default/minimum/maximum (implicit days) are deprecated. "
+        "Use default_days/minimum_days/maximum_days or default_years/minimum_years/maximum_years."
+    ),
+    "removal": RETENTION_LEGACY_FORMAT_REMOVAL,
+}
+
+
+def deprecations_for_client(payload_retention: BucketRetention | None) -> list[dict]:
+    """Notices de dépréciation à pousser dans le state pour cette demande, vide sinon."""
+    if payload_retention is not None and payload_retention.legacy_format:
+        return [dict(RETENTION_LEGACY_FORMAT_DEPRECATION)]
+    return []
+
+
 def check_single_unit(days, years, label, days_field, years_field, errors) -> str | None:
     """Vérifie qu'une seule unité est saisie et renvoie laquelle ("days"/"years"/None)."""
     if days is not None and years is not None:
