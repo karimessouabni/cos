@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import http.server
 import json
 import os
@@ -22,6 +23,19 @@ import subscriptions_cleanup as sc  # noqa: E402
 def _demand(action: str, status: str = "SUCCESS", uuid: str = "", create_date: str = "") -> dict:
     return {"action": action, "status": status, "status_reason": status.lower(),
             "uuid": uuid or f"uuid-{action}-{status}", "create_date": create_date}
+
+
+def _no_browser():
+    return mock.patch.object(sc, "acquire_token_interactively", return_value="")
+
+
+def _jwt(exp: int) -> str:
+    def enc(data: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
+    return f"{enc({'alg': 'RS256'})}.{enc({'exp': exp, 'sub': 'h90871'})}.c2lnbmF0dXJl"
+
+
+FAR_FUTURE = 4_000_000_000
 
 
 def _row(subscription_id: str, demands: list[dict], name: str = "bu003i023571",
@@ -466,10 +480,10 @@ class OnErrorModeTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             json.dump({"result": {"rows": [_err_row("s1")]}}, fh)
         try:
-            with mock.patch.dict(os.environ, {"ORCHESTRATOR_TOKEN": ""}), mock.patch("sys.stdout") as out:
+            with mock.patch.dict(os.environ, {"ORCHESTRATOR_TOKEN": ""}), _no_browser(), mock.patch("sys.stdout") as out:
                 self.assertEqual(sc.main(["--on-error", "--input", fh.name]), 0)
             self.assertIn("demand=s1-d0", "".join(c.args[0] for c in out.write.call_args_list))
-            with mock.patch.dict(os.environ, {"ORCHESTRATOR_TOKEN": ""}), mock.patch("sys.stdout"), \
+            with mock.patch.dict(os.environ, {"ORCHESTRATOR_TOKEN": ""}), _no_browser(), mock.patch("sys.stdout"), \
                  mock.patch("sys.stderr"):
                 self.assertEqual(sc.main(["--on-error", "--input", fh.name, "--decline", "--yes"]), 1)
         finally:
@@ -510,8 +524,135 @@ class OnErrorModeTests(unittest.TestCase):
         self.assertEqual(self._run(["--on-error", "--token", "t"], client)[0], 2)
 
     def test_main_requires_token(self):
-        with mock.patch.dict(os.environ, {"ORCHESTRATOR_TOKEN": ""}), mock.patch("sys.stderr"):
+        with mock.patch.dict(os.environ, {"ORCHESTRATOR_TOKEN": ""}), _no_browser(), mock.patch("sys.stderr"):
             self.assertEqual(sc.main(["--on-error"]), 1)
+
+
+class CleanupModeTests(unittest.TestCase):
+    ROWS = [
+        _row("s1", [_demand("create")], name="bu1"),
+        _row("s2", [_demand("create"), _demand("delete", "ERROR", uuid="d2")], name="bu2"),
+        _row("s3", [_demand("create", "FAILED")], name="bu3"),
+    ]
+
+    def _client(self, delete=None):
+        client = mock.Mock()
+        client.get_subscriptions.return_value = {"result": {"rows": self.ROWS}}
+        client.delete_subscription.side_effect = delete or (lambda *a: {"ok": True})
+        client.retry_failed_delete.return_value = ["task-a"]
+        return client
+
+    def _run(self, argv, client):
+        with mock.patch.object(sc, "_make_client", return_value=client), \
+             mock.patch("sys.stdout") as out, mock.patch("sys.stderr"):
+            code = sc.main(argv)
+        return code, "".join(c.args[0] for c in out.write.call_args_list)
+
+    def test_dry_run_lists_plan(self):
+        client = self._client()
+        code, printed = self._run(["--token", "t"], client)
+        self.assertEqual(code, 0)
+        self.assertIn("3 souscription(s) lue(s), 2 éligible(s) (user=h90871): 1 à supprimer, 1 delete à relancer",
+                      printed)
+        self.assertIn("-> RETRY d2", printed)
+        self.assertIn("Dry-run", printed)
+        client.delete_subscription.assert_not_called()
+
+    def test_delete_and_retry(self):
+        client = self._client()
+        code, printed = self._run(["--token", "t", "--delete", "--yes", "--product-branch", "dev"], client)
+        self.assertEqual(code, 0)
+        client.delete_subscription.assert_called_once_with("s1", "dev")
+        client.retry_failed_delete.assert_called_once_with("d2")
+        self.assertIn("RETRY d2 (bu2) -> OK tasks=task-a", printed)
+        self.assertIn("2 traitée(s), 0 en échec", printed)
+
+    def test_failure_exit_code_in_parallel(self):
+        def delete(sub_id, branch):
+            raise sc.OrchestratorApiError("boom", status_code=500)
+        client = self._client(delete)
+        code, printed = self._run(["--token", "t", "--delete", "--yes", "--workers", "4"], client)
+        self.assertEqual(code, 3)
+        self.assertIn("1 traitée(s), 1 en échec", printed)
+
+    def test_json_output(self):
+        code, printed = self._run(["--token", "t", "--json"], self._client())
+        self.assertEqual((code, json.loads(printed)), (0, ["s1", "s2"]))
+
+    def test_workers_must_be_positive(self):
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            sc.parse_args(["--workers", "0"])
+
+
+class TokenTests(unittest.TestCase):
+    def test_jwt_expiry_and_seconds_left(self):
+        token = _jwt(2_000)
+        self.assertEqual(sc.jwt_expiry(token), 2_000)
+        self.assertEqual(sc.token_seconds_left(token, now=1_400), 600)
+        self.assertIsNone(sc.jwt_expiry("pas-un-jwt"))
+
+    def test_clean_token(self):
+        token = _jwt(2_000)
+        for raw in (token, f"Bearer {token}", f'  "{token}"\n', f"Authorization: Bearer {token}"):
+            self.assertEqual(sc.clean_token(raw), token)
+        self.assertEqual(sc.clean_token(" opaque "), "opaque")
+
+    def test_valid_token_is_kept(self):
+        acquire = mock.Mock()
+        with mock.patch("sys.stderr"):
+            token = sc.resolve_token(f"Bearer {_jwt(FAR_FUTURE)}", None, acquire)
+        self.assertEqual(token, _jwt(FAR_FUTURE))
+        acquire.assert_not_called()
+
+    def test_opaque_token_is_kept(self):
+        self.assertEqual(sc.resolve_token("opaque", None, mock.Mock()), "opaque")
+
+    def test_expired_token_is_replaced(self):
+        acquire = mock.Mock(return_value=_jwt(FAR_FUTURE))
+        with mock.patch("sys.stderr"):
+            token = sc.resolve_token(_jwt(1_000), "https://swagger", acquire)
+        self.assertEqual(token, _jwt(FAR_FUTURE))
+        acquire.assert_called_once_with("https://swagger")
+
+    def test_missing_token_raises(self):
+        with self.assertRaises(sc.CliExit) as cm:
+            sc.resolve_token(None, None, lambda url: "")
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_acquire_reads_clipboard_and_skips_bad_values(self):
+        clips = iter([_jwt(1_000), "du texte", _jwt(FAR_FUTURE)])
+        opened = []
+        with mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch("sys.stderr"):
+            token = sc.acquire_token_interactively(
+                "https://swagger", read_clip=lambda: next(clips), ask=lambda prompt: "", open_url=opened.append)
+        self.assertEqual(token, _jwt(FAR_FUTURE))
+        self.assertEqual(opened, ["https://swagger"])
+
+    def test_acquire_accepts_pasted_token(self):
+        with mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch("sys.stderr"):
+            token = sc.acquire_token_interactively(
+                None, read_clip=lambda: "", ask=lambda prompt: "Bearer opaque-token")
+        self.assertEqual(token, "opaque-token")
+
+    def test_acquire_gives_up_outside_a_terminal(self):
+        with mock.patch.object(sys.stdin, "isatty", return_value=False):
+            self.assertEqual(sc.acquire_token_interactively("https://swagger", open_url=self.fail), "")
+
+    def test_token_requested_only_when_needed(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"result": {"rows": [_row("s1", [_demand("create")])]}}, fh)
+        try:
+            with mock.patch.dict(os.environ, {"ORCHESTRATOR_TOKEN": ""}), \
+                 mock.patch.object(sc, "acquire_token_interactively") as acquire, mock.patch("sys.stdout"):
+                self.assertEqual(sc.main(["--input", fh.name]), 0)
+            acquire.assert_not_called()
+        finally:
+            os.unlink(fh.name)
+
+    def test_print_bookmarklet(self):
+        with mock.patch("sys.stdout") as out:
+            self.assertEqual(sc.main(["--print-bookmarklet"]), 0)
+        self.assertTrue(out.write.call_args_list[0].args[0].startswith("javascript:"))
 
 
 def _make_self_signed(tmpdir: str) -> tuple[str, str, str]:

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""
+r"""
 Nettoyage des souscriptions orchestrator (produit cos.bucket par défaut).
 
+Mode delete (défaut)
 1. GET  {base}/multireader/api/v1/subscriptions?page=<n>&size=100, page par page
    jusqu'à la dernière (page incomplète, vide, ou total_pages/total atteint)
    -> on ne garde que les rows dont geninfo.product == <product> et
@@ -34,11 +35,19 @@ TOUTES les demandes sont en ON_ERROR.
    POST {base}/state_manager/api/v1/demands/<uuid>/status
         {"status": "DECLINED", "reason": "to remove"}
 
-Usage:
+Token
     export ORCHESTRATOR_TOKEN=...            # ou --token
-    python subscriptions_cleanup.py                       # liste seulement (dry-run)
+Sans token valide (absent ou JWT expiré), le script ouvre le Swagger
+(--swagger-url / $ORCHESTRATOR_SWAGGER_URL) : on s'y connecte en SSO, on copie
+le token, puis Entrée : il est lu dans le presse-papiers (ou collé au prompt).
+Pour copier le token en un clic depuis le Swagger, mettre en favori le
+bookmarklet affiché par --print-bookmarklet.
+
+Usage:
+    python subscriptions_cleanup.py                       # dry-run: liste les souscriptions éligibles
     python subscriptions_cleanup.py --delete              # supprime / relance réellement
     python subscriptions_cleanup.py --delete --yes        # sans confirmation
+    python subscriptions_cleanup.py --delete --workers 8  # 8 appels en parallèle
     python subscriptions_cleanup.py --user h12345               # autre user
     python subscriptions_cleanup.py --all-users                 # sans filtre user
     python subscriptions_cleanup.py --product cos.bucket --base-url https://...
@@ -48,6 +57,7 @@ Usage:
     python subscriptions_cleanup.py --on-error --decline        # POST DECLINED sur chacune
     python subscriptions_cleanup.py --on-error --decline --yes --reason "cleanup sprint 12"
     python subscriptions_cleanup.py --on-error --subscription-status LOCKED   # restreint aux LOCKED
+    python subscriptions_cleanup.py --print-bookmarklet         # bookmarklet de copie du token
 
 TLS (certificat interne BNPP, sinon "CERTIFICATE_VERIFY_FAILED: self-signed
 certificate in certificate chain") :
@@ -62,15 +72,23 @@ Codes de sortie: 0 OK, 1 erreur args/token, 2 erreur HTTP sur le GET,
 from __future__ import annotations
 
 import argparse
+import base64
+import getpass
 import json
 import os
+import re
+import shutil
 import ssl
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence, TypeVar
 
 DEFAULT_BASE_URL = "https://orchestrator-gw.int.staging.echonet"
 DEFAULT_PRODUCT = "cos.bucket"
@@ -79,8 +97,13 @@ DEFAULT_USER = "h90871"
 DEFAULT_TIMEOUT = 60
 DEFAULT_PAGE_SIZE = 100
 DEFAULT_FIRST_PAGE = 1
+DEFAULT_WORKERS = 1
 MAX_PAGES = 10_000
+
+TOKEN_ENV = "ORCHESTRATOR_TOKEN"
+SWAGGER_URL_ENV = "ORCHESTRATOR_SWAGGER_URL"
 CA_CERTS_ENV = "ORCHESTRATOR_CA_CERTS"  # chemins séparés par os.pathsep (":" sur macOS/Linux)
+TOKEN_MIN_VALIDITY = 60  # secondes : en dessous, le token est considéré expiré
 
 STATE_MANAGER_PREFIX = "/state_manager/api/v1"
 DEMAND_ON_ERROR_STATUS = "ON_ERROR"
@@ -92,12 +115,25 @@ DELETE_ACTION = "delete"
 SUCCESS_STATUS = "SUCCESS"
 PROCESS_ERROR_STATUS = "ERROR"
 
+EXIT_OK, EXIT_USAGE, EXIT_GET_FAILED, EXIT_ACTION_FAILED = 0, 1, 2, 3
+
+Row = dict[str, Any]
+T = TypeVar("T")
+
 
 class OrchestratorApiError(RuntimeError):
     def __init__(self, message: str, status_code: int | None = None, payload: Any = None):
         super().__init__(message)
         self.status_code = status_code
         self.payload = payload
+
+
+class CliExit(Exception):
+    """Arrêt du CLI avec un message sur stderr et un code de sortie."""
+
+    def __init__(self, code: int, message: str = ""):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass
@@ -129,55 +165,48 @@ class ErrorDemand:
 
 
 # --------------------------------------------------------------------------- #
-# Filtrage
+# Accès aux champs d'une row multireader
 # --------------------------------------------------------------------------- #
 
-def is_eligible(demands: Iterable[dict[str, Any]] | None) -> bool:
-    """True si toutes les demandes force_clean/create/update sont en SUCCESS
-    et que les éventuelles demandes delete sont toutes en erreur (!= SUCCESS)."""
-    demands = list(demands or [])
-    if not demands:
-        return False
-    for demand in demands:
-        action = demand.get("action")
-        succeeded = demand.get("status") == SUCCESS_STATUS
-        if action in ALLOWED_ACTIONS:
-            if not succeeded:
-                return False
-        elif action == DELETE_ACTION:
-            if succeeded:
-                return False
-        else:
-            return False
-    return True
+def _first(mapping: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = mapping.get(key)
+        if value:
+            return str(value)
+    return ""
 
 
-def _demand_label(demand: dict[str, Any]) -> str:
-    action = demand.get("action", "?")
-    status = demand.get("status", "?")
-    return action if status == SUCCESS_STATUS else f"{action}({status})"
+def _geninfo(row: Row) -> dict[str, Any]:
+    return row.get("geninfo") or {}
 
 
-def failed_delete_demand_ids(demands: Iterable[dict[str, Any]]) -> list[str]:
-    """uuid des demandes delete non SUCCESS, dans l'ordre de create_date."""
-    failed = [
-        d for d in demands
-        if d.get("action") == DELETE_ACTION and d.get("status") != SUCCESS_STATUS and d.get("uuid")
-    ]
-    failed.sort(key=lambda d: d.get("create_date") or "")
-    return [d["uuid"] for d in failed]
+def _demands(row: Row) -> list[dict[str, Any]]:
+    return _geninfo(row).get("demands") or []
 
 
-def failed_process_names(demand: dict[str, Any]) -> list[str]:
-    """names des processes en ERROR dans la réponse GET /api/v1/demands/<uuid>."""
-    processes = demand.get("processes") or []
-    return [
-        p["name"] for p in processes
-        if p.get("status") == PROCESS_ERROR_STATUS and p.get("name")
-    ]
+def subscription_uuid(row: Row) -> str:
+    """uuid de la souscription : geninfo.subscription_id (rows multireader),
+    sinon uuid / subscription_id / id au premier niveau."""
+    return _first(_geninfo(row), "subscription_id", "uuid") or _first(row, "uuid", "subscription_id", "id")
 
 
-def extract_rows(body: dict[str, Any]) -> list[dict[str, Any]]:
+def subscription_user(row: Row) -> str:
+    return _first(row.get("context") or {}, "user") or _first(row, "user", "owner", "requester")
+
+
+def subscription_status(row: Row) -> str:
+    return _first(row, "status") or _first(_geninfo(row), "status")
+
+
+def subscription_name(row: Row) -> str:
+    return _first(row, "name") or _first(_geninfo(row), "name")
+
+
+def demand_uuid(demand: dict[str, Any]) -> str:
+    return _first(demand, "uuid", "demand_id", "id")
+
+
+def extract_rows(body: dict[str, Any]) -> list[Row]:
     result = body.get("result", body)
     rows = result.get("rows", [])
     if not isinstance(rows, list):
@@ -204,48 +233,87 @@ def extract_items(body: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _first(mapping: dict[str, Any], *keys: str) -> str:
-    for key in keys:
-        value = mapping.get(key)
-        if value:
-            return str(value)
-    return ""
+# --------------------------------------------------------------------------- #
+# Mode delete : sélection
+# --------------------------------------------------------------------------- #
+
+def is_eligible(demands: Iterable[dict[str, Any]] | None) -> bool:
+    """True si toutes les demandes force_clean/create/update sont en SUCCESS
+    et que les éventuelles demandes delete sont toutes en erreur (!= SUCCESS)."""
+    demands = list(demands or [])
+
+    def ok(demand: dict[str, Any]) -> bool:
+        action = demand.get("action")
+        succeeded = demand.get("status") == SUCCESS_STATUS
+        if action in ALLOWED_ACTIONS:
+            return succeeded
+        return action == DELETE_ACTION and not succeeded
+
+    return bool(demands) and all(ok(d) for d in demands)
 
 
-def subscription_uuid(row: dict[str, Any]) -> str:
-    """uuid de la souscription : geninfo.subscription_id (rows multireader),
-    sinon uuid / subscription_id / id au premier niveau."""
-    geninfo = row.get("geninfo") or {}
-    return _first(geninfo, "subscription_id", "uuid") or _first(row, "uuid", "subscription_id", "id")
+def _demand_label(demand: dict[str, Any]) -> str:
+    action = demand.get("action", "?")
+    status = demand.get("status", "?")
+    return action if status == SUCCESS_STATUS else f"{action}({status})"
 
 
-def subscription_user(row: dict[str, Any]) -> str:
-    context = row.get("context") or {}
-    return _first(context, "user") or _first(row, "user", "owner", "requester")
+def failed_delete_demand_ids(demands: Iterable[dict[str, Any]]) -> list[str]:
+    """uuid des demandes delete non SUCCESS, dans l'ordre de create_date."""
+    failed = [
+        d for d in demands
+        if d.get("action") == DELETE_ACTION and d.get("status") != SUCCESS_STATUS and d.get("uuid")
+    ]
+    failed.sort(key=lambda d: d.get("create_date") or "")
+    return [d["uuid"] for d in failed]
 
 
-def subscription_status(row: dict[str, Any]) -> str:
-    geninfo = row.get("geninfo") or {}
-    return _first(row, "status") or _first(geninfo, "status")
+def failed_process_names(demand: dict[str, Any]) -> list[str]:
+    """names des processes en ERROR dans la réponse GET /api/v1/demands/<uuid>."""
+    return [
+        p["name"] for p in demand.get("processes") or []
+        if p.get("status") == PROCESS_ERROR_STATUS and p.get("name")
+    ]
 
 
-def subscription_name(row: dict[str, Any]) -> str:
-    geninfo = row.get("geninfo") or {}
-    return _first(row, "name") or _first(geninfo, "name")
+def find_eligible_subscriptions(body: dict[str, Any], user: str | None = DEFAULT_USER) -> list[Subscription]:
+    """Retourne les souscriptions dont context.user == user (None = pas de filtre)
+    et dont geninfo.demands respecte is_eligible()."""
+    eligible: list[Subscription] = []
+    for row in extract_rows(body):
+        row_user = (row.get("context") or {}).get("user", "")
+        if user is not None and row_user != user:
+            continue
+        geninfo = _geninfo(row)
+        demands = _demands(row)
+        subscription_id = geninfo.get("subscription_id")
+        if not subscription_id or not is_eligible(demands):
+            continue
+        eligible.append(Subscription(
+            subscription_id=subscription_id,
+            name=geninfo.get("name", ""),
+            user=row_user,
+            status=geninfo.get("status", ""),
+            environment=geninfo.get("environment", ""),
+            region=geninfo.get("region", ""),
+            actions=[_demand_label(d) for d in demands],
+            failed_delete_demand_ids=failed_delete_demand_ids(demands),
+        ))
+    return eligible
 
 
-def demand_uuid(demand: dict[str, Any]) -> str:
-    return _first(demand, "uuid", "demand_id", "id")
+# --------------------------------------------------------------------------- #
+# Mode on-error : sélection
+# --------------------------------------------------------------------------- #
 
-
-def all_demands_in_status(row: dict[str, Any], status: str = DEMAND_ON_ERROR_STATUS) -> bool:
+def all_demands_in_status(row: Row, status: str = DEMAND_ON_ERROR_STATUS) -> bool:
     """True si geninfo.demands est non vide et que chaque demande a ce status."""
-    demands = (row.get("geninfo") or {}).get("demands") or []
+    demands = _demands(row)
     return bool(demands) and all(d.get("status") == status for d in demands)
 
 
 def find_error_demands(
-    subscriptions: Iterable[dict[str, Any]],
+    subscriptions: Iterable[Row],
     user: str | None = DEFAULT_USER,
     demand_status: str = DEMAND_ON_ERROR_STATUS,
     subscription_status_filter: str | None = None,
@@ -257,31 +325,31 @@ def find_error_demands(
     found: list[ErrorDemand] = []
     for row in subscriptions:
         sub_id = subscription_uuid(row)
-        if not sub_id:
-            continue
         row_user = subscription_user(row)
-        if user is not None and row_user != user:
+        if (not sub_id
+                or (user is not None and row_user != user)
+                or (subscription_status_filter and subscription_status(row) != subscription_status_filter)
+                or not all_demands_in_status(row, demand_status)):
             continue
-        if subscription_status_filter and subscription_status(row) != subscription_status_filter:
-            continue
-        if not all_demands_in_status(row, demand_status):
-            continue
-        for demand in (row.get("geninfo") or {}).get("demands") or []:
-            demand_id = demand_uuid(demand)
-            if not demand_id:
-                continue
-            found.append(ErrorDemand(
+        found.extend(
+            ErrorDemand(
                 subscription_id=sub_id,
-                demand_id=demand_id,
+                demand_id=demand_uuid(demand),
                 subscription_name=subscription_name(row),
                 user=row_user,
                 action=_first(demand, "action"),
                 status=str(demand.get("status", "")),
                 create_date=_first(demand, "create_date", "created_at"),
-            ))
+            )
+            for demand in _demands(row) if demand_uuid(demand)
+        )
     found.sort(key=lambda d: (d.subscription_id, d.create_date, d.demand_id))
     return found
 
+
+# --------------------------------------------------------------------------- #
+# Pagination
+# --------------------------------------------------------------------------- #
 
 def _as_int(value: Any) -> int | None:
     try:
@@ -296,25 +364,26 @@ def total_pages_hint(body: Any, size: int) -> int | None:
     if not isinstance(body, dict):
         return None
     candidates = [body]
-    result = body.get("result")
-    if isinstance(result, dict):
-        candidates.append(result)
+    if isinstance(body.get("result"), dict):
+        candidates.append(body["result"])
     for key in ("page", "pagination", "meta"):
-        for c in list(candidates):
-            nested = c.get(key)
-            if isinstance(nested, dict):
-                candidates.append(nested)
-    for c in candidates:
-        for key in ("total_pages", "totalPages", "pages", "page_count", "pageCount"):
-            n = _as_int(c.get(key))
-            if n is not None:
-                return max(n, 0)
-    for c in candidates:
-        for key in ("total", "total_count", "totalCount", "totalElements", "total_elements", "count"):
-            n = _as_int(c.get(key))
-            if n is not None:
-                return max(-(-n // size), 0) if size > 0 else None
-    return None
+        candidates += [c[key] for c in list(candidates) if isinstance(c.get(key), dict)]
+
+    def first_int(keys: Sequence[str]) -> int | None:
+        for c in candidates:
+            for key in keys:
+                n = _as_int(c.get(key))
+                if n is not None:
+                    return n
+        return None
+
+    pages = first_int(("total_pages", "totalPages", "pages", "page_count", "pageCount"))
+    if pages is not None:
+        return max(pages, 0)
+    total = first_int(("total", "total_count", "totalCount", "totalElements", "total_elements", "count"))
+    if total is None or size <= 0:
+        return None
+    return max(-(-total // size), 0)
 
 
 def iterate_pages(
@@ -323,12 +392,12 @@ def iterate_pages(
     first_page: int = DEFAULT_FIRST_PAGE,
     max_pages: int = MAX_PAGES,
     progress: Callable[[int, int], None] | None = None,
-) -> list[dict[str, Any]]:
+) -> list[Row]:
     """Appelle fetch_page(page, size) depuis first_page et concatène les rows.
 
     Arrêt : page vide, page incomplète (< size), total_pages atteint, page
     identique à la précédente (API qui ignore ?page=), ou max_pages."""
-    rows: list[dict[str, Any]] = []
+    rows: list[Row] = []
     previous_keys: list[str] | None = None
     for index in range(max_pages):
         page = first_page + index
@@ -336,76 +405,163 @@ def iterate_pages(
         page_rows = extract_rows(body) if isinstance(body, dict) else extract_items(body)
         if progress:
             progress(page, len(page_rows))
-        if not page_rows:
-            break
         keys = [subscription_uuid(r) for r in page_rows]
-        if keys == previous_keys:
+        if not page_rows or keys == previous_keys:
             break
         rows.extend(page_rows)
         hint = total_pages_hint(body, size)
-        if hint is not None and index + 1 >= hint:
-            break
-        if len(page_rows) < size:
+        if (hint is not None and index + 1 >= hint) or len(page_rows) < size:
             break
         previous_keys = keys
     return rows
 
 
-def dedupe_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+def dedupe_rows(rows: Iterable[Row]) -> list[Row]:
     """Supprime les doublons de subscription uuid (chevauchement de pages)."""
     seen: set[str] = set()
-    out: list[dict[str, Any]] = []
+    out: list[Row] = []
     for row in rows:
         key = subscription_uuid(row)
-        if key and key in seen:
-            continue
         if key:
+            if key in seen:
+                continue
             seen.add(key)
         out.append(row)
     return out
 
 
-def filter_product(rows: Iterable[dict[str, Any]], product: str | None) -> list[dict[str, Any]]:
+def filter_product(rows: Iterable[Row], product: str | None) -> list[Row]:
     """Garde les rows dont geninfo.product == product (rows sans product conservées)."""
     if not product:
         return list(rows)
-    return [r for r in rows if (r.get("geninfo") or {}).get("product", product) == product]
-
-
-def find_eligible_subscriptions(
-    body: dict[str, Any], user: str | None = DEFAULT_USER
-) -> list[Subscription]:
-    """Retourne les souscriptions dont context.user == user (None = pas de filtre)
-    et dont geninfo.demands respecte is_eligible()."""
-    eligible: list[Subscription] = []
-    for row in extract_rows(body):
-        context = row.get("context") or {}
-        row_user = context.get("user", "")
-        if user is not None and row_user != user:
-            continue
-        geninfo = row.get("geninfo") or {}
-        demands = geninfo.get("demands") or []
-        subscription_id = geninfo.get("subscription_id")
-        if not subscription_id:
-            continue
-        if is_eligible(demands):
-            eligible.append(
-                Subscription(
-                    subscription_id=subscription_id,
-                    name=geninfo.get("name", ""),
-                    user=row_user,
-                    status=geninfo.get("status", ""),
-                    environment=geninfo.get("environment", ""),
-                    region=geninfo.get("region", ""),
-                    actions=[_demand_label(d) for d in demands],
-                    failed_delete_demand_ids=failed_delete_demand_ids(demands),
-                )
-            )
-    return eligible
+    return [r for r in rows if _geninfo(r).get("product", product) == product]
 
 
 # --------------------------------------------------------------------------- #
-# Client HTTP
+# Token : lecture, expiration, récupération depuis le Swagger
+# --------------------------------------------------------------------------- #
+
+_JWT_RE = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*")
+
+# Bookmarklet à mettre en favori : sur la page Swagger (après login SSO), il
+# copie le bearer token dans le presse-papiers. Il cherche d'abord dans l'état
+# Swagger UI (bouton Authorize : OAuth2 ou bearer collé), puis tout JWT présent
+# dans sessionStorage / localStorage (oidc-client, MSAL, ...).
+BOOKMARKLET = (
+    "javascript:(()=>{const J=/[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]+/;let t;"
+    "try{const a=(window.ui||ui).authSelectors.authorized().toJS();"
+    "for(const k in a){const v=a[k];t=(v.token&&v.token.access_token)||v.value;if(t)break}}catch(e){}"
+    "if(!t)for(const s of[sessionStorage,localStorage])for(let i=0;i<s.length&&!t;i++){"
+    "const m=(s.getItem(s.key(i))||'').match(J);if(m)t=m[0]}"
+    "if(!t){alert('Aucun token trouvé : cliquer Authorize dans le Swagger');return}"
+    "t=t.replace(/^Bearer\\s+/i,'');"
+    "navigator.clipboard.writeText(t).then("
+    "()=>alert('Token copié ('+t.length+' car.)'),()=>prompt('Copier le token :',t))})()"
+)
+
+
+def clean_token(raw: str) -> str:
+    """Nettoie un copier-coller : guillemets, 'Authorization:', 'Bearer ', espaces."""
+    value = raw.strip().strip("\"'").strip()
+    if value.lower().startswith("authorization:"):
+        value = value.split(":", 1)[1].strip()
+    if value.lower().startswith("bearer "):
+        value = value[len("bearer "):].strip()
+    match = _JWT_RE.search(value)
+    return match.group(0) if match else value
+
+
+def jwt_expiry(token: str) -> int | None:
+    """Claim exp du JWT (signature non vérifiée), None si ce n'est pas un JWT."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+        return int(claims["exp"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def token_seconds_left(token: str, now: float | None = None) -> int | None:
+    exp = jwt_expiry(token)
+    return None if exp is None else int(exp - (time.time() if now is None else now))
+
+
+def read_clipboard() -> str:
+    commands = (["pbpaste"], ["wl-paste", "-n"], ["xclip", "-selection", "clipboard", "-o"],
+                ["powershell", "-NoProfile", "-Command", "Get-Clipboard"])
+    for cmd in commands:
+        if shutil.which(cmd[0]):
+            try:
+                return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+            except (OSError, subprocess.SubprocessError):
+                continue
+    return ""
+
+
+def _log(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def acquire_token_interactively(
+    swagger_url: str | None,
+    read_clip: Callable[[], str] = read_clipboard,
+    ask: Callable[[str], str] = getpass.getpass,
+    open_url: Callable[[str], Any] = webbrowser.open,
+    attempts: int = 3,
+) -> str:
+    """Ouvre le Swagger, attend que l'utilisateur copie le token puis le lit dans
+    le presse-papiers (ou le prend tel quel s'il est collé au prompt).
+    Retourne "" hors terminal interactif ou après `attempts` essais."""
+    if not sys.stdin.isatty():
+        return ""
+    if swagger_url:
+        _log(f"Ouverture du Swagger : {swagger_url}")
+        open_url(swagger_url)
+    _log("Se connecter en SSO, cliquer Authorize puis copier le token (bookmarklet : --print-bookmarklet).")
+    for _ in range(attempts):
+        pasted = clean_token(ask("Entrée pour lire le presse-papiers (ou coller le token) : "))
+        token = pasted or clean_token(read_clip())
+        left = token_seconds_left(token)
+        if not token:
+            _log("Presse-papiers vide.")
+        elif left is None and not pasted:
+            _log("Le presse-papiers ne contient pas de JWT.")
+        elif left is not None and left < TOKEN_MIN_VALIDITY:
+            _log("Token expiré, en copier un nouveau depuis le Swagger.")
+        else:
+            return token
+    return ""
+
+
+def resolve_token(
+    token: str | None,
+    swagger_url: str | None,
+    acquire: Callable[[str | None], str] | None = None,
+) -> str:
+    """Token utilisable : celui fourni s'il n'est pas expiré, sinon un nouveau
+    récupéré depuis le Swagger. Lève CliExit si aucun n'est disponible."""
+    if token:
+        token = clean_token(token)
+        left = token_seconds_left(token)
+        if left is None or left >= TOKEN_MIN_VALIDITY:
+            if left is not None:
+                _log(f"Token valide encore {left // 60} min.")
+            return token
+        _log("Token fourni expiré : récupération d'un nouveau depuis le Swagger.")
+    token = (acquire or acquire_token_interactively)(swagger_url)
+    if not token:
+        raise CliExit(EXIT_USAGE, f"Token manquant: --token, ${TOKEN_ENV}, ou copie depuis le Swagger "
+                                  f"(--swagger-url / ${SWAGGER_URL_ENV})")
+    left = token_seconds_left(token)
+    if left is not None:
+        _log(f"Token récupéré, valide encore {left // 60} min.")
+    return token
+
+
+# --------------------------------------------------------------------------- #
+# TLS
 # --------------------------------------------------------------------------- #
 
 def _load_ca_cert(context: ssl.SSLContext, path: str) -> None:
@@ -415,10 +571,7 @@ def _load_ca_cert(context: ssl.SSLContext, path: str) -> None:
     if not data.strip():
         raise ValueError(f"certificat vide: {path}")
     try:
-        if b"-----BEGIN" in data:
-            context.load_verify_locations(cadata=data.decode("ascii"))
-        else:
-            context.load_verify_locations(cadata=data)
+        context.load_verify_locations(cadata=data.decode("ascii") if b"-----BEGIN" in data else data)
     except (ssl.SSLError, UnicodeDecodeError, ValueError) as exc:
         raise ValueError(f"certificat illisible: {path} ({exc})") from exc
 
@@ -447,9 +600,33 @@ def build_ssl_context(ca_certs: Iterable[str] | None = None, insecure: bool = Fa
 
 def ca_certs_from_env(value: str | None) -> list[str]:
     """Découpe $ORCHESTRATOR_CA_CERTS (séparateur os.pathsep) en liste de chemins."""
-    if not value:
-        return []
-    return [p.strip() for p in value.split(os.pathsep) if p.strip()]
+    return [p.strip() for p in (value or "").split(os.pathsep) if p.strip()]
+
+
+# --------------------------------------------------------------------------- #
+# Client HTTP
+# --------------------------------------------------------------------------- #
+
+def _quote(segment: str) -> str:
+    return urllib.parse.quote(segment, safe="")
+
+
+def _truncate(value: Any, limit: int) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    text = (value if isinstance(value, str) else json.dumps(value)).strip()
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def _try_json(raw: bytes) -> Any:
+    if not raw:
+        return None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return raw.decode("utf-8", errors="replace")
 
 
 class OrchestratorClient:
@@ -471,29 +648,21 @@ class OrchestratorClient:
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Accept": "application/json",
-        }
+        headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/json"}
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(
-                request, timeout=self.timeout, context=self._ssl_context
-            ) as response:
-                raw = response.read()
+            with urllib.request.urlopen(request, timeout=self.timeout, context=self._ssl_context) as response:
+                return _try_json(response.read())
         except urllib.error.HTTPError as exc:
             raw = exc.read()
-            payload = _try_json(raw)
-            raise OrchestratorApiError(
-                f"{method} {url} -> HTTP {exc.code}: {_short(raw)}",
-                status_code=exc.code,
-                payload=payload,
-            ) from exc
+            raise OrchestratorApiError(f"{method} {url} -> HTTP {exc.code}: {_truncate(raw, 300)}",
+                                       status_code=exc.code, payload=_try_json(raw)) from exc
         except urllib.error.URLError as exc:
             raise OrchestratorApiError(f"{method} {url} -> {exc.reason}") from exc
-        return _try_json(raw)
+
+    # --- multireader / apl ---
 
     def get_subscriptions_page(self, page: int, size: int = DEFAULT_PAGE_SIZE) -> Any:
         """GET /multireader/api/v1/subscriptions?page=<page>&size=<size>."""
@@ -512,29 +681,21 @@ class OrchestratorClient:
         rows = iterate_pages(self.get_subscriptions_page, page_size, first_page, progress=progress)
         return {"result": {"rows": filter_product(dedupe_rows(rows), product)}}
 
-    def delete_subscription(
-        self, subscription_id: str, product_branch: str = DEFAULT_PRODUCT_BRANCH
-    ) -> Any:
+    def delete_subscription(self, subscription_id: str, product_branch: str = DEFAULT_PRODUCT_BRANCH) -> Any:
         """DELETE /apl/v1/subscriptions/<id> avec {"product_branch": ..., "payload": {}}."""
-        path = f"/apl/v1/subscriptions/{urllib.parse.quote(subscription_id, safe='')}"
-        return self._request("DELETE", path, {"product_branch": product_branch, "payload": {}})
+        return self._request("DELETE", f"/apl/v1/subscriptions/{_quote(subscription_id)}",
+                             {"product_branch": product_branch, "payload": {}})
+
+    # --- demandes ---
 
     def get_demand(self, demand_id: str) -> dict[str, Any]:
         """GET /api/v1/demands/<uuid>."""
-        return self._request("GET", f"/api/v1/demands/{urllib.parse.quote(demand_id, safe='')}")
+        return self._request("GET", f"/api/v1/demands/{_quote(demand_id)}")
 
     def retry_demand(self, demand_id: str, tasks: list[str], retry_non_failed_tasks: bool = False) -> Any:
         """POST /api/v1/demands/<uuid>/retry avec {"tasks": [...], "retry_non_failed_tasks": false}."""
-        path = f"/api/v1/demands/{urllib.parse.quote(demand_id, safe='')}/retry"
-        return self._request("POST", path, {"tasks": tasks, "retry_non_failed_tasks": retry_non_failed_tasks})
-
-    # --- state_manager (mode --on-error) ---
-
-    def set_demand_status(self, demand_id: str, status: str = DECLINED_STATUS,
-                          reason: str = DEFAULT_DECLINE_REASON) -> Any:
-        """POST /state_manager/api/v1/demands/<demand_id>/status {"status": ..., "reason": ...}."""
-        path = f"{STATE_MANAGER_PREFIX}/demands/{urllib.parse.quote(demand_id, safe='')}/status"
-        return self._request("POST", path, {"status": status, "reason": reason})
+        return self._request("POST", f"/api/v1/demands/{_quote(demand_id)}/retry",
+                             {"tasks": tasks, "retry_non_failed_tasks": retry_non_failed_tasks})
 
     def retry_failed_delete(self, demand_id: str) -> list[str]:
         """GET la demande, relance ses processes en ERROR. Retourne les tasks relancées
@@ -544,19 +705,13 @@ class OrchestratorClient:
             self.retry_demand(demand_id, tasks)
         return tasks
 
+    # --- state_manager (mode --on-error) ---
 
-def _try_json(raw: bytes) -> Any:
-    if not raw:
-        return None
-    try:
-        return json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return raw.decode("utf-8", errors="replace")
-
-
-def _short(raw: bytes, limit: int = 300) -> str:
-    text = raw.decode("utf-8", errors="replace").strip()
-    return text if len(text) <= limit else text[:limit] + "..."
+    def set_demand_status(self, demand_id: str, status: str = DECLINED_STATUS,
+                          reason: str = DEFAULT_DECLINE_REASON) -> Any:
+        """POST /state_manager/api/v1/demands/<demand_id>/status {"status": ..., "reason": ...}."""
+        return self._request("POST", f"{STATE_MANAGER_PREFIX}/demands/{_quote(demand_id)}/status",
+                             {"status": status, "reason": reason})
 
 
 # --------------------------------------------------------------------------- #
@@ -565,37 +720,47 @@ def _short(raw: bytes, limit: int = 300) -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--token", default=os.environ.get("ORCHESTRATOR_TOKEN"),
-                        help="bearer token (défaut: $ORCHESTRATOR_TOKEN)")
+    auth = parser.add_argument_group("authentification")
+    auth.add_argument("--token", default=os.environ.get(TOKEN_ENV),
+                      help=f"bearer token (défaut: ${TOKEN_ENV}) ; absent ou expiré : copie depuis le Swagger")
+    auth.add_argument("--swagger-url", default=os.environ.get(SWAGGER_URL_ENV),
+                      help=f"page Swagger ouverte quand il faut un token (défaut: ${SWAGGER_URL_ENV})")
+    auth.add_argument("--print-bookmarklet", action="store_true",
+                      help="affiche le bookmarklet qui copie le token depuis le Swagger, puis quitte")
+
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--product", default=DEFAULT_PRODUCT,
-                        help=f"ne garder que les rows dont geninfo.product vaut cette valeur (défaut: {DEFAULT_PRODUCT})")
+                        help=f"filtre geninfo.product (défaut: {DEFAULT_PRODUCT})")
     parser.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE,
-                        help=f"paramètre size de la pagination (défaut: {DEFAULT_PAGE_SIZE})")
+                        help=f"taille de page du listing (défaut: {DEFAULT_PAGE_SIZE})")
     parser.add_argument("--first-page", type=int, default=DEFAULT_FIRST_PAGE,
                         help=f"numéro de la première page (défaut: {DEFAULT_FIRST_PAGE})")
     parser.add_argument("--product-branch", default=DEFAULT_PRODUCT_BRANCH,
-                        help="valeur de product_branch dans le payload DELETE")
+                        help=f"product_branch du payload DELETE (défaut: {DEFAULT_PRODUCT_BRANCH})")
     parser.add_argument("--user", default=DEFAULT_USER,
-                        help=f"ne garder que les rows dont context.user vaut cette valeur (défaut: {DEFAULT_USER})")
+                        help=f"ne garder que context.user == USER (défaut: {DEFAULT_USER})")
     parser.add_argument("--all-users", action="store_true",
-                        help="désactive le filtre sur context.user")
+                        help="pas de filtre sur context.user")
     parser.add_argument("--input", metavar="FILE",
-                        help="lire le JSON depuis un fichier au lieu d'appeler le GET")
+                        help="lit le listing depuis un fichier JSON au lieu du GET")
     parser.add_argument("--delete", action="store_true",
-                        help="exécuter réellement les DELETE (sinon: liste seulement)")
+                        help="exécute les DELETE / retry (sinon dry-run)")
     parser.add_argument("--yes", action="store_true", help="ne pas demander de confirmation")
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                        help=f"appels DELETE / retry / decline en parallèle (défaut: {DEFAULT_WORKERS})")
+
     on_error = parser.add_argument_group("mode on-error (demandes à décliner)")
     on_error.add_argument("--on-error", "--locked", action="store_true", dest="on_error",
-                          help="lister les demandes des souscriptions dont toutes les demandes sont en ON_ERROR")
+                          help="liste les demandes des souscriptions dont toutes les demandes sont en erreur")
     on_error.add_argument("--decline", action="store_true",
-                          help=f"avec --on-error : POST status={DECLINED_STATUS} sur chaque demande listée")
+                          help=f"passe ces demandes en {DECLINED_STATUS} (sinon dry-run)")
     on_error.add_argument("--reason", default=DEFAULT_DECLINE_REASON,
-                          help=f"reason envoyée avec le POST status (défaut: {DEFAULT_DECLINE_REASON!r})")
+                          help=f"raison envoyée avec le status (défaut: {DEFAULT_DECLINE_REASON!r})")
     on_error.add_argument("--subscription-status", default=None,
                           help="ne garder que les souscriptions ayant ce geninfo.status (ex: LOCKED ; défaut: tous)")
     on_error.add_argument("--demand-status", default=DEMAND_ON_ERROR_STATUS,
                           help=f"status que doivent avoir toutes les demandes (défaut: {DEMAND_ON_ERROR_STATUS})")
+
     tls = parser.add_mutually_exclusive_group()
     tls.add_argument("--ca-cert", nargs="+", metavar="FILE", dest="ca_certs",
                      default=ca_certs_from_env(os.environ.get(CA_CERTS_ENV)),
@@ -605,10 +770,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                      help="désactive la vérification TLS (dernier recours)")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--json", action="store_true", dest="as_json",
-                        help="sortie JSON (liste des subscription_id éligibles)")
+                        help="sortie JSON (liste des éléments retenus)")
+
     args = parser.parse_args(argv)
     if args.page_size < 1:
         parser.error("--page-size doit être >= 1")
+    if args.workers < 1:
+        parser.error("--workers doit être >= 1")
     if args.decline and not args.on_error:
         parser.error("--decline nécessite --on-error")
     if args.on_error and args.delete:
@@ -616,195 +784,175 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    if args.on_error:
-        return main_on_error(args)
+def _make_client(args: argparse.Namespace) -> OrchestratorClient:
+    return OrchestratorClient(args.token, args.base_url, args.timeout,
+                              insecure=args.insecure, ca_certs=args.ca_certs)
 
-    if args.input:
-        with open(args.input, encoding="utf-8") as fh:
-            body = json.load(fh)
-        client = None
-    else:
-        if not args.token:
-            print("Token manquant: --token ou $ORCHESTRATOR_TOKEN", file=sys.stderr)
-            return 1
+
+class Session:
+    """Client HTTP créé à la demande : pas de token demandé tant qu'aucun appel
+    réseau n'est nécessaire (--input en dry-run)."""
+
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self._client: OrchestratorClient | None = None
+
+    @property
+    def client(self) -> OrchestratorClient:
+        if self._client is None:
+            self.args.token = resolve_token(self.args.token, self.args.swagger_url)
+            try:
+                self._client = _make_client(self.args)
+            except (OSError, ValueError) as exc:
+                raise CliExit(EXIT_USAGE, f"Certificat CA invalide: {exc}") from exc
+        return self._client
+
+    def load_rows(self) -> list[Row]:
+        """Listing des souscriptions : fichier --input, sinon GET paginé."""
+        if self.args.input:
+            with open(self.args.input, encoding="utf-8") as fh:
+                return extract_rows(json.load(fh))
         try:
-            client = _make_client(args)
-        except (OSError, ValueError) as exc:
-            print(f"Certificat CA invalide: {exc}", file=sys.stderr)
-            return 1
-        try:
-            body = _fetch_all_subscriptions(client, args)
+            body = self.client.get_subscriptions(
+                self.args.product, self.args.page_size, self.args.first_page,
+                lambda page, count: _log(f"page {page}: {count} row(s)"))
         except OrchestratorApiError as exc:
-            print(f"GET échoué: {exc}", file=sys.stderr)
+            hint = ""
             if "CERTIFICATE_VERIFY_FAILED" in str(exc):
-                print(f"Astuce: passer le CA interne avec --ca-cert <fichier.cer> (ou ${CA_CERTS_ENV}).",
-                      file=sys.stderr)
-            return 2
+                hint = f"\nAstuce: passer le CA interne avec --ca-cert <fichier.cer> (ou ${CA_CERTS_ENV})."
+            raise CliExit(EXIT_GET_FAILED, f"GET échoué: {exc}{hint}") from exc
+        return extract_rows(body)
 
+
+def _confirm(question: str) -> bool:
+    return input(f"\n{question} [y/N] ").strip().lower() in ("y", "yes", "o", "oui")
+
+
+def _run_all(items: Sequence[T], action: Callable[[T], bool], workers: int) -> int:
+    """Exécute action sur chaque élément (en parallèle si workers > 1) et
+    retourne le nombre d'échecs. Les résultats restent dans l'ordre des items."""
+    if workers <= 1 or len(items) <= 1:
+        results = [action(item) for item in items]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(action, items))
+    return results.count(False)
+
+
+def run_cleanup(args: argparse.Namespace, session: Session, rows: list[Row]) -> int:
+    """Mode delete : DELETE des souscriptions éligibles, retry des deletes en échec."""
     user_filter = None if args.all_users else args.user
-    total_rows = len(extract_rows(body))
-    eligible = find_eligible_subscriptions(body, user_filter)
+    eligible = find_eligible_subscriptions({"result": {"rows": rows}}, user_filter)
 
     if args.as_json and not args.delete:
         print(json.dumps([s.subscription_id for s in eligible], indent=2))
-        return 0
+        return EXIT_OK
 
     scope = "tous users" if user_filter is None else f"user={user_filter}"
-    to_retry = [s for s in eligible if s.needs_retry]
-    to_delete = [s for s in eligible if not s.needs_retry]
-    print(f"{total_rows} souscription(s) lue(s), {len(eligible)} éligible(s) ({scope}): "
-          f"{len(to_delete)} à supprimer, {len(to_retry)} delete à relancer")
+    retry_count = sum(s.needs_retry for s in eligible)
+    print(f"{len(rows)} souscription(s) lue(s), {len(eligible)} éligible(s) ({scope}): "
+          f"{len(eligible) - retry_count} à supprimer, {retry_count} delete à relancer")
     for sub in eligible:
         plan = f"RETRY {','.join(sub.failed_delete_demand_ids)}" if sub.needs_retry else "DELETE"
         print(f"  {sub.subscription_id}  {sub.name:<16} {sub.user:<12} {sub.environment:<5} {sub.region:<7} "
               f"{sub.status:<12} demands={','.join(sub.actions)}  -> {plan}")
 
-    if not args.delete or not eligible:
-        if eligible and not args.delete:
-            print("\nDry-run: relancer avec --delete pour exécuter.")
-        return 0
+    if not eligible:
+        return EXIT_OK
+    if not args.delete:
+        print("\nDry-run: relancer avec --delete pour exécuter.")
+        return EXIT_OK
+    client = session.client
+    if not args.yes and not _confirm(f"Exécuter {len(eligible) - retry_count} DELETE et {retry_count} retry ?"):
+        print("Annulé.")
+        return EXIT_OK
 
-    if client is None:
-        if not args.token:
-            print("Token manquant pour les DELETE/retry: --token ou $ORCHESTRATOR_TOKEN", file=sys.stderr)
-            return 1
-        try:
-            client = _make_client(args)
-        except (OSError, ValueError) as exc:
-            print(f"Certificat CA invalide: {exc}", file=sys.stderr)
-            return 1
-
-    if not args.yes:
-        answer = input(f"\nExécuter {len(to_delete)} DELETE et {len(to_retry)} retry ? [y/N] ").strip().lower()
-        if answer not in ("y", "yes", "o", "oui"):
-            print("Annulé.")
-            return 0
-
-    failures = 0
-    for sub in eligible:
+    def process(sub: Subscription) -> bool:
         if sub.needs_retry:
-            for demand_id in sub.failed_delete_demand_ids:
-                try:
-                    tasks = client.retry_failed_delete(demand_id)
-                except OrchestratorApiError as exc:
-                    failures += 1
-                    print(f"RETRY {demand_id} ({sub.name}) -> ERREUR {exc}", file=sys.stderr)
-                    continue
-                if tasks:
-                    print(f"RETRY {demand_id} ({sub.name}) -> OK tasks={','.join(tasks)}")
-                else:
-                    print(f"RETRY {demand_id} ({sub.name}) -> ignoré, aucun process en {PROCESS_ERROR_STATUS}")
-            continue
+            return all([retry(sub, demand_id) for demand_id in sub.failed_delete_demand_ids])
         try:
             response = client.delete_subscription(sub.subscription_id, args.product_branch)
-            print(f"DELETE {sub.subscription_id} ({sub.name}) -> OK {_summ(response)}")
         except OrchestratorApiError as exc:
-            failures += 1
-            print(f"DELETE {sub.subscription_id} ({sub.name}) -> ERREUR {exc}", file=sys.stderr)
+            _log(f"DELETE {sub.subscription_id} ({sub.name}) -> ERREUR {exc}")
+            return False
+        print(f"DELETE {sub.subscription_id} ({sub.name}) -> OK {_truncate(response, 120)}")
+        return True
 
+    def retry(sub: Subscription, demand_id: str) -> bool:
+        try:
+            tasks = client.retry_failed_delete(demand_id)
+        except OrchestratorApiError as exc:
+            _log(f"RETRY {demand_id} ({sub.name}) -> ERREUR {exc}")
+            return False
+        outcome = f"OK tasks={','.join(tasks)}" if tasks else f"ignoré, aucun process en {PROCESS_ERROR_STATUS}"
+        print(f"RETRY {demand_id} ({sub.name}) -> {outcome}")
+        return True
+
+    failures = _run_all(eligible, process, args.workers)
     print(f"\n{len(eligible) - failures} traitée(s), {failures} en échec.")
-    return 3 if failures else 0
+    return EXIT_ACTION_FAILED if failures else EXIT_OK
 
 
-def main_on_error(args: argparse.Namespace) -> int:
+def run_on_error(args: argparse.Namespace, session: Session, rows: list[Row]) -> int:
     """Mode --on-error : liste (et avec --decline, décline) les demandes des
     souscriptions dont toutes les demandes sont en ON_ERROR."""
-    client: OrchestratorClient | None = None
-    if args.input:
-        with open(args.input, encoding="utf-8") as fh:
-            body = json.load(fh)
-    else:
-        if not args.token:
-            print("Token manquant: --token ou $ORCHESTRATOR_TOKEN", file=sys.stderr)
-            return 1
-        try:
-            client = _make_client(args)
-        except (OSError, ValueError) as exc:
-            print(f"Certificat CA invalide: {exc}", file=sys.stderr)
-            return 1
-        try:
-            body = _fetch_all_subscriptions(client, args)
-        except OrchestratorApiError as exc:
-            print(f"GET échoué: {exc}", file=sys.stderr)
-            if "CERTIFICATE_VERIFY_FAILED" in str(exc):
-                print(f"Astuce: passer le CA interne avec --ca-cert <fichier.cer> (ou ${CA_CERTS_ENV}).",
-                      file=sys.stderr)
-            return 2
-
     user_filter = None if args.all_users else args.user
-    subscriptions = extract_rows(body)
-    demands = find_error_demands(subscriptions, user_filter, args.demand_status, args.subscription_status)
-    eligible_subs = {d.subscription_id for d in demands}
+    demands = find_error_demands(rows, user_filter, args.demand_status, args.subscription_status)
 
     if args.as_json and not args.decline:
         print(json.dumps([{"subscription_id": d.subscription_id, "demand_id": d.demand_id,
                            "action": d.action, "status": d.status} for d in demands], indent=2))
-        return 0
+        return EXIT_OK
 
     scope = "tous users" if user_filter is None else f"user={user_filter}"
     if args.subscription_status:
         scope += f", status={args.subscription_status}"
-    print(f"{len(subscriptions)} souscription(s) lue(s) ({scope}) : {len(eligible_subs)} avec toutes leurs "
+    subscription_count = len({d.subscription_id for d in demands})
+    print(f"{len(rows)} souscription(s) lue(s) ({scope}) : {subscription_count} avec toutes leurs "
           f"demandes en {args.demand_status}, {len(demands)} demande(s) à passer en {DECLINED_STATUS}")
     for d in demands:
         print(f"  {d.subscription_id}  {d.subscription_name:<16} {d.user:<12} "
               f"demand={d.demand_id} {d.action:<12} {d.status:<10} {d.create_date}"
               f"  -> {DECLINED_STATUS} ({args.reason})")
 
-    if not args.decline or not demands:
-        if demands and not args.decline:
-            print("\nDry-run: relancer avec --on-error --decline pour exécuter.")
-        return 0
+    if not demands:
+        return EXIT_OK
+    if not args.decline:
+        print("\nDry-run: relancer avec --on-error --decline pour exécuter.")
+        return EXIT_OK
+    client = session.client
+    if not args.yes and not _confirm(f"Passer {len(demands)} demande(s) en {DECLINED_STATUS} ?"):
+        print("Annulé.")
+        return EXIT_OK
 
-    if client is None:
-        if not args.token:
-            print("Token manquant pour les POST status: --token ou $ORCHESTRATOR_TOKEN", file=sys.stderr)
-            return 1
-        try:
-            client = _make_client(args)
-        except (OSError, ValueError) as exc:
-            print(f"Certificat CA invalide: {exc}", file=sys.stderr)
-            return 1
-
-    if not args.yes:
-        answer = input(f"\nPasser {len(demands)} demande(s) en {DECLINED_STATUS} ? [y/N] ").strip().lower()
-        if answer not in ("y", "yes", "o", "oui"):
-            print("Annulé.")
-            return 0
-
-    failures = 0
-    for d in demands:
+    def decline(d: ErrorDemand) -> bool:
         label = d.subscription_name or d.subscription_id
         try:
             response = client.set_demand_status(d.demand_id, DECLINED_STATUS, args.reason)
-            print(f"DECLINE {d.demand_id} ({label}) -> OK {_summ(response)}")
         except OrchestratorApiError as exc:
-            failures += 1
-            print(f"DECLINE {d.demand_id} ({label}) -> ERREUR {exc}", file=sys.stderr)
+            _log(f"DECLINE {d.demand_id} ({label}) -> ERREUR {exc}")
+            return False
+        print(f"DECLINE {d.demand_id} ({label}) -> OK {_truncate(response, 120)}")
+        return True
 
+    failures = _run_all(demands, decline, args.workers)
     print(f"\n{len(demands) - failures} déclinée(s), {failures} en échec.")
-    return 3 if failures else 0
+    return EXIT_ACTION_FAILED if failures else EXIT_OK
 
 
-def _fetch_all_subscriptions(client: OrchestratorClient, args: argparse.Namespace) -> dict[str, Any]:
-    def progress(page: int, count: int) -> None:
-        print(f"page {page}: {count} row(s)", file=sys.stderr)
-
-    return client.get_subscriptions(args.product, args.page_size, args.first_page, progress)
-
-
-def _make_client(args: argparse.Namespace) -> OrchestratorClient:
-    return OrchestratorClient(args.token, args.base_url, args.timeout,
-                              insecure=args.insecure, ca_certs=args.ca_certs)
-
-
-def _summ(response: Any) -> str:
-    if response is None:
-        return ""
-    text = response if isinstance(response, str) else json.dumps(response)
-    return text if len(text) <= 120 else text[:120] + "..."
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.print_bookmarklet:
+        print(BOOKMARKLET)
+        return EXIT_OK
+    session = Session(args)
+    try:
+        rows = session.load_rows()
+        return (run_on_error if args.on_error else run_cleanup)(args, session, rows)
+    except CliExit as exc:
+        if str(exc):
+            _log(str(exc))
+        return exc.code
 
 
 if __name__ == "__main__":
