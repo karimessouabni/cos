@@ -408,6 +408,14 @@ souscriptions éligibles ou relance des demandes de suppression en erreur, et un
 `--on-error` qui décline les demandes bloquées. Dry-run par défaut, `--delete` ou `--decline`
 pour agir. Le mode d'emploi complet est dans l'en-tête du script.
 
+`tests/toolchain_tests/toolchain_env.py` prépare l'environnement des tests Terraform de
+la toolchain (provider `orchestrator`) : `terraform login` et `terraform init` s'ils n'ont
+pas déjà été faits, token Vault récupéré dans un Chrome en navigation privée (login SSO)
+ou réutilisé s'il est encore valide, lecture de l'API key IBM Cloud dans Vault, puis
+export de `IBM_CLOUD_API_KEY` et `ORCHESTRATOR_IBMCLOUD_API_KEY`. `--run plan` /
+`--run apply` enchaînent directement terraform ; `eval "$(python toolchain_env.py --env int)"`
+exporte les variables dans le shell courant. Voir `tests/toolchain_tests/README.md`.
+
 ## 11. Organisation du dépôt
 
 ```
@@ -429,6 +437,7 @@ cos_service/
 terraform/                  Terraform exécuté par Schematics (bucket, backup vault) + README
 cos-subscriptions/          script de nettoyage des souscriptions
 tests/                      tests unitaires exécutables hors plateforme
+tests/toolchain_tests/      tests Terraform de la toolchain (<env>/*.tf) + toolchain_env.py
 docs/adr/                   décisions d'architecture
 ```
 

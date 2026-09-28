@@ -10,6 +10,10 @@ cos/
 ├── cos-subscriptions/
 │   ├── subscriptions_cleanup.py      ← nettoyage des souscriptions orchestrator (--delete, --on-error)
 │   └── test_subscriptions_cleanup.py
+├── tests/toolchain_tests/
+│   ├── toolchain_env.py              ← prépare l'env Terraform toolchain (login, init, token Vault, API key)
+│   ├── test_toolchain_env.py
+│   └── <int|qual|pprod|prod>/        ← fichiers .tf des tests (provider orchestrator), non versionnés ici
 ├── cos_service/
 │   ├── __init__.py
 │   ├── dags/

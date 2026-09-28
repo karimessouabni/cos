@@ -9,3 +9,9 @@ __pycache__/
 .coverage.*
 htmlcov/
 coverage.xml
+
+# terraform (tests toolchain)
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
