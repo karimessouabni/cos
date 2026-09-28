@@ -38,7 +38,8 @@ TOUTES les demandes sont en ON_ERROR.
 Token
     export ORCHESTRATOR_TOKEN=...            # ou --token
 Sans token valide (absent ou JWT expiré), le script ouvre le Swagger
-(--swagger-url / $ORCHESTRATOR_SWAGGER_URL) : on s'y connecte en SSO, on copie
+(--swagger-url, $ORCHESTRATOR_SWAGGER_URL ou DEFAULT_SWAGGER_URL en tête du
+script) : on s'y connecte en SSO, on copie
 le token, puis Entrée : il est lu dans le presse-papiers (ou collé au prompt).
 Pour copier le token en un clic depuis le Swagger, mettre en favori le
 bookmarklet affiché par --print-bookmarklet.
@@ -91,6 +92,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Sequence, TypeVar
 
 DEFAULT_BASE_URL = "https://orchestrator-gw.int.staging.echonet"
+# Page Swagger ouverte dans le navigateur quand il faut un token : mettre ici son URL.
+DEFAULT_SWAGGER_URL = ""
 DEFAULT_PRODUCT = "cos.bucket"
 DEFAULT_PRODUCT_BRANCH = "main"
 DEFAULT_USER = "h90871"
@@ -731,8 +734,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     auth = parser.add_argument_group("authentification")
     auth.add_argument("--token", default=os.environ.get(TOKEN_ENV),
                       help=f"bearer token (défaut: ${TOKEN_ENV}) ; absent ou expiré : copie depuis le Swagger")
-    auth.add_argument("--swagger-url", default=os.environ.get(SWAGGER_URL_ENV),
-                      help=f"page Swagger ouverte quand il faut un token (défaut: ${SWAGGER_URL_ENV})")
+    auth.add_argument("--swagger-url", default=os.environ.get(SWAGGER_URL_ENV) or DEFAULT_SWAGGER_URL,
+                      help="page Swagger ouverte quand il faut un token "
+                           f"(défaut: ${SWAGGER_URL_ENV}, sinon DEFAULT_SWAGGER_URL dans le script)")
     auth.add_argument("--print-bookmarklet", action="store_true",
                       help="affiche le bookmarklet qui copie le token depuis le Swagger, puis quitte")
 
