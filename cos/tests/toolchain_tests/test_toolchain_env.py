@@ -299,23 +299,45 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(te.with_no_proxy(proxy, "")["no_proxy"], "localhost,.echonet")
         self.assertEqual(te.with_no_proxy({}, "https://s02:1"), {})
 
+    def _opener(self, side_effect):
+        opener = mock.Mock()
+        opener.open = mock.Mock(side_effect=side_effect)
+        return mock.patch.object(te.urllib.request, "build_opener", return_value=opener)
+
     def test_check_proxy(self):
         proxy = {"http_proxy": "http://u:p@px:1", "https_proxy": "http://u:p@px:1", "no_proxy": ""}
         import urllib.error
-        te.check_proxy({})  # aucun proxy : rien à vérifier
-        with mock.patch.object(te.urllib.request, "urlopen", side_effect=urllib.error.HTTPError(
-                "u", 407, "authenticationrequired", {}, None)), self.assertRaises(te.CliExit) as ctx:
-            te.check_proxy(proxy)
+        self.assertEqual(te.check_proxy({}), "")  # aucun proxy : rien à vérifier
+        with self._opener(urllib.error.HTTPError("u", 407, "authenticationrequired", {}, None)):
+            self.assertIn("identifiants refusés", te.check_proxy(proxy))
+        with self._opener(urllib.error.HTTPError("u", 405, "Method Not Allowed", {}, None)):
+            self.assertEqual(te.check_proxy(proxy), "")  # le proxy laisse passer
+        with self._opener(urllib.error.URLError("Tunnel connection failed: 503 Service Unavailable")):
+            self.assertIn("503", te.check_proxy(proxy))
+        with self._opener(urllib.error.URLError("Tunnel connection failed: 407 authenticationrequired")):
+            self.assertIn("identifiants refusés", te.check_proxy(proxy))
+
+    def test_dead_shell_proxy_falls_back_to_corporate_proxy(self):
+        environ = {"https_proxy": "http://127.0.0.1:8079"}
+        checks = {"http://127.0.0.1:8079": "Tunnel connection failed: 503 Service Unavailable"}
+        with mock.patch.dict(os.environ, environ, clear=False), mock.patch.object(sys.stdin, "isatty", return_value=True):
+            proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: "h90871", ask_secret=lambda q: "pw",
+                                               check=lambda pv: checks.get(pv["https_proxy"], ""))
+        self.assertEqual(proxy["https_proxy"], f"http://h90871:pw@{te.DEFAULT_PROXY}")
+
+    def test_shell_proxy_kept_when_it_works(self):
+        with mock.patch.dict(os.environ, {"https_proxy": "http://ok:1"}, clear=False):
+            proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: self.fail("prompt"),
+                                               ask_secret=lambda q: self.fail("prompt"), check=lambda pv: "")
+        self.assertEqual(proxy["https_proxy"], "http://ok:1")
+
+    def test_rejected_credentials_stop(self):
+        args = te.parse_args(["--proxy-user", "u", "--proxy-password", "p"])
+        with mock.patch.dict(os.environ, {}, clear=False), self.assertRaises(te.CliExit) as ctx:
+            os.environ.pop("https_proxy", None); os.environ.pop("HTTPS_PROXY", None)
+            te.resolve_and_check_proxy(args, check=lambda pv: "identifiants refusés (HTTP 407)")
         self.assertIn("identifiants refusés", str(ctx.exception))
         self.assertNotIn(":p@", str(ctx.exception))
-        with mock.patch.object(te.urllib.request, "urlopen", side_effect=urllib.error.HTTPError(
-                "u", 405, "Method Not Allowed", {}, None)):
-            te.check_proxy(proxy)  # le proxy laisse passer : pas d'erreur
-        with mock.patch.object(te.urllib.request, "urlopen", side_effect=urllib.error.URLError("timed out")):
-            te.check_proxy(proxy)  # injoignable : avertissement seulement
-        with mock.patch.object(te.urllib.request, "urlopen", side_effect=urllib.error.URLError(
-                "Tunnel connection failed: 407 authenticationrequired")), self.assertRaises(te.CliExit):
-            te.check_proxy(proxy)
 
     def test_apply_proxy_sets_process_env(self):
         with mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://x", "no_proxy": "old"}, clear=False):

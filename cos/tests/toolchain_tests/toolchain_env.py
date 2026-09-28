@@ -833,21 +833,24 @@ def proxy_url(host_port: str, user: str, password: str) -> str:
 
 def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
                   ask_secret: Callable[[str], str] = getpass.getpass,
-                  environ: dict[str, str] | None = None) -> dict[str, str]:
+                  environ: dict[str, str] | None = None, ignore_shell: bool = False) -> dict[str, str]:
     """Variables http_proxy / https_proxy / no_proxy à utiliser : rien avec
     --no-proxy ; celles déjà exportées dans le shell si --proxy n'est pas passé
     explicitement ; sinon le proxy d'entreprise avec le user (--proxy-user,
     $PROXY_USER, mémorisé, ou demandé) et le mot de passe (--proxy-password,
     $PROXY_PASSWORD, ou demandé sans écho, jamais sauvegardé)."""
     environ = os.environ if environ is None else environ
+    args.proxy_origin = "none"
     if args.no_proxy:
         return {}
     existing = environ.get("https_proxy") or environ.get("HTTPS_PROXY")
-    if existing and not args.proxy_from_cli:
-        _log(f"Proxy déjà exporté dans le shell, réutilisé : {mask_url(existing)}")
+    if existing and not args.proxy_from_cli and not ignore_shell:
+        _log(f"Proxy déjà exporté dans le shell, réutilisé : {mask_url(existing)} (--proxy pour l'ignorer)")
+        args.proxy_origin = "shell"
         return {"http_proxy": environ.get("http_proxy") or environ.get("HTTP_PROXY") or existing,
                 "https_proxy": existing,
                 "no_proxy": environ.get("no_proxy") or environ.get("NO_PROXY") or args.no_proxy_hosts}
+    args.proxy_origin = "asked"
     user = args.proxy_user or load_setting("proxy_user")
     password = args.proxy_password
     if not user or not password:
@@ -891,29 +894,52 @@ def apply_proxy(proxy_vars: dict[str, str]) -> None:
             os.environ.pop(name, None)
 
 
-def check_proxy(proxy_vars: dict[str, str], url: str = PROXY_CHECK_URL, timeout: int = 15) -> None:
-    """Vérifie que le proxy laisse passer vers `url` : 407 = user / mot de passe
-    refusés (CliExit) ; les autres erreurs réseau ne sont que signalées."""
+def check_proxy(proxy_vars: dict[str, str], url: str = PROXY_CHECK_URL, timeout: int = 15) -> str:
+    """Vérifie que le proxy laisse passer vers `url`. Retourne "" si oui, sinon
+    la raison ("identifiants refusés" pour un 407, ou l'erreur réseau)."""
     if not proxy_vars:
-        return
+        return ""
     request = urllib.request.Request(url, method="HEAD")
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({"https": proxy_vars["https_proxy"], "http": proxy_vars["http_proxy"]}),
+        urllib.request.HTTPSHandler(context=insecure_ssl_context()))
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=insecure_ssl_context()):
+        with opener.open(request, timeout=timeout):
             pass
     except urllib.error.HTTPError as exc:
         if exc.code == 407:
-            raise CliExit(EXIT_USAGE, f"proxy {mask_url(proxy_vars['https_proxy'])} : identifiants refusés "
-                                      f"(HTTP 407 {exc.reason}). Vérifier le user et le mot de passe "
-                                      "(--proxy-user / --proxy-password), ou le compte bloqué.")
+            return f"identifiants refusés (HTTP 407 {exc.reason})"
         _log(f"Proxy OK ({url} répond HTTP {exc.code}).")
     except (urllib.error.URLError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
         if "407" in str(reason) or "authenticationrequired" in str(reason).lower():
-            raise CliExit(EXIT_USAGE, f"proxy {mask_url(proxy_vars['https_proxy'])} : identifiants refusés "
-                                      f"({reason}). Vérifier le user et le mot de passe.")
-        _log(f"Proxy non vérifié ({url} : {reason}) ; terraform échouera si le proxy refuse.")
+            return f"identifiants refusés ({reason})"
+        return f"{url} injoignable via ce proxy : {reason}"
     else:
         _log(f"Proxy OK ({url} joignable).")
+    return ""
+
+
+def resolve_and_check_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
+                            ask_secret: Callable[[str], str] = getpass.getpass,
+                            check: Callable[[dict[str, str]], str] = check_proxy) -> dict[str, str]:
+    """resolve_proxy + vérification. Un proxy repris du shell qui ne répond pas
+    (proxy local arrêté, 503...) est abandonné au profit du proxy d'entreprise
+    avec identifiants ; des identifiants refusés (407) arrêtent le script."""
+    proxy_vars = resolve_proxy(args, ask, ask_secret)
+    if not proxy_vars or args.skip_proxy_check:
+        return proxy_vars
+    problem = check(proxy_vars)
+    if problem and args.proxy_origin == "shell":
+        _log(f"Proxy du shell inutilisable ({problem}) : passage au proxy {args.proxy} avec identifiants.")
+        proxy_vars = resolve_proxy(args, ask, ask_secret, ignore_shell=True)
+        problem = check(proxy_vars)
+    if problem:
+        if "identifiants refusés" in problem:
+            raise CliExit(EXIT_USAGE, f"proxy {mask_url(proxy_vars['https_proxy'])} : {problem}. Vérifier le user "
+                                      "et le mot de passe (--proxy-user / --proxy-password), ou le compte bloqué.")
+        _log(f"Proxy non vérifié ({problem}) ; terraform échouera si le proxy refuse.")
+    return proxy_vars
 
 
 def build_env_vars(api_key: str, tf_log: str | None = None,
@@ -1228,12 +1254,10 @@ def prepare(args: argparse.Namespace, acquire: Callable[[str], str] | None = Non
         ensure_terraform_login(args.terraform_host, args.dir, run)
     if not args.skip_init:
         ensure_terraform_init(args.dir, args.reinit, run)
-    proxy_vars = with_no_proxy(resolve_proxy(args), args.token_service)
+    proxy_vars = with_no_proxy(resolve_and_check_proxy(args), args.token_service)
     apply_proxy(proxy_vars)
     if proxy_vars:
         _log(f"Proxy : {mask_url(proxy_vars['https_proxy'])}  no_proxy : {proxy_vars['no_proxy']}")
-        if not args.skip_proxy_check:
-            check_proxy(proxy_vars)
     client = VaultClient(args.vault_url, args.namespace, args.timeout, args.verify_tls)
     try:
         api_key = resolve_api_key(args, client, acquire)
@@ -1251,7 +1275,7 @@ def probe(args: argparse.Namespace) -> int:
     host, port = parts.hostname or "", parts.port or 443
     _log(f"Service token : {args.token_service}\nSondage TCP :\n  " + "\n  ".join(tcp_probe(host, port)))
     try:
-        proxy_vars = with_no_proxy(resolve_proxy(args), args.token_service)
+        proxy_vars = with_no_proxy(resolve_and_check_proxy(args), args.token_service)
         apply_proxy(proxy_vars)
         token = service_token(args.token_service, resolve_uid(args), args.namespace, args.timeout, args.verify_tls)
     except CliExit as exc:

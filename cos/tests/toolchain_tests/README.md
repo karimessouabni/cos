@@ -17,7 +17,7 @@ ne refait que ce qui est nécessaire :
 |---|---|
 | `terraform login <artifactory>` | un credential est déjà dans `~/.terraform.d/credentials.tfrc.json` (ou `TF_TOKEN_…`) |
 | `terraform init` | `.terraform/` existe déjà dans le dossier (`--reinit` pour forcer) |
-| proxy `http://<user>:<mdp>@ncproxy.fr.net.intra:8080` (user et mot de passe demandés, puis testés sur `iam.cloud.ibm.com` : 407 = refusés) | `https_proxy` est déjà exporté dans le shell, ou `--no-proxy` |
+| proxy `http://<user>:<mdp>@ncproxy.fr.net.intra:8080` (user et mot de passe demandés, puis testés sur `iam.cloud.ibm.com` : 407 = refusés) | `https_proxy` est déjà exporté dans le shell et répond (sinon ncproxy est demandé), ou `--no-proxy` |
 | token Vault : `GET <service token>/v1/token/<uid>?namespace=AP85135` → `auth.client_token` | le token sauvegardé est encore accepté (`lookup-self`), ou `$VAULT_TOKEN` / `--vault-token` |
 | `GET <vault>/v1/ibm_<compte>/creds/<rôle>_buhub` | l'API key sauvegardée a encore un lease valide |
 | export des variables | jamais |
