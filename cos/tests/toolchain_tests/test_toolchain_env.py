@@ -134,7 +134,9 @@ class EnvVarsTest(unittest.TestCase):
         self.assertEqual(variables["ORCHESTRATOR_IBMCLOUD_API_KEY"], "k'1")
         self.assertEqual(variables["TF_LOG"], "debug")
         self.assertEqual(variables["https_proxy"], "http://u:p@ncproxy:8080")
+        self.assertEqual(variables["HTTPS_PROXY"], "http://u:p@ncproxy:8080")
         self.assertEqual(variables["no_proxy"], te.DEFAULT_NO_PROXY)
+        self.assertEqual(variables["NO_PROXY"], te.DEFAULT_NO_PROXY)
         lines = te.export_lines(variables)
         self.assertIn("export IBM_CLOUD_API_KEY='k'\"'\"'1'\n", lines)
         self.assertIn("export TF_LOG=debug\n", lines)
@@ -560,6 +562,7 @@ class MainTest(VaultServerTest):
         self.assertEqual(code, 0)  # no_proxy=127.0.0.1 : le faux Vault est joint sans passer par le proxy
         variables = json.loads(out.getvalue())
         self.assertEqual(variables["https_proxy"], "http://u:p%21@127.0.0.1:9")
+        self.assertEqual(variables["HTTP_PROXY"], "http://u:p%21@127.0.0.1:9")
         self.assertEqual(variables["no_proxy"], "127.0.0.1")
 
     def test_run_plan(self):

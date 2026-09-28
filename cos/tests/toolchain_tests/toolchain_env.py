@@ -28,7 +28,8 @@ main avant un `terraform plan` est enchaîné par le script.
                                      (X-Vault-Namespace: AP85135) ; la clé est
                                      gardée tant que son lease est valide
 6. variables d'environnement         IBM_CLOUD_API_KEY, ORCHESTRATOR_IBMCLOUD_API_KEY,
-                                     http_proxy / https_proxy / no_proxy (+ TF_LOG)
+                                     http_proxy / https_proxy / no_proxy en
+                                     minuscules et en MAJUSCULES (+ TF_LOG)
 
 Utilisation
     # dans le shell courant : exporte les variables puis terraform plan/apply
@@ -824,7 +825,12 @@ def build_env_vars(api_key: str, tf_log: str | None = None,
     variables = {name: api_key for name in API_KEY_VARS}
     if tf_log:
         variables["TF_LOG"] = tf_log
-    variables.update(proxy_vars or {})
+    # terraform (Go) lit HTTPS_PROXY avant https_proxy, curl l'inverse : on
+    # exporte les deux casses pour qu'une variable en majuscules déjà présente
+    # dans le shell (souvent sans identifiants) ne prenne pas le dessus.
+    for name, value in (proxy_vars or {}).items():
+        variables[name] = value
+        variables[name.upper()] = value
     return variables
 
 
