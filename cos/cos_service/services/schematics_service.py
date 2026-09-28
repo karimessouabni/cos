@@ -9,6 +9,7 @@ ci-dessous sont déduits des symboles utilisés (``SchematicsBackend``, ``VCS``,
 """
 import logging
 import os
+from pathlib import Path
 from typing import NamedTuple
 
 from bp2i_airflow_library.config import OrchestratorEnvironment
@@ -47,12 +48,17 @@ DEFAULT_TF_LOG = {
     OrchestratorEnvironment.PREPROD.value: "INFO",
     OrchestratorEnvironment.PROD.value: "ERROR",
 }
-# Surcharges, lues à chaque appel (jamais à l'import), dans cet ordre :
-# 1. Airflow Variable du même nom (interface Airflow de l'environnement, sans
-#    redéploiement : par exemple `cos_tf_branch = feature/xxx` sur l'INT le
-#    temps de tester une branche non fusionnée) ;
-# 2. variable d'environnement en majuscules (COS_TF_BRANCH, COS_TF_LOG_LEVEL) ;
-# 3. défaut de l'environnement ci-dessus.
+# Règle première : Schematics clone LA BRANCHE SUR LAQUELLE LE DAG TOURNE.
+# L'orchestrateur exécute le code du produit sur la branche donnée à la
+# gateway (``product_branch``) ; le DAG et son Terraform vivent dans le même
+# dépôt, ils doivent être à la même version. Voir docs/adr/0002.
+# Ordre de résolution de la branche, à chaque appel (jamais à l'import) :
+# 1. ``product_branch`` de la demande (current_product_branch) ;
+# 2. Airflow Variable `cos_tf_branch` (roue de secours, INT seulement) ;
+# 3. variable d'environnement COS_TF_BRANCH ;
+# 4. défaut de l'environnement ci-dessus.
+# En pprod et prod, toute branche autre que celle de l'environnement est
+# refusée avant tout appel Schematics.
 BRANCH_SETTING = "cos_tf_branch"
 TF_LOG_SETTING = "cos_tf_log_level"
 
@@ -77,20 +83,64 @@ def _setting(name: str, default: str) -> str:
         return fallback
 
 
-def settings_for(orchestrator_env) -> EnvSettings:
+def product_branch_of(subscription) -> str | None:
+    """``product_branch`` porté par la souscription / demande en cours, si l'orchestrateur l'expose."""
+    if subscription is None:
+        return None
+    value = getattr(subscription, "product_branch", None)
+    if value is None and isinstance(subscription, dict):
+        value = subscription.get("product_branch")
+    return value if isinstance(value, str) and value else None
+
+
+def checkout_branch(start: Path | None = None) -> str | None:
+    """Branche du checkout git qui contient ce code, si l'orchestrateur a cloné avec ``.git``.
+
+    None si aucun ``.git`` n'est trouvé ou si HEAD est détaché (clone par commit).
+    """
+    here = (start or Path(__file__)).resolve()
+    for parent in (here, *here.parents):
+        head = parent / ".git" / "HEAD"
+        if head.is_file():
+            ref = head.read_text().strip()
+            return ref.removeprefix("ref: refs/heads/") if ref.startswith("ref: refs/heads/") else None
+    return None
+
+
+def current_product_branch(state_manager=None) -> str | None:
+    """Branche de la demande en cours : la souscription d'abord, sinon le checkout."""
+    subscription = None
+    if state_manager is not None:
+        try:
+            subscription = state_manager.get_subscription()
+        except Exception as exc:  # pas de souscription accessible : on retombe sur le checkout
+            logger.warning("could not read the subscription to find its product branch: %s", exc)
+    return product_branch_of(subscription) or checkout_branch()
+
+
+def settings_for(orchestrator_env, product_branch: str | None = None) -> EnvSettings:
     """Tags, branche Terraform et TF_LOG d'un environnement (enum ou sa valeur).
 
-    Lève une ``ValueError`` explicite sur un environnement inconnu au lieu
-    d'envoyer une branche vide à Schematics.
+    ``product_branch`` est la branche sur laquelle le DAG tourne : Schematics
+    clone la même. Sans elle, les surcharges puis le défaut de l'environnement
+    s'appliquent. Lève une ``ValueError`` explicite sur un environnement
+    inconnu, et en pprod/prod sur une branche autre que celle de
+    l'environnement, au lieu d'envoyer une mauvaise branche à Schematics.
     """
     key = getattr(orchestrator_env, "value", orchestrator_env)
     if key not in DEFAULT_BRANCHES:
         raise ValueError(
             f"Unknown orchestrator environment '{key}', expected one of {sorted(DEFAULT_BRANCHES)}"
         )
+    expected = DEFAULT_BRANCHES[key]
+    branch = product_branch or _setting(BRANCH_SETTING, expected)
+    if key != OrchestratorEnvironment.INT.value and branch != expected:
+        raise ValueError(
+            f"Environment '{key}' only runs Terraform from branch '{expected}', got '{branch}'"
+        )
     return EnvSettings(
         tags=[ENV_TAGS[key], "agent:ga", "version:1.0"],
-        branch=_setting(BRANCH_SETTING, DEFAULT_BRANCHES[key]),
+        branch=branch,
         tf_log=_setting(TF_LOG_SETTING, DEFAULT_TF_LOG[key]),
     )
 
@@ -116,9 +166,14 @@ def create_or_update_ws(
     variables: dict,
     description: str,
     gitlab_token: str,
+    product_branch: str | None = None,
 ) -> dict:
-    """Crée le workspace, ou le met à jour s'il existe déjà sous ce nom."""
-    settings = settings_for(orchestrator_env)
+    """Crée le workspace, ou le met à jour s'il existe déjà sous ce nom.
+
+    ``product_branch`` : branche de la demande (voir ``current_product_branch``),
+    clonée par Schematics à la place du défaut de l'environnement.
+    """
+    settings = settings_for(orchestrator_env, product_branch)
     create_ws_result = tf.workspaces.create_or_update(
         workspace_name,
         tags=settings.tags,
@@ -139,9 +194,10 @@ def update_ws(
     tf_directory: str,
     description: str,
     gitlab_token: str,
+    product_branch: str | None = None,
 ):
     """Met à jour tags, VCS, description et env du workspace (pas ses variables)."""
-    settings = settings_for(orchestrator_env)
+    settings = settings_for(orchestrator_env, product_branch)
     return tf.workspaces.update(
         workspace_id=workspace_id,
         tags=settings.tags,

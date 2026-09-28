@@ -241,7 +241,7 @@ def bucket_restore_backup_vault():
             vault: Vault = depends(vault_dependency),
     ) -> str:
         from bp2i_terraform.backends.schematics import TerraformVar
-        from cos_service.services.schematics_service import create_or_update_ws
+        from cos_service.services.schematics_service import create_or_update_ws, current_product_branch
         from cos_service.repository.backup_vault_restore_repository import (
             create_restore
         )
@@ -323,6 +323,7 @@ def bucket_restore_backup_vault():
                     variables,
                     description,
                     secrets["gitlab_token"],
+                    product_branch=current_product_branch(state_manager),
                 )
 
                 # 3) No restore found =>  persist REQUESTED

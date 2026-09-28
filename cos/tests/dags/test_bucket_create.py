@@ -409,6 +409,21 @@ class TestCreateTfWorkspace:
         assert variables["cloud_type"] == "2"
         assert variables["target_backup_vault_crn"] is None
 
+
+    def test_schematics_clones_the_branch_the_dag_runs_on(self, dag, happy_services, make_payload, state_manager):
+        happy_services.bucketService.get_bucket_by_sub_id.return_value = {"workspace": {"workspace_id": None}}
+        happy_services.schematics_service.create_or_update_ws.return_value = {"id": "ws-1"}
+        state_manager.get_subscription.return_value.product_branch = "feature/retention"
+        # schematics_service est un MagicMock dans les tests de DAG : on rebranche
+        # la vraie résolution de branche pour vérifier ce que reçoit Schematics.
+        from cos_service.services import schematics_service as real
+        happy_services.schematics_service.current_product_branch = real.current_product_branch
+
+        self.run(dag, make_payload(), state_manager)
+
+        call = happy_services.schematics_service.create_or_update_ws.call_args
+        assert call.kwargs["product_branch"] == "feature/retention"
+
     def test_bucket_dict_without_workspace_key_still_creates_the_workspace(self, dag, happy_services, make_payload, state_manager):
         happy_services.bucketService.get_bucket_by_sub_id.return_value = {"subscription_id": "sub-1"}
         happy_services.schematics_service.create_or_update_ws.return_value = {"id": "ws-1"}

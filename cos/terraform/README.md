@@ -308,22 +308,28 @@ aux versions de Terraform demandées à Schematics. La source unique est
 `terraform/v1.12/bucket` et le label `terraform_v1.12` envoyé au workspace.
 Les anciens dossiers restent pour les workspaces existants créés avec eux.
 
-**Branche git par environnement.** Schematics clone toujours le dépôt `cos`
-lui-même, sur une branche qui dépend de l'environnement de l'orchestrateur :
+**Branche git : celle sur laquelle le DAG tourne.** Schematics clone toujours
+le dépôt `cos` lui-même. La règle est simple : il clone **la branche de la
+demande**, celle que la gateway de l'orchestrateur a donnée pour exécuter le
+DAG (`product_branch`). DAG et Terraform sont donc toujours à la même version,
+et chaque développeur teste sa branche sur l'INT sans réglage
+(`current_product_branch` la lit sur la souscription, sinon sur le checkout git
+du code).
 
-| Environnement | Branche clonée par Schematics | `TF_LOG` | Tags du workspace |
-|---|---|---|---|
-| `int` | `main` | `DEBUG` | `env:int` |
-| `preprod` | `preprod` | `INFO` | `env:pprod` |
-| `prod` | `prod` | `ERROR` | `env:prod` |
+Quand la demande ne porte pas de branche, le défaut de l'environnement
+s'applique. Il est aligné sur les branches de la CI :
 
-Ces défauts sont ceux des branches de la CI. Ils se surchargent sans toucher au
-code, lus à chaque appel : d'abord l'Airflow Variable (`cos_tf_branch`,
-`cos_tf_log_level`) de l'environnement, puis la variable d'environnement en
-majuscules (`COS_TF_BRANCH`, `COS_TF_LOG_LEVEL`). Cas d'usage : poser
-`cos_tf_branch = feature/xxx` dans l'interface Airflow de l'INT le temps de
-tester une branche non fusionnée, puis la supprimer. Un job de la CI refuse
-toute MR qui recoderait un nom de branche de feature dans le service.
+| Environnement | Branche par défaut | `TF_LOG` | Tags du workspace | Autre branche ? |
+|---|---|---|---|---|
+| `int` | `main` | `DEBUG` | `env:int` | Oui, celle de la demande |
+| `preprod` | `preprod` | `INFO` | `env:pprod` | Refusée avant Schematics |
+| `prod` | `prod` | `ERROR` | `env:prod` | Refusée avant Schematics |
+
+Roue de secours, INT seulement : l'Airflow Variable (`cos_tf_branch`,
+`cos_tf_log_level`) puis la variable d'environnement (`COS_TF_BRANCH`,
+`COS_TF_LOG_LEVEL`), lues à chaque appel. Un job de la CI refuse toute MR qui
+recoderait un nom de branche de feature dans le service. Décision détaillée :
+`docs/adr/0002-branche-terraform-suit-la-demande.md`.
 
 Conséquence importante : **le Terraform exécuté est celui de la branche, pas
 celui du poste**. Une modification de `main.tf` non poussée sur la branche de
@@ -333,10 +339,11 @@ immédiatement ce que le prochain apply fera.
 ```mermaid
 flowchart LR
     ENV["ENVIRONMENT = int | preprod | prod"] --> S["settings_for(env)"]
+    PB["product_branch de la demande<br/>(souscription ou checkout git)"] --> S
     S --> BR["branche git"]
     S --> TL["TF_LOG"]
     S --> TG["tags workspace"]
-    AV["Airflow Variable / env var<br/>(surcharge optionnelle)"] --> S
+    AV["Airflow Variable / env var<br/>(roue de secours, INT)"] --> S
     TV["TERRAFORM_VERSION = 1.12"] --> DIR["tf_directory = terraform/v1.12/bucket"]
     TV --> LBL["tf_version = terraform_v1.12"]
     BR & DIR & LBL --> VCS["VCS(repository, branch, directory) envoyé à Schematics"]

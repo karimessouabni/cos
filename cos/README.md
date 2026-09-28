@@ -371,9 +371,11 @@ workspace, qui garde son `tfstate`.
   VPE, l'écriture des clés HMAC dans Vault.
 - `terraform/v1.12/backup_vault/main.tf` crée un backup vault.
 - `schematics_service.py` est générique : créer ou mettre à jour un workspace, changer ses
-  variables, lancer `plan` + `apply`. La branche Terraform clonée et le niveau `TF_LOG`
-  suivent l'environnement (`main`/`DEBUG` en int, `preprod`/`INFO`, `prod`/`ERROR`),
-  surchargeables par Airflow Variable ou variable d'environnement, jamais dans le code.
+  variables, lancer `plan` + `apply`. Schematics clone **la branche sur laquelle le DAG
+  tourne** (celle donnée à la gateway de l'orchestrateur), donc chaque développeur teste
+  sa branche sur l'INT sans réglage. Sans branche de demande, le défaut de l'environnement
+  s'applique (`main`, `preprod`, `prod`), et pprod/prod refusent toute autre branche. Le
+  niveau `TF_LOG` suit l'environnement (`DEBUG`, `INFO`, `ERROR`).
 
 Chaîne complète, versions des modules, provenance de chaque variable et points d'attention :
 [`terraform/README.md`](terraform/README.md).
@@ -467,6 +469,7 @@ complet avec la vraie librairie. Tout est décrit dans [`tests/README.md`](tests
 | [`terraform/README.md`](terraform/README.md) | Chaîne DAG → Schematics → modules, variables, versions, points d'attention |
 | [`tests/README.md`](tests/README.md) | Harnais de test, doublures, fixtures |
 | [`docs/adr/0001-retention-unites-jours-annees.md`](docs/adr/0001-retention-unites-jours-annees.md) | Rétention jours/années sans rupture du contrat v1 |
+| [`docs/adr/0002-branche-terraform-suit-la-demande.md`](docs/adr/0002-branche-terraform-suit-la-demande.md) | Schematics clone la branche sur laquelle le DAG tourne |
 | `STRUCTURE.md` | Arborescence du projet d'origine |
 
 ## 15. Glossaire
