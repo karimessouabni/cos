@@ -141,8 +141,10 @@ Le principe est celui du `test.tf` d'avant : un `apply`, on regarde, on modifie,
 `apply`, puis un `destroy`. La différence : un fichier décrit cette séquence, tofu la déroule
 seul et vérifie des conditions à chaque étape.
 
-- `terraform/main.tf` est une configuration normale : une instance COS, un backup vault si
-  `with_vault`, et un bucket par clé de la map `buckets`. Le payload d'un bucket est construit
+- `terraform/main.tf` est une configuration normale : une instance COS, un bucket par clé de
+  la map `buckets`, et un backup vault seulement si un bucket demande une sauvegarde
+  (`backup_retention_days`) ou si `with_vault = true`. Les scénarios rétention et object lock
+  n'ont donc pas de vault. Le payload d'un bucket est construit
   à partir de cette map en n'envoyant que les clés renseignées (celles de `BucketCreatePayload`
   / `BucketUpdatePayload` des DAGs `cos.bucket.v1.*`).
 - Un fichier `tests/20_bucket_basic.tftest.hcl` est un scénario : des blocs `run` dans l'ordre.

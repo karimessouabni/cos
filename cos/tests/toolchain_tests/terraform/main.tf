@@ -14,9 +14,15 @@ resource "orchestrator_subscription_cos_v1" "cos" {
   payload     = {}
 }
 
-# --- Backup vault : seulement si le scénario le demande ---------------------
+# --- Backup vault : seulement si un bucket demande une sauvegarde
+# (backup_retention_days) ou si le scénario le demande (with_vault). Les
+# scénarios rétention / object lock n'en créent donc pas. ---------------------
+locals {
+  with_vault = var.with_vault || anytrue([for b in values(var.buckets) : b.backup_retention_days != null])
+}
+
 resource "orchestrator_subscription_cosbackup_vault_v1" "vault" {
-  count = var.with_vault ? 1 : 0
+  count = local.with_vault ? 1 : 0
 
   environment = var.environment
   description = "${var.prefix} ${var.scenario} vault"
@@ -68,8 +74,8 @@ resource "orchestrator_subscription_cosbucket_v1" "bucket" {
   realm       = var.realm
   tier        = var.tier
   payload     = local.bucket_payloads[each.key]
-
-  depends_on = [orchestrator_subscription_cosbackup_vault_v1.vault]
+  # Pas de depends_on : un bucket ne dépend du vault que si son payload le
+  # référence (backup_vault_sub_id), donc seulement avec backup_retention_days.
 }
 
 output "cos_name" { value = orchestrator_subscription_cos_v1.cos.name }

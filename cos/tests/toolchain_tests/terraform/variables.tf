@@ -46,7 +46,7 @@ variable "scenario" {
 }
 
 variable "with_vault" {
-  description = "Créer un backup vault sur l'instance COS."
+  description = "Créer un backup vault sur l'instance COS même sans bucket sauvegardé (sinon il est créé automatiquement dès qu'un bucket a backup_retention_days)."
   type        = bool
   default     = false
 }
