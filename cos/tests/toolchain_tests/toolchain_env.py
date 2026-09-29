@@ -5,9 +5,9 @@ des buckets via le provider orchestrator) : tout ce qu'il fallait faire à la
 main avant un `terraform plan` est enchaîné par le script.
 
 Étapes (chacune est sautée si elle a déjà été faite et reste valide) :
-1. terraform login <artifactory>     si aucun credential n'est enregistré
-                                     (~/.terraform.d/credentials.tfrc.json)
-2. terraform init                    dans le dossier de tests de l'environnement
+1. tofu login <artifactory>          si aucun credential n'est enregistré
+                                     (~/.terraform.d/credentials.tofurc.json)
+2. tofu init                         dans le dossier de tests de l'environnement
                                      si .terraform/ n'existe pas encore (--reinit
                                      pour forcer)
 3. proxy                             http://<user>:<mot de passe>@ncproxy.fr.net.intra:8080
@@ -36,9 +36,10 @@ Utilisation
     eval "$(python toolchain_env.py --env int)"
     terraform -chdir=int/new_version plan
 
-    # ou tout enchaîné : les étapes 1-6 puis terraform plan / apply
+    # ou tout enchaîné : les étapes 1-6 puis tofu test / plan / apply
+    python toolchain_env.py --env int --run test
+    python toolchain_env.py --env int --run test -- -filter=tests/20_bucket_basic.tftest.hcl
     python toolchain_env.py --env int --run plan
-    python toolchain_env.py --env int --run apply -- -auto-approve
 
     # ou un sous-shell avec les variables déjà exportées
     python toolchain_env.py --env int --shell
@@ -71,8 +72,8 @@ puis Entrée dans le terminal (le token est lu dans le presse-papiers).
 Les appels HTTP vers Vault ignorent la vérification TLS (certificats internes),
 comme les curl de la procédure manuelle ; --verify-tls la réactive.
 
-Codes de sortie: 0 OK, 1 erreur args/token, 2 erreur Vault, 3 erreur terraform
-(avec --run, le code de sortie de terraform est renvoyé tel quel).
+Codes de sortie: 0 OK, 1 erreur args/token, 2 erreur Vault, 3 erreur tofu
+(avec --run, le code de sortie de tofu est renvoyé tel quel).
 """
 
 from __future__ import annotations
@@ -146,15 +147,13 @@ UID_ENV = "TOOLCHAIN_UID"
 VAULT_UI_PATH = "/ui/"
 
 TERRAFORM_HOST = "repo.artifactory-dogen.group.echonet"
-TERRAFORM_BIN = "terraform"
-TOFU_BIN = "tofu"  # OpenTofu : mêmes commandes, mêmes fichiers .tftest.hcl
-TERRAFORM_BIN_ENV = "TOOLCHAIN_TERRAFORM_BIN"
-# Source du provider : sans hôte, terraform sous-entend registry.terraform.io
-# mais OpenTofu sous-entend registry.opentofu.org ; on qualifie donc l'hôte
-# pour tofu, pour que le miroir / login Artifactory configuré pour
-# registry.terraform.io s'applique aussi.
-PROVIDER_SOURCE = "bp2i/orchestrator"
-PROVIDER_REGISTRY_HOST = "registry.terraform.io"
+# OpenTofu uniquement : `tofu test` demande 1.6+, et Terraform >= 1.6 est sous
+# licence BUSL. Mêmes commandes, mêmes fichiers .tftest.hcl.
+TERRAFORM_BIN = "tofu"
+# Source du provider : sans hôte, tofu sous-entend registry.opentofu.org ; on
+# qualifie registry.terraform.io pour que le miroir / login Artifactory
+# configuré pour cet hôte (celui du .terraform.lock.hcl) s'applique.
+PROVIDER_SOURCE = "registry.terraform.io/bp2i/orchestrator"
 NEW_VERSION_DIR = "new_version"
 # Nouvelle arborescence (terraform test) : un root unique terraform/ à côté du
 # script, envs/<env>.tfvars pour ce qui change par environnement, et
@@ -165,11 +164,13 @@ ENV_TFVARS_DIRS = ("envs", "env")  # les deux noms sont acceptés
 TEST_FILTER_DIR = ".tftest-filter"  # émulation de -filter pour terraform < 1.7
 VERSIONS_TF = "versions.tf"
 VERSIONS_TF_TEMPLATE = """# Généré par toolchain_env.py depuis envs/<env>.tfvars (provider_version) :
-# une contrainte de version ne peut pas être une variable Terraform, et la
-# version du provider orchestrator diffère par environnement (2.3.0-int, ...).
+# une contrainte de version ne peut pas être une variable, et la version du
+# provider orchestrator diffère par environnement (2.3.0-int, ...).
+# La source est qualifiée registry.terraform.io/... : sans hôte, OpenTofu
+# irait chercher sur registry.opentofu.org.
 # Ne pas éditer à la main : `python ../toolchain_env.py --env <env>` le réécrit.
 terraform {
-  required_version = ">= 1.6.0" # terraform test
+  required_version = ">= 1.6.0" # tofu test
 
   required_providers {
     orchestrator = {
@@ -786,13 +787,13 @@ def forget_all() -> None:
 # --------------------------------------------------------------------------- #
 
 def terraform_credentials_paths() -> list[str]:
-    """Fichiers de credentials lus par terraform / tofu (`<bin> login`) :
-    credentials.tofurc.json (OpenTofu) puis credentials.tfrc.json."""
+    """Fichiers de credentials lus par tofu (`tofu login`) : credentials.tofurc.json,
+    puis credentials.tfrc.json (écrit par un ancien `terraform login`, encore lu par tofu)."""
     if sys.platform == "win32":
         root = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "terraform.d")
     else:
         root = os.path.join(os.path.expanduser("~"), ".terraform.d")
-    names = ["credentials.tofurc.json", "credentials.tfrc.json"] if is_tofu() else ["credentials.tfrc.json"]
+    names = ["credentials.tofurc.json", "credentials.tfrc.json"]
     return [os.path.join(root, name) for name in names]
 
 
@@ -823,10 +824,10 @@ def run_terraform(args: Sequence[str], cwd: str, env: dict[str, str] | None = No
     """Lance terraform et retourne son code de sortie. Avec to_stderr, sa sortie
     va sur stderr pour ne pas polluer les `export` imprimés sur stdout
     (eval "$(...)")."""
-    terraform = terraform or _current_bin()
+    terraform = terraform or TERRAFORM_BIN
     if not shutil.which(terraform):
-        raise CliExit(EXIT_TERRAFORM_FAILED, f"{terraform} introuvable dans le PATH "
-                                             f"(--terraform-bin, ou ${TERRAFORM_BIN_ENV})")
+        raise CliExit(EXIT_TERRAFORM_FAILED, f"{terraform} introuvable dans le PATH : installer OpenTofu "
+                                             "(brew install opentofu, voir README.md)")
     command = [terraform, *args]
     _log(f"$ {' '.join(shlex.quote(a) for a in command)}  (dans {cwd})")
     try:
@@ -838,25 +839,25 @@ def run_terraform(args: Sequence[str], cwd: str, env: dict[str, str] | None = No
 
 def ensure_terraform_login(host: str, cwd: str, run: Callable[..., int] = run_terraform) -> None:
     if terraform_logged_in(host):
-        _log(f"terraform login : credentials déjà enregistrés pour {host}.")
+        _log(f"{TERRAFORM_BIN} login : credentials déjà enregistrés pour {host}.")
         return
     if not sys.stdin.isatty():
         raise CliExit(EXIT_TERRAFORM_FAILED,
-                      f"aucun credential terraform pour {host} : lancer `terraform login {host}` "
+                      f"aucun credential pour {host} : lancer `{TERRAFORM_BIN} login {host}` "
                       "dans un terminal (ou --skip-login).")
     code = run(["login", host], cwd)
     if code != 0:
-        raise CliExit(EXIT_TERRAFORM_FAILED, f"terraform login {host} a échoué (code {code})")
+        raise CliExit(EXIT_TERRAFORM_FAILED, f"{TERRAFORM_BIN} login {host} a échoué (code {code})")
 
 
 def ensure_terraform_init(cwd: str, reinit: bool = False, run: Callable[..., int] = run_terraform,
                           version_changed: bool = False) -> None:
     if not reinit and not version_changed and os.path.isdir(os.path.join(cwd, ".terraform")):
-        _log(f"terraform init : déjà fait dans {cwd} (--reinit pour refaire).")
+        _log(f"{TERRAFORM_BIN} init : déjà fait dans {cwd} (--reinit pour refaire).")
         return
     code = run(["init", "-upgrade"] if version_changed else ["init"], cwd)
     if code != 0:
-        raise CliExit(EXIT_TERRAFORM_FAILED, f"terraform init a échoué (code {code})")
+        raise CliExit(EXIT_TERRAFORM_FAILED, f"{TERRAFORM_BIN} init a échoué (code {code})")
 
 
 def default_tests_dir(env: str, root: str | None = None) -> str:
@@ -882,7 +883,7 @@ def env_tfvars_path(cwd: str, env: str) -> str | None:
 def terraform_version(terraform: str | None = None) -> tuple[int, ...] | None:
     """(major, minor, patch) de `terraform version -json` (tofu garde la même
     clé terraform_version), None si inconnu."""
-    terraform = terraform or _current_bin()
+    terraform = terraform or TERRAFORM_BIN
     try:
         out = subprocess.run([terraform, "version", "-json"], capture_output=True, text=True, timeout=30).stdout
         raw = json.loads(out).get("terraform_version", "")
@@ -908,8 +909,8 @@ def adapt_test_filter(command: Sequence[str], cwd: str, version: tuple[int, ...]
         if not os.path.isfile(target):
             raise CliExit(EXIT_USAGE, f"fichier de scénario introuvable : {target}")
         os.symlink(os.path.relpath(target, link_dir), os.path.join(link_dir, os.path.basename(f)))
-    _log(f"terraform {'.'.join(map(str, version))} : -filter émulé via -test-directory={TEST_FILTER_DIR} "
-         "(passer en terraform >= 1.7 pour le vrai -filter).")
+    _log(f"{TERRAFORM_BIN} {'.'.join(map(str, version))} : -filter émulé via -test-directory={TEST_FILTER_DIR} "
+         f"(passer en {TERRAFORM_BIN} >= 1.7 pour le vrai -filter).")
     return [a for a in command if not a.startswith("-filter=")] + [f"-test-directory={TEST_FILTER_DIR}"]
 
 
@@ -923,25 +924,6 @@ def tfvars_value(path: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _current_bin() -> str:
-    return os.environ.get(TERRAFORM_BIN_ENV) or TERRAFORM_BIN
-
-
-def is_tofu(terraform: str | None = None) -> bool:
-    return os.path.basename(terraform or _current_bin()).lower().startswith("tofu")
-
-
-def resolve_terraform_bin(requested: str | None) -> str:
-    """Binaire à utiliser : --terraform-bin / $TOOLCHAIN_TERRAFORM_BIN, sinon
-    terraform s'il est dans le PATH, sinon tofu."""
-    if requested:
-        return requested
-    for candidate in (TERRAFORM_BIN, TOFU_BIN):
-        if shutil.which(candidate):
-            return candidate
-    return TERRAFORM_BIN
-
-
 def write_versions_tf(cwd: str, env: str) -> str | None:
     """Écrit <cwd>/versions.tf avec la version du provider de envs/<env>.tfvars
     (rien si l'arborescence n'a pas de tfvars). Retourne la version écrite."""
@@ -952,8 +934,7 @@ def write_versions_tf(cwd: str, env: str) -> str | None:
     if not version:
         raise CliExit(EXIT_USAGE, f"provider_version manquant dans {tfvars}")
     path = os.path.join(cwd, VERSIONS_TF)
-    source = f"{PROVIDER_REGISTRY_HOST}/{PROVIDER_SOURCE}" if is_tofu() else PROVIDER_SOURCE
-    content = VERSIONS_TF_TEMPLATE % (source, version)
+    content = VERSIONS_TF_TEMPLATE % (PROVIDER_SOURCE, version)
     try:
         with open(path, encoding="utf-8") as fh:
             unchanged = fh.read() == content
@@ -1099,7 +1080,7 @@ def resolve_and_check_proxy(args: argparse.Namespace, ask: Callable[[str], str] 
         if "identifiants refusés" in problem:
             raise CliExit(EXIT_USAGE, f"proxy {mask_url(proxy_vars['https_proxy'])} : {problem}. Vérifier le user "
                                       "et le mot de passe (--proxy-user / --proxy-password), ou le compte bloqué.")
-        _log(f"Proxy non vérifié ({problem}) ; terraform échouera si le proxy refuse.")
+        _log(f"Proxy non vérifié ({problem}) ; tofu échouera si le proxy refuse.")
     return proxy_vars
 
 
@@ -1273,15 +1254,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     vault.add_argument("--verify-tls", action="store_true",
                        help="vérifier le certificat de Vault (ignoré par défaut : certificats internes)")
 
-    terraform = parser.add_argument_group("terraform")
-    terraform.add_argument("--terraform-bin", default=os.environ.get(TERRAFORM_BIN_ENV),
-                           help=f"binaire : terraform ou tofu (OpenTofu) ; défaut: ${TERRAFORM_BIN_ENV}, "
-                                "sinon terraform s'il est dans le PATH, sinon tofu")
+    terraform = parser.add_argument_group("opentofu")
     terraform.add_argument("--terraform-host", default=TERRAFORM_HOST,
-                           help=f"hôte du `terraform login` (défaut: {TERRAFORM_HOST})")
-    terraform.add_argument("--skip-login", action="store_true", help="ne pas vérifier / faire terraform login")
-    terraform.add_argument("--skip-init", action="store_true", help="ne pas faire terraform init")
-    terraform.add_argument("--reinit", action="store_true", help="refaire terraform init même si déjà fait")
+                           help=f"hôte du `tofu login` (défaut: {TERRAFORM_HOST})")
+    terraform.add_argument("--skip-login", action="store_true", help="ne pas vérifier / faire tofu login")
+    terraform.add_argument("--skip-init", action="store_true", help="ne pas faire tofu init")
+    terraform.add_argument("--reinit", action="store_true", help="refaire tofu init même si déjà fait")
     terraform.add_argument("--tf-log", nargs="?", const="debug", default=None,
                            help="exporter TF_LOG (défaut du niveau: debug)")
 
@@ -1301,10 +1279,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     output = parser.add_argument_group("sortie")
     output.add_argument("--run", metavar="COMMAND",
-                        help="lancer `terraform COMMAND` dans le dossier de tests (ex: --run plan) ; "
+                        help="lancer `tofu COMMAND` dans le dossier de tests (ex: --run test, --run plan) ; "
                              "les options de terraform se passent après -- (ex: --run apply -- -auto-approve)")
     output.add_argument("terraform_args", nargs="*", metavar="TERRAFORM_ARG",
-                        help="options passées à terraform avec --run (après --)")
+                        help="options passées à tofu avec --run (après --)")
     output.add_argument("--shell", action="store_true",
                         help="ouvrir un sous-shell avec les variables exportées")
     output.add_argument("--json", action="store_true", dest="as_json",
@@ -1313,8 +1291,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     args = parser.parse_args(argv)
     args.vault_token_from_cli = bool(args.vault_token)
-    args.terraform_bin = resolve_terraform_bin(args.terraform_bin)
-    os.environ[TERRAFORM_BIN_ENV] = args.terraform_bin  # lu par run_terraform, versions.tf, credentials
     if args.env not in ENVIRONMENTS:
         parser.error(f"${ENV_VAR}={args.env} inconnu (choix: {', '.join(ENVIRONMENTS)})")
     environment = ENVIRONMENTS[args.env]
@@ -1425,8 +1401,7 @@ def prepare(args: argparse.Namespace, acquire: Callable[[str], str] | None = Non
     run = run or run_terraform
     if not os.path.isdir(args.dir):
         raise CliExit(EXIT_USAGE, f"dossier de tests introuvable : {args.dir} (--dir)")
-    _log(f"Environnement : {args.env}  dossier : {args.dir}  binaire : {args.terraform_bin}"
-         + (" (OpenTofu)" if is_tofu(args.terraform_bin) else ""))
+    _log(f"Environnement : {args.env}  dossier : {args.dir}")
     _log(f"Vault : {args.vault_url} (namespace {args.namespace})  secret : {args.secret_path}")
     if not args.skip_login:
         ensure_terraform_login(args.terraform_host, args.dir, run)
@@ -1511,8 +1486,8 @@ def main(argv: list[str] | None = None) -> int:
             if command[0] == "test":
                 version = terraform_version()
                 if version is not None and version < (1, 6):
-                    raise CliExit(EXIT_TERRAFORM_FAILED, f"{args.terraform_bin} {'.'.join(map(str, version))} : "
-                                                         "`test` demande la version 1.6 au minimum.")
+                    raise CliExit(EXIT_TERRAFORM_FAILED, f"{TERRAFORM_BIN} {'.'.join(map(str, version))} : "
+                                                         "`tofu test` demande OpenTofu 1.6 au minimum.")
                 command = adapt_test_filter(command, args.dir, version)
             return run_terraform(command, args.dir, env, to_stderr=False)
         except CliExit as exc:

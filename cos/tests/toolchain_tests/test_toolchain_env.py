@@ -155,9 +155,7 @@ class TerraformLoginDetectionTest(unittest.TestCase):
             self.assertFalse(te.terraform_logged_in(te.TERRAFORM_HOST, {}))
 
     def test_tofu_credentials_and_source(self):
-        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {te.TERRAFORM_BIN_ENV: "tofu"}), \
-                mock.patch.object(te.os.path, "expanduser", return_value=home):
-            self.assertTrue(te.is_tofu())
+        with tempfile.TemporaryDirectory() as home, mock.patch.object(te.os.path, "expanduser", return_value=home):
             paths = te.terraform_credentials_paths()
             self.assertEqual([os.path.basename(p) for p in paths], ["credentials.tofurc.json", "credentials.tfrc.json"])
             os.makedirs(os.path.dirname(paths[0]))
@@ -165,23 +163,11 @@ class TerraformLoginDetectionTest(unittest.TestCase):
             with open(paths[0], "w") as fh:
                 json.dump({"credentials": {te.TERRAFORM_HOST: {"token": "t"}}}, fh)
             self.assertTrue(te.terraform_logged_in(te.TERRAFORM_HOST, {}))
-            root = tempfile.mkdtemp(prefix="tfroot-")
-            os.makedirs(os.path.join(root, "envs"))
-            open(os.path.join(root, "envs", "int.tfvars"), "w").write('provider_version = "2.3.0-int"\n')
-            te.write_versions_tf(root, "int")
-            self.assertIn('source  = "registry.terraform.io/bp2i/orchestrator"', open(os.path.join(root, "versions.tf")).read())
-        with mock.patch.dict(os.environ, {te.TERRAFORM_BIN_ENV: "terraform"}):
-            self.assertFalse(te.is_tofu())
-
-    def test_resolve_terraform_bin(self):
-        self.assertEqual(te.resolve_terraform_bin("tofu"), "tofu")
-        with mock.patch.object(te.shutil, "which", side_effect=lambda c: "/usr/bin/tofu" if c == "tofu" else None):
-            self.assertEqual(te.resolve_terraform_bin(None), "tofu")
-        with mock.patch.object(te.shutil, "which", return_value=None):
-            self.assertEqual(te.resolve_terraform_bin(None), "terraform")
-        with mock.patch.dict(os.environ, {}, clear=False):
-            self.assertEqual(te.parse_args(["--terraform-bin", "tofu"]).terraform_bin, "tofu")
-            self.assertEqual(os.environ[te.TERRAFORM_BIN_ENV], "tofu")
+        root = tempfile.mkdtemp(prefix="tfroot-")
+        os.makedirs(os.path.join(root, "envs"))
+        open(os.path.join(root, "envs", "int.tfvars"), "w").write('provider_version = "2.3.0-int"\n')
+        te.write_versions_tf(root, "int")
+        self.assertIn('source  = "registry.terraform.io/bp2i/orchestrator"', open(os.path.join(root, "versions.tf")).read())
 
     def test_credentials_file(self):
         with tempfile.TemporaryDirectory() as home, mock.patch.object(
@@ -757,7 +743,7 @@ class TerraformRootTest(unittest.TestCase):
         self.assertEqual(te.write_versions_tf(self.root, "int"), "2.3.0-int")
         content = open(os.path.join(self.root, "versions.tf")).read()
         self.assertIn('version = "2.3.0-int"', content)
-        self.assertIn('source  = "bp2i/orchestrator"', content)
+        self.assertIn('source  = "registry.terraform.io/bp2i/orchestrator"', content)
         self.assertEqual(te.tfvars_value(os.path.join(self.root, "versions.tf"), "version"), "2.3.0-int")
         self.assertEqual(te.write_versions_tf(self.root, "int"), "2.3.0-int")  # inchangé : pas de réécriture
         self.assertIsNone(te.write_versions_tf(self.root, "pprod"))  # pas de tfvars : ancienne arborescence
