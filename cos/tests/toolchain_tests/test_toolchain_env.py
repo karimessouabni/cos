@@ -660,7 +660,8 @@ class MainTest(VaultServerTest):
         with open(os.path.join(root, "envs", "int.tfvars"), "w") as fh:
             fh.write('provider_version = "2.3.0-int"\n')
         run = mock.Mock(return_value=0)
-        with mock.patch.object(te, "run_terraform", run), mock.patch.dict(os.environ, {}, clear=False):
+        with mock.patch.object(te, "run_terraform", run), mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch.object(te, "terraform_version", return_value=(1, 9, 8)):
             code = te.main(["--env", "int", "--vault-url", self.url, "--skip-login", "--dir", root, "--no-proxy",
                             "--vault-token", TOKEN_OK, "--prefix", "h90871", "--run", "test", "--", "-verbose"])
         self.assertEqual(code, 0)
@@ -743,6 +744,32 @@ class TerraformRootTest(unittest.TestCase):
         self.assertEqual(te.with_var_file(["plan", "-var-file=x"], self.root, "int"), ["plan", "-var-file=x"])
         self.assertEqual(te.with_var_file(["init"], self.root, "int"), ["init"])
         self.assertEqual(te.with_var_file(["plan"], self.root, "pprod"), ["plan"])  # pas de tfvars
+
+    def test_env_dir_singular_accepted(self):
+        root = tempfile.mkdtemp(prefix="tfroot-")
+        os.makedirs(os.path.join(root, "env"))
+        open(os.path.join(root, "env", "int.tfvars"), "w").write('provider_version = "x"\n')
+        self.assertEqual(te.with_var_file(["plan"], root, "int"), ["plan", "-var-file=env/int.tfvars"])
+
+    def test_adapt_test_filter(self):
+        os.makedirs(os.path.join(self.root, "tests"))
+        open(os.path.join(self.root, "tests", "a.tftest.hcl"), "w").write("")
+        cmd = ["test", "-var-file=envs/int.tfvars", "-filter=tests/a.tftest.hcl", "-verbose"]
+        self.assertEqual(te.adapt_test_filter(cmd, self.root, (1, 9, 8)), cmd)  # >= 1.7 : inchangé
+        self.assertEqual(te.adapt_test_filter(cmd, self.root, None), cmd)
+        self.assertEqual(te.adapt_test_filter(["plan", "-filter=x"], self.root, (1, 6, 0)), ["plan", "-filter=x"])
+        adapted = te.adapt_test_filter(cmd, self.root, (1, 6, 6))
+        self.assertEqual(adapted, ["test", "-var-file=envs/int.tfvars", "-verbose", f"-test-directory={te.TEST_FILTER_DIR}"])
+        link = os.path.join(self.root, te.TEST_FILTER_DIR, "a.tftest.hcl")
+        self.assertTrue(os.path.islink(link) and os.path.isfile(link))
+        with self.assertRaises(te.CliExit):
+            te.adapt_test_filter(["test", "-filter=tests/nope.tftest.hcl"], self.root, (1, 6, 6))
+
+    def test_terraform_version(self):
+        with mock.patch.object(te.subprocess, "run", return_value=mock.Mock(stdout='{"terraform_version": "1.6.6"}')):
+            self.assertEqual(te.terraform_version(), (1, 6, 6))
+        with mock.patch.object(te.subprocess, "run", side_effect=OSError):
+            self.assertIsNone(te.terraform_version())
 
     def test_default_dir_prefers_terraform_root(self):
         base = tempfile.mkdtemp(prefix="tcroot-")

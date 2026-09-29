@@ -153,6 +153,8 @@ NEW_VERSION_DIR = "new_version"
 # versions.tf généré depuis provider_version du tfvars.
 TERRAFORM_ROOT_DIR = "terraform"
 ENV_TFVARS_DIR = "envs"
+ENV_TFVARS_DIRS = ("envs", "env")  # les deux noms sont acceptés
+TEST_FILTER_DIR = ".tftest-filter"  # émulation de -filter pour terraform < 1.7
 VERSIONS_TF = "versions.tf"
 VERSIONS_TF_TEMPLATE = """# Généré par toolchain_env.py depuis envs/<env>.tfvars (provider_version) :
 # une contrainte de version ne peut pas être une variable Terraform, et la
@@ -848,9 +850,44 @@ def default_tests_dir(env: str, root: str | None = None) -> str:
 
 
 def env_tfvars_path(cwd: str, env: str) -> str | None:
-    """<cwd>/envs/<env>.tfvars s'il existe (nouvelle arborescence), sinon None."""
-    path = os.path.join(cwd, ENV_TFVARS_DIR, f"{env}.tfvars")
-    return path if os.path.isfile(path) else None
+    """<cwd>/envs/<env>.tfvars (ou env/) s'il existe (nouvelle arborescence), sinon None."""
+    for directory in ENV_TFVARS_DIRS:
+        path = os.path.join(cwd, directory, f"{env}.tfvars")
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def terraform_version(terraform: str = TERRAFORM_BIN) -> tuple[int, ...] | None:
+    """(major, minor, patch) de `terraform version -json`, None si inconnu."""
+    try:
+        out = subprocess.run([terraform, "version", "-json"], capture_output=True, text=True, timeout=30).stdout
+        raw = json.loads(out).get("terraform_version", "")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    match = re.match(r"(\d+)\.(\d+)\.(\d+)", raw)
+    return tuple(int(x) for x in match.groups()) if match else None
+
+
+def adapt_test_filter(command: Sequence[str], cwd: str, version: tuple[int, ...] | None) -> list[str]:
+    """`terraform test -filter=<fichier>` n'existe qu'à partir de 1.7 : avant,
+    les fichiers demandés sont liés dans <cwd>/.tftest-filter/ et terraform
+    reçoit -test-directory=.tftest-filter à la place."""
+    command = list(command)
+    filters = [a[len("-filter="):] for a in command if a.startswith("-filter=")]
+    if not command or command[0] != "test" or not filters or version is None or version >= (1, 7):
+        return command
+    link_dir = os.path.join(cwd, TEST_FILTER_DIR)
+    shutil.rmtree(link_dir, ignore_errors=True)
+    os.makedirs(link_dir)
+    for f in filters:
+        target = os.path.join(cwd, f)
+        if not os.path.isfile(target):
+            raise CliExit(EXIT_USAGE, f"fichier de scénario introuvable : {target}")
+        os.symlink(os.path.relpath(target, link_dir), os.path.join(link_dir, os.path.basename(f)))
+    _log(f"terraform {'.'.join(map(str, version))} : -filter émulé via -test-directory={TEST_FILTER_DIR} "
+         "(passer en terraform >= 1.7 pour le vrai -filter).")
+    return [a for a in command if not a.startswith("-filter=")] + [f"-test-directory={TEST_FILTER_DIR}"]
 
 
 def tfvars_value(path: str, name: str) -> str | None:
@@ -1421,7 +1458,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.run:
         _log("Variables exportées : " + ", ".join(variables))  # valeurs non affichées
         try:
-            return run_terraform(with_var_file(args.run, args.dir, args.env), args.dir, env, to_stderr=False)
+            command = with_var_file(args.run, args.dir, args.env)
+            if command[0] == "test":
+                version = terraform_version()
+                if version is not None and version < (1, 6):
+                    raise CliExit(EXIT_TERRAFORM_FAILED, f"terraform {'.'.join(map(str, version))} : "
+                                                         "`terraform test` demande la version 1.6 au minimum.")
+                command = adapt_test_filter(command, args.dir, version)
+            return run_terraform(command, args.dir, env, to_stderr=False)
         except CliExit as exc:
             _log(str(exc))
             return exc.code

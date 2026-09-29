@@ -83,7 +83,7 @@ python toolchain_env.py --env int --run test -- -verbose                       #
 python toolchain_env.py --env pprod --run test -- -filter=tests/10_cos.tftest.hcl
 ```
 
-`toolchain_env.py` ajoute `-var-file=envs/<env>.tfvars`, régénère `versions.tf`, et exporte
+`toolchain_env.py` ajoute `-var-file=envs/<env>.tfvars` (dossier `envs/` ou `env/`), régénère `versions.tf`, émule `-filter` sur Terraform 1.6 (le vrai `-filter` demande 1.7), et exporte
 `TF_VAR_prefix` (ton user) : les descriptions des souscriptions créées commencent par ton
 user, ce qui permet de retrouver et nettoyer tes tests dans l'orchestrateur.
 
