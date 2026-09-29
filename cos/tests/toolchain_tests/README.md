@@ -15,8 +15,7 @@ toolchain_tests/
 ├── terraform/                  root unique de `tofu test`
 │   ├── main.tf                 LES VRAIES RESSOURCES : cos, vault (count), buckets (for_each)
 │   ├── variables.tf            contexte (environment, realm, apcode, tier, prefix) + ce que les
-│   │                           scénarios font varier : scenario, with_vault, buckets (map typée
-│   │                           + validations de l'ADR 0001)
+│   │                           scénarios font varier : scenario, with_vault, buckets (map typée)
 │   ├── versions.tf             GÉNÉRÉ par toolchain_env.py : version du provider de l'environnement
 │   ├── providers.tf            provider "orchestrator" {} (API key lue dans l'environnement)
 │   ├── envs/<env>.tfvars       ce qui change par environnement : realm + version du provider
@@ -183,14 +182,15 @@ Déroulé d'un `tofu test` :
    avec son `error_message`, et le fichier continue.
 4. En fin de fichier, réussite ou échec, tofu détruit tout ce qu'il a créé, en ordre inverse
    des dépendances (bucket, vault, cos). C'est ce qui remplace le fichier vidé à la main.
-5. `command = plan` dans un `run` ne crée rien ; avec `expect_failures = [var.buckets]`, le run
-   réussit si la validation de la variable échoue (fichier `00_validation`).
+5. Il n'y a **aucune règle métier dans `variables.tf`** : unités de rétention, bornes, classes de
+   stockage sont validées par les DAGs (`BucketRetention`, `StorageClass`) et testées dans
+   `tests/schemas/`. Les dupliquer ici reviendrait à tester une copie. Un payload refusé par
+   l'orchestrateur fait simplement échouer le run.
 
 ### Les scénarios
 
 | Fichier | Couvre | Runs |
 |---|---|---|
-| `00_validation.tftest.hcl` | garde-fous de l'ADR 0001, sans infra | jours et années mélangés, bornes inversées, plus de 5 ans, classe inconnue : tous refusés |
 | `10_cos.tftest.hcl` | instance COS | create → destroy |
 | `20_bucket_basic.tftest.hcl` | bucket standard | create → update versioning → update custom permissions → destroy |
 | `21_bucket_storage_classes.tftest.hcl` | vault, cold, smart | create ×3 en un run → destroy |
@@ -205,7 +205,8 @@ le nom du scénario : facile à retrouver et à nettoyer dans l'orchestrateur, e
 
 ### Stratégie : trois niveaux
 
-1. **Garde-fous** (`00_validation`, plan seul, quelques secondes) : sur chaque MR.
+1. **Règles métier** : tests unitaires Python des schémas et services (`python -m pytest`),
+   sur chaque MR. Rien à dupliquer côté HCL.
 2. **Scénarios par fonctionnalité sur INT** : à la demande, puis en nocturne (voir CI).
 3. **Fumée en pprod / prod** (`10_cos` ou `20_bucket_basic`) après une montée de version du
    provider ou de l'orchestrateur : même code, seul `envs/<env>.tfvars` change.
@@ -241,8 +242,7 @@ toolchain-tests:
   artifacts: { reports: { junit: report.xml } }
 ```
 
-Sur chaque MR, seulement le niveau 1 (`-filter=tests/00_validation.tftest.hcl`), plus
-`tofu fmt -check -recursive` et `tofu validate`.
+Sur chaque MR, seulement `tofu fmt -check -recursive` et `tofu validate` (pas d'infra).
 
 ## 6. Diagnostic
 
