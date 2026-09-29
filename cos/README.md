@@ -409,12 +409,14 @@ souscriptions éligibles ou relance des demandes de suppression en erreur, et un
 pour agir. Le mode d'emploi complet est dans l'en-tête du script.
 
 `tests/toolchain_tests/toolchain_env.py` prépare l'environnement des tests OpenTofu de
-la toolchain (provider `orchestrator`) : `terraform login` et `terraform init` s'ils n'ont
-pas déjà été faits, proxy d'entreprise, token Vault via le service token (ou Chrome en secours)
-ou réutilisé s'il est encore valide, lecture de l'API key IBM Cloud dans Vault, puis
-export de `IBM_CLOUD_API_KEY` et `ORCHESTRATOR_IBMCLOUD_API_KEY`. (proxy d'entreprise avec les identifiants de chacun, token Vault via le service token). `--run plan` /
-`--run apply` enchaînent directement tofu ; `eval "$(python toolchain_env.py --env int)"`
-exporte les variables dans le shell courant. Voir `tests/toolchain_tests/README.md`.
+la toolchain (provider `orchestrator`) et lance `tofu test` : `tofu login` et `tofu init`
+s'ils n'ont pas déjà été faits, proxy d'entreprise avec les identifiants de chacun, token
+Vault via le service token (réutilisé tant qu'il est valide, Chrome en secours), lecture de
+l'API key IBM Cloud dans Vault, export de `IBM_CLOUD_API_KEY` et
+`ORCHESTRATOR_IBMCLOUD_API_KEY`. Les scénarios (`terraform/tests/*.tftest.hcl`) créent,
+mettent à jour et détruisent de vraies souscriptions ; `--run test` les enchaîne,
+`eval "$(python toolchain_env.py --env int)"` exporte les variables dans le shell courant.
+Voir `tests/toolchain_tests/README.md`.
 
 ## 11. Organisation du dépôt
 
