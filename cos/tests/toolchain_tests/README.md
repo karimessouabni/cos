@@ -1,8 +1,108 @@
 # Tests Terraform de la toolchain
 
-Les dossiers `int/`, `qual/`, `pprod/`, `prod/` contiennent les `.tf` qui créent des
-COS, des buckets et des backup vaults via le provider `orchestrator`
-(`source = "bp2i/orchestrator"`, téléchargé depuis `repo.artifactory-dogen.group.echonet`).
+Tests de bout en bout du produit COS à travers le provider `orchestrator`
+(`source = "bp2i/orchestrator"`, téléchargé depuis `repo.artifactory-dogen.group.echonet`) :
+chaque scénario crée de vraies souscriptions sur l'orchestrateur de l'environnement
+(instance COS, backup vault, buckets), les met à jour, vérifie le résultat et détruit tout.
+
+```
+toolchain_tests/
+├── toolchain_env.py            prépare l'environnement et lance terraform (voir plus bas)
+├── terraform/                  root unique de `terraform test`
+│   ├── versions.tf             GÉNÉRÉ par toolchain_env.py : version du provider de l'environnement
+│   ├── providers.tf            provider "orchestrator" {} (API key lue dans l'environnement)
+│   ├── variables.tf            environment, realm, provider_version, apcode, tier, prefix
+│   ├── envs/<env>.tfvars       ce qui change par environnement : realm + version du provider
+│   ├── modules/
+│   │   ├── cos/                orchestrator_subscription_cos_v1
+│   │   ├── backup_vault/       orchestrator_subscription_cosbackup_vault_v1
+│   │   ├── bucket/             orchestrator_subscription_cosbucket_v1 + payload typé + validations
+│   │   └── buckets/            N buckets en un run (for_each) sur la même instance COS
+│   └── tests/*.tftest.hcl      un fichier par fonctionnalité (voir la stratégie)
+└── int/, pprod/, ...           anciens test.tf monolithiques (à supprimer quand la suite est adoptée)
+```
+
+## Stratégie de test
+
+### Ce qui existe sur le marché, et le choix
+
+| Outil | Principe | Pourquoi / pourquoi pas ici |
+|---|---|---|
+| **`terraform test`** (natif, TF ≥ 1.6) | fichiers `.tftest.hcl`, `run` séquentiels qui appliquent des modules, assertions HCL, destruction automatique en fin de fichier | **retenu** : aucune dépendance, même langage que les tests, cycle create → update → destroy garanti, `expect_failures` pour les garde-fous |
+| Terratest (Go) | tests Go qui lancent terraform et interrogent l'API | plus puissant (appels API IBM pour vérifier le bucket réel) mais une seconde stack à maintenir |
+| pytest-terraform / tftest (Python) | idem en Python | envisageable plus tard pour vérifier côté S3 (versioning, object lock) depuis `bucketService` |
+| tflint, checkov, `terraform validate` | statique, sans infra | à mettre en CI sur chaque MR, complémentaire |
+
+### Les trois niveaux
+
+1. **Garde-fous, sans infra** — `tests/00_validation.tftest.hcl`, `command = plan` : les règles de
+   l'ADR 0001 (jours OU années, `minimum <= default <= maximum`, plafond 5 ans) et les classes
+   de stockage sont vérifiées par les `validation` du module bucket, avec `expect_failures`.
+   Quelques secondes, à lancer sur chaque MR.
+2. **Scénarios par fonctionnalité, sur INT** — un fichier par feature, chacun autonome
+   (il crée son instance COS) et donc filtrable et parallélisable :
+
+   | Fichier | Couvre | Runs |
+   |---|---|---|
+   | `10_cos.tftest.hcl` | instance COS | create → destroy |
+   | `20_bucket_basic.tftest.hcl` | bucket standard | create → update versioning → update custom permissions → destroy |
+   | `21_bucket_storage_classes.tftest.hcl` | vault, cold, smart | create ×3 (un run, module `buckets`) → destroy |
+   | `30_bucket_retention.tftest.hcl` | rétention jours et années (ADR 0001) | create ×2 → update des bornes en jours → destroy |
+   | `40_bucket_immutability.tftest.hcl` | object lock | create (durée 1 j + versioning) → update durée → destroy |
+   | `50_bucket_backup.tftest.hcl` | backup vault | cos → vault → bucket sauvegardé → update rétention backup → destroy (ordre inverse) |
+
+   Chaque `update` vérifie que `output.name` n'a pas changé : une mise à jour qui recrée la
+   souscription est un échec. La destruction est faite par `terraform test` lui-même, en ordre
+   inverse des `run`, même quand une assertion échoue : plus de fichier `.tf` vidé à la main ni
+   de souscriptions oubliées (en cas de coupure réseau, `subscriptions_cleanup.py` reste là).
+3. **Fumée en pprod / prod** — `-filter=tests/10_cos.tftest.hcl` (ou `20_`) après une mise à jour
+   du provider ou de l'orchestrateur : même code, seul `envs/<env>.tfvars` change.
+
+### Pièges connus de `terraform test`
+
+- Deux `run` sur le **même module partagent un seul state** : un second `run` sur
+  `modules/bucket` est une mise à jour, pas une création. Pour plusieurs buckets indépendants
+  dans un fichier, passer par `modules/buckets` (map + `for_each`).
+- La **version du provider** ne peut pas être une variable : `versions.tf` est réécrit par
+  `toolchain_env.py` depuis `provider_version` du tfvars (suivi d'un `init -upgrade` quand elle
+  change). Ne pas l'éditer à la main.
+- Les assertions portent sur ce que le provider renvoie dans `payload` ; si le provider
+  normalise le payload, adapter les assertions plutôt que le module.
+- Le « second plan sans changement » (drift, ADR 0001) ne s'exprime pas en `.tftest.hcl` :
+  `python toolchain_env.py --env int --run plan -- -detailed-exitcode` sur un `main.tf` ad hoc
+  renvoie 2 s'il y a un drift.
+
+### Lancer
+
+```bash
+cd tests/toolchain_tests
+python toolchain_env.py --env int --run test                                   # tout
+python toolchain_env.py --env int --run test -- -filter=tests/30_bucket_retention.tftest.hcl
+python toolchain_env.py --env int --run test -- -verbose                       # plans et outputs
+python toolchain_env.py --env pprod --run test -- -filter=tests/10_cos.tftest.hcl
+```
+
+`toolchain_env.py` ajoute `-var-file=envs/<env>.tfvars`, régénère `versions.tf`, et exporte
+`TF_VAR_prefix` (ton user) : les descriptions des souscriptions créées commencent par ton
+user, ce qui permet de retrouver et nettoyer tes tests dans l'orchestrateur.
+
+### Vers la CI
+
+Un job GitLab nocturne sur INT, avec l'API key lue dans Vault par le job (approle CI) :
+
+```yaml
+toolchain-tests:
+  stage: toolchain
+  rules: [{ if: '$CI_PIPELINE_SOURCE == "schedule"' }]
+  script:
+    - export TF_VAR_prefix=ci-$CI_PIPELINE_ID
+    - python tests/toolchain_tests/toolchain_env.py --env int --skip-login --no-proxy
+        --vault-token "$VAULT_TOKEN" --run test -- -junit-xml=report.xml   # -junit-xml : TF ≥ 1.11
+  artifacts: { reports: { junit: report.xml } }
+```
+
+Sur chaque MR, seulement le niveau 1 (`-filter=tests/00_validation.tftest.hcl`), plus
+`terraform fmt -check -recursive` et `terraform validate`.
 
 ## Préparer l'environnement : `toolchain_env.py`
 
@@ -32,9 +132,9 @@ lancement et n'est jamais écrit sur disque. Le cache est dans
 ```bash
 cd tests/toolchain_tests
 
-# tout enchaîner puis terraform plan / apply dans int/new_version (ou int/)
+# tout enchaîner puis terraform test / plan / apply dans terraform/
+python toolchain_env.py --env int --run test
 python toolchain_env.py --env int --run plan
-python toolchain_env.py --env int --run apply -- -auto-approve
 
 # exporter les variables (API key + proxy) dans le shell courant, puis terraform normalement
 eval "$(python toolchain_env.py --env int)"

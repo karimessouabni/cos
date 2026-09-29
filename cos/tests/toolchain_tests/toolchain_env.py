@@ -148,6 +148,29 @@ VAULT_UI_PATH = "/ui/"
 TERRAFORM_HOST = "repo.artifactory-dogen.group.echonet"
 TERRAFORM_BIN = "terraform"
 NEW_VERSION_DIR = "new_version"
+# Nouvelle arborescence (terraform test) : un root unique terraform/ à côté du
+# script, envs/<env>.tfvars pour ce qui change par environnement, et
+# versions.tf généré depuis provider_version du tfvars.
+TERRAFORM_ROOT_DIR = "terraform"
+ENV_TFVARS_DIR = "envs"
+VERSIONS_TF = "versions.tf"
+VERSIONS_TF_TEMPLATE = """# Généré par toolchain_env.py depuis envs/<env>.tfvars (provider_version) :
+# une contrainte de version ne peut pas être une variable Terraform, et la
+# version du provider orchestrator diffère par environnement (2.3.0-int, ...).
+# Ne pas éditer à la main : `python ../toolchain_env.py --env <env>` le réécrit.
+terraform {
+  required_version = ">= 1.6.0" # terraform test
+
+  required_providers {
+    orchestrator = {
+      source  = "bp2i/orchestrator"
+      version = "%s"
+    }
+  }
+}
+"""
+# Sous-commandes terraform qui acceptent -var-file : envs/<env>.tfvars y est ajouté.
+VAR_FILE_COMMANDS = frozenset({"plan", "apply", "destroy", "test", "refresh", "console"})
 
 # Variables exportées pour terraform (le provider orchestrator et le provider ibm).
 API_KEY_VARS = ("IBM_CLOUD_API_KEY", "ORCHESTRATOR_IBMCLOUD_API_KEY")
@@ -803,20 +826,78 @@ def ensure_terraform_login(host: str, cwd: str, run: Callable[..., int] = run_te
         raise CliExit(EXIT_TERRAFORM_FAILED, f"terraform login {host} a échoué (code {code})")
 
 
-def ensure_terraform_init(cwd: str, reinit: bool = False, run: Callable[..., int] = run_terraform) -> None:
-    if not reinit and os.path.isdir(os.path.join(cwd, ".terraform")):
+def ensure_terraform_init(cwd: str, reinit: bool = False, run: Callable[..., int] = run_terraform,
+                          version_changed: bool = False) -> None:
+    if not reinit and not version_changed and os.path.isdir(os.path.join(cwd, ".terraform")):
         _log(f"terraform init : déjà fait dans {cwd} (--reinit pour refaire).")
         return
-    code = run(["init"], cwd)
+    code = run(["init", "-upgrade"] if version_changed else ["init"], cwd)
     if code != 0:
         raise CliExit(EXIT_TERRAFORM_FAILED, f"terraform init a échoué (code {code})")
 
 
 def default_tests_dir(env: str, root: str | None = None) -> str:
-    """<dossier du script>/<env>/new_version s'il existe, sinon <dossier du script>/<env>."""
+    """<dossier du script>/terraform (root terraform test) s'il existe, sinon
+    l'ancienne arborescence <env>/new_version ou <env>."""
     root = root or os.path.dirname(os.path.abspath(__file__))
+    terraform_root = os.path.join(root, TERRAFORM_ROOT_DIR)
+    if os.path.isdir(terraform_root):
+        return terraform_root
     with_version = os.path.join(root, env, NEW_VERSION_DIR)
     return with_version if os.path.isdir(with_version) else os.path.join(root, env)
+
+
+def env_tfvars_path(cwd: str, env: str) -> str | None:
+    """<cwd>/envs/<env>.tfvars s'il existe (nouvelle arborescence), sinon None."""
+    path = os.path.join(cwd, ENV_TFVARS_DIR, f"{env}.tfvars")
+    return path if os.path.isfile(path) else None
+
+
+def tfvars_value(path: str, name: str) -> str | None:
+    """Valeur (chaîne) de `name = "..."` dans un fichier tfvars, sans parser HCL."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            match = re.search(rf'^\s*{re.escape(name)}\s*=\s*"([^"]*)"', fh.read(), re.MULTILINE)
+    except OSError:
+        return None
+    return match.group(1) if match else None
+
+
+def write_versions_tf(cwd: str, env: str) -> str | None:
+    """Écrit <cwd>/versions.tf avec la version du provider de envs/<env>.tfvars
+    (rien si l'arborescence n'a pas de tfvars). Retourne la version écrite."""
+    tfvars = env_tfvars_path(cwd, env)
+    if not tfvars:
+        return None
+    version = tfvars_value(tfvars, "provider_version")
+    if not version:
+        raise CliExit(EXIT_USAGE, f"provider_version manquant dans {tfvars}")
+    path = os.path.join(cwd, VERSIONS_TF)
+    content = VERSIONS_TF_TEMPLATE % version
+    try:
+        with open(path, encoding="utf-8") as fh:
+            unchanged = fh.read() == content
+    except OSError:
+        unchanged = False
+    if unchanged:
+        _log(f"{VERSIONS_TF} : provider orchestrator {version} (inchangé).")
+        return version
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    _log(f"{VERSIONS_TF} écrit : provider orchestrator {version} (depuis {os.path.relpath(tfvars, cwd)}).")
+    return version
+
+
+def with_var_file(command: Sequence[str], cwd: str, env: str) -> list[str]:
+    """Ajoute -var-file=envs/<env>.tfvars aux sous-commandes qui l'acceptent,
+    sauf si l'utilisateur en a déjà passé un."""
+    command = list(command)
+    tfvars = env_tfvars_path(cwd, env)
+    if not command or command[0] not in VAR_FILE_COMMANDS or not tfvars:
+        return command
+    if any(a == "-var-file" or a.startswith("-var-file=") for a in command):
+        return command
+    return [command[0], f"-var-file={os.path.relpath(tfvars, cwd)}", *command[1:]]
 
 
 # --------------------------------------------------------------------------- #
@@ -1080,8 +1161,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="mode guidé : menus numérotés (défaut quand le script est lancé sans argument)")
     parser.add_argument("--env", choices=list(ENVIRONMENTS), default=os.environ.get(ENV_VAR) or DEFAULT_ENV,
                         help=f"environnement des tests toolchain (défaut: ${ENV_VAR}, sinon {DEFAULT_ENV})")
-    parser.add_argument("--dir", help="dossier terraform des tests (défaut: <env>/new_version ou <env>, "
-                                      "à côté du script)")
+    parser.add_argument("--dir", help="dossier terraform des tests (défaut: terraform/ à côté du script, "
+                                      "sinon <env>/new_version ou <env>)")
+    parser.add_argument("--prefix", help="TF_VAR_prefix : préfixe des descriptions dans l'orchestrateur "
+                                         "(défaut: user du proxy, sinon user système)")
 
     vault = parser.add_argument_group("vault")
     vault.add_argument("--vault", choices=list(VAULTS), help="instance Vault (défaut: celle de --env)")
@@ -1194,6 +1277,11 @@ def _choose(question: str, options: Sequence[tuple[str, T]], ask: Callable[[str]
         print(f"  Taper un nombre entre 1 et {len(options)}.", file=sys.stderr)
 
 
+def _ask_text(question: str, default: str = "", ask: Callable[[str], str] = input) -> str:
+    suffix = f" [Entrée = {default}]" if default else ""
+    return ask(f"{question}{suffix} : ").strip() or default
+
+
 def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
     """Pose les questions une à une et retourne les arguments équivalents
     (None si l'utilisateur quitte)."""
@@ -1205,7 +1293,9 @@ def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
     argv = [] if env == DEFAULT_ENV else ["--env", env]
 
     action = _choose("Que veux-tu faire ?", [
-        ("terraform plan (login, init, token Vault, API key, puis plan)", ["--run", "plan"]),
+        ("terraform test : tous les scénarios (login, init, token Vault, API key, puis test)", ["--run", "test"]),
+        ("terraform test : un seul scénario (fichier demandé ensuite)", ["--run", "test", "--", "-filter="]),
+        ("terraform plan", ["--run", "plan"]),
         ("terraform apply", ["--run", "apply"]),
         ("Ouvrir un sous-shell avec les variables exportées", ["--shell"]),
         ("Imprimer les `export` (pour eval \"$(python toolchain_env.py ...)\")", []),
@@ -1231,7 +1321,9 @@ def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
         ("Aucune", []),
         ("TF_LOG=debug", ["--tf-log"]),
     ], ask)
-    argv += action  # --run doit rester en dernier (REMAINDER)
+    if action and action[-1] == "-filter=":
+        action[-1] += "tests/" + _ask_text("Fichier de scénario (dans tests/)", "20_bucket_basic.tftest.hcl", ask)
+    argv += action  # --run et les arguments terraform restent en dernier
 
     shown = ["<token>" if i and argv[i - 1] == "--vault-token" else a for i, a in enumerate(argv)]
     _log("\nCommande équivalente :\n  python toolchain_env.py " + " ".join(shlex.quote(a) for a in shown) + "\n")
@@ -1252,8 +1344,11 @@ def prepare(args: argparse.Namespace, acquire: Callable[[str], str] | None = Non
     _log(f"Vault : {args.vault_url} (namespace {args.namespace})  secret : {args.secret_path}")
     if not args.skip_login:
         ensure_terraform_login(args.terraform_host, args.dir, run)
+    previous = tfvars_value(os.path.join(args.dir, VERSIONS_TF), "version")
+    version = write_versions_tf(args.dir, args.env)
     if not args.skip_init:
-        ensure_terraform_init(args.dir, args.reinit, run)
+        ensure_terraform_init(args.dir, args.reinit, run,
+                              version_changed=bool(version and previous and version != previous))
     proxy_vars = with_no_proxy(resolve_and_check_proxy(args), args.token_service)
     apply_proxy(proxy_vars)
     if proxy_vars:
@@ -1263,7 +1358,11 @@ def prepare(args: argparse.Namespace, acquire: Callable[[str], str] | None = Non
         api_key = resolve_api_key(args, client, acquire)
     except VaultError as exc:
         raise CliExit(EXIT_VAULT_FAILED, f"Vault : {exc}") from exc
-    return build_env_vars(api_key, args.tf_log, proxy_vars)
+    variables = build_env_vars(api_key, args.tf_log, proxy_vars)
+    if env_tfvars_path(args.dir, args.env):
+        # préfixe des descriptions dans l'orchestrateur : qui a lancé le test
+        variables["TF_VAR_prefix"] = args.prefix or load_setting("proxy_user") or getpass.getuser()
+    return variables
 
 
 def probe(args: argparse.Namespace) -> int:
@@ -1322,7 +1421,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.run:
         _log("Variables exportées : " + ", ".join(variables))  # valeurs non affichées
         try:
-            return run_terraform(args.run, args.dir, env, to_stderr=False)
+            return run_terraform(with_var_file(args.run, args.dir, args.env), args.dir, env, to_stderr=False)
         except CliExit as exc:
             _log(str(exc))
             return exc.code
@@ -1337,7 +1436,8 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(export_lines(variables))
         _log("Variables prêtes : " + ", ".join(variables)
              + f"\nDans le shell courant : eval \"$(python {os.path.basename(__file__)} --env {args.env})\""
-             + f"\nPuis : terraform -chdir={shlex.quote(args.dir)} plan")
+             + f"\nPuis : terraform -chdir={shlex.quote(args.dir)} plan"
+             + (f" -var-file={ENV_TFVARS_DIR}/{args.env}.tfvars" if env_tfvars_path(args.dir, args.env) else ""))
     return EXIT_OK
 
 

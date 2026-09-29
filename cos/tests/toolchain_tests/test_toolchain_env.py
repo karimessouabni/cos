@@ -210,7 +210,7 @@ class ParseArgsTest(unittest.TestCase):
         self.assertEqual(args.vault_url, te.VAULTS["group"])
         self.assertEqual(args.secret_path, te.ENVIRONMENTS["prod"].secret_path)
         self.assertIn("namespace=AP85135", args.ui_url)
-        self.assertTrue(args.dir.endswith(os.sep + "prod"))
+        self.assertTrue(args.dir.endswith(os.sep + te.TERRAFORM_ROOT_DIR))  # root terraform test
 
     def test_overrides_and_run(self):
         args = te.parse_args(["--vault", "staging", "--secret-path", "/a/b/", "--run", "apply", "--", "-auto-approve"])
@@ -654,6 +654,21 @@ class MainTest(VaultServerTest):
         self.assertEqual(run.call_args.args[2]["IBM_CLOUD_API_KEY"], API_KEY)
         self.assertFalse(run.call_args.kwargs["to_stderr"])
 
+    def test_run_test_in_terraform_root(self):
+        root = tempfile.mkdtemp(prefix="tfroot-")
+        os.makedirs(os.path.join(root, "envs"))
+        with open(os.path.join(root, "envs", "int.tfvars"), "w") as fh:
+            fh.write('provider_version = "2.3.0-int"\n')
+        run = mock.Mock(return_value=0)
+        with mock.patch.object(te, "run_terraform", run), mock.patch.dict(os.environ, {}, clear=False):
+            code = te.main(["--env", "int", "--vault-url", self.url, "--skip-login", "--dir", root, "--no-proxy",
+                            "--vault-token", TOKEN_OK, "--prefix", "h90871", "--run", "test", "--", "-verbose"])
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call_args_list[0].args[0], ["init"])  # versions.tf écrit puis init
+        self.assertIn('version = "2.3.0-int"', open(os.path.join(root, "versions.tf")).read())
+        self.assertEqual(run.call_args_list[1].args[0], ["test", "-var-file=envs/int.tfvars", "-verbose"])
+        self.assertEqual(run.call_args_list[1].args[2]["TF_VAR_prefix"], "h90871")
+
     def test_missing_dir(self):
         with mock.patch.object(te, "run_terraform", mock.Mock(return_value=0)):
             code = te.main(["--env", "int", "--vault-url", self.url, "--skip-login", "--dir", "/nope/nope",
@@ -674,7 +689,7 @@ class MainTest(VaultServerTest):
 
 class InteractiveTest(unittest.TestCase):
     def test_menu_builds_argv(self):
-        answers = iter(["1", "1", "2", "2", "2"])  # int, plan, nouveau token, sans proxy, TF_LOG
+        answers = iter(["1", "3", "2", "2", "2"])  # int, plan, nouveau token, sans proxy, TF_LOG
         argv = te.interactive_argv(ask=lambda q: next(answers))
         self.assertEqual(argv, ["--new-token", "--no-proxy", "--tf-log", "--run", "plan"])
         args = te.parse_args(argv)
@@ -682,8 +697,67 @@ class InteractiveTest(unittest.TestCase):
         self.assertTrue(args.new_token)
 
     def test_quit(self):
-        answers = iter(["4", "5"])  # prod, quitter
+        answers = iter(["4", "7"])  # prod, quitter
         self.assertIsNone(te.interactive_argv(ask=lambda q: next(answers)))
+
+    def test_menu_single_scenario(self):
+        answers = iter(["1", "2", "1", "2", "1", "30_bucket_retention.tftest.hcl"])
+        argv = te.interactive_argv(ask=lambda q: next(answers))
+        self.assertEqual(argv, ["--no-proxy", "--run", "test", "--", "-filter=tests/30_bucket_retention.tftest.hcl"])
+        self.assertEqual(te.parse_args(argv).run, ["test", "-filter=tests/30_bucket_retention.tftest.hcl"])
+
+
+class TerraformRootTest(unittest.TestCase):
+    """Nouvelle arborescence : terraform/ + envs/<env>.tfvars + versions.tf généré."""
+
+    def setUp(self) -> None:
+        self.root = tempfile.mkdtemp(prefix="tfroot-")
+        os.makedirs(os.path.join(self.root, "envs"))
+        with open(os.path.join(self.root, "envs", "int.tfvars"), "w") as fh:
+            fh.write('environment      = "int"\nrealm = "rl1"\nprovider_version = "2.3.0-int" # commentaire\n')
+
+    def test_tfvars_value(self):
+        path = os.path.join(self.root, "envs", "int.tfvars")
+        self.assertEqual(te.tfvars_value(path, "provider_version"), "2.3.0-int")
+        self.assertEqual(te.tfvars_value(path, "realm"), "rl1")
+        self.assertIsNone(te.tfvars_value(path, "absent"))
+        self.assertIsNone(te.tfvars_value("/nope", "x"))
+
+    def test_write_versions_tf(self):
+        self.assertEqual(te.write_versions_tf(self.root, "int"), "2.3.0-int")
+        content = open(os.path.join(self.root, "versions.tf")).read()
+        self.assertIn('version = "2.3.0-int"', content)
+        self.assertIn('source  = "bp2i/orchestrator"', content)
+        self.assertEqual(te.tfvars_value(os.path.join(self.root, "versions.tf"), "version"), "2.3.0-int")
+        self.assertEqual(te.write_versions_tf(self.root, "int"), "2.3.0-int")  # inchangé : pas de réécriture
+        self.assertIsNone(te.write_versions_tf(self.root, "pprod"))  # pas de tfvars : ancienne arborescence
+        with open(os.path.join(self.root, "envs", "qual.tfvars"), "w") as fh:
+            fh.write('environment = "qual"\n')
+        with self.assertRaises(te.CliExit):
+            te.write_versions_tf(self.root, "qual")
+
+    def test_with_var_file(self):
+        self.assertEqual(te.with_var_file(["plan"], self.root, "int"), ["plan", "-var-file=envs/int.tfvars"])
+        self.assertEqual(te.with_var_file(["test", "-filter=tests/a.tftest.hcl"], self.root, "int"),
+                         ["test", "-var-file=envs/int.tfvars", "-filter=tests/a.tftest.hcl"])
+        self.assertEqual(te.with_var_file(["plan", "-var-file=x"], self.root, "int"), ["plan", "-var-file=x"])
+        self.assertEqual(te.with_var_file(["init"], self.root, "int"), ["init"])
+        self.assertEqual(te.with_var_file(["plan"], self.root, "pprod"), ["plan"])  # pas de tfvars
+
+    def test_default_dir_prefers_terraform_root(self):
+        base = tempfile.mkdtemp(prefix="tcroot-")
+        os.makedirs(os.path.join(base, "int", "new_version"))
+        self.assertEqual(te.default_tests_dir("int", base), os.path.join(base, "int", "new_version"))
+        os.makedirs(os.path.join(base, te.TERRAFORM_ROOT_DIR))
+        self.assertEqual(te.default_tests_dir("int", base), os.path.join(base, te.TERRAFORM_ROOT_DIR))
+
+    def test_init_upgrade_when_provider_version_changes(self):
+        run = mock.Mock(return_value=0)
+        os.mkdir(os.path.join(self.root, ".terraform"))
+        te.ensure_terraform_init(self.root, False, run, version_changed=False)
+        run.assert_not_called()
+        te.ensure_terraform_init(self.root, False, run, version_changed=True)
+        run.assert_called_once_with(["init", "-upgrade"], self.root)
 
 
 if __name__ == "__main__":
