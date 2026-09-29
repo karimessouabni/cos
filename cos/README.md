@@ -413,7 +413,7 @@ la toolchain (provider `orchestrator`) : `terraform login` et `terraform init` s
 pas déjà été faits, proxy d'entreprise, token Vault via le service token (ou Chrome en secours)
 ou réutilisé s'il est encore valide, lecture de l'API key IBM Cloud dans Vault, puis
 export de `IBM_CLOUD_API_KEY` et `ORCHESTRATOR_IBMCLOUD_API_KEY`. (proxy d'entreprise avec les identifiants de chacun, token Vault via le service token). `--run plan` /
-`--run apply` enchaînent directement terraform ; `eval "$(python toolchain_env.py --env int)"`
+`--run apply` enchaînent directement tofu ; `eval "$(python toolchain_env.py --env int)"`
 exporte les variables dans le shell courant. Voir `tests/toolchain_tests/README.md`.
 
 ## 11. Organisation du dépôt
