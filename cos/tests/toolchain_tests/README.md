@@ -73,6 +73,22 @@ toolchain_tests/
   `python toolchain_env.py --env int --run plan -- -detailed-exitcode` sur un `main.tf` ad hoc
   renvoie 2 s'il y a un drift.
 
+### Terraform ou OpenTofu
+
+`terraform test` demande Terraform 1.6 au minimum (1.7 pour `-filter`). Terraform 1.6+ est
+sous licence BUSL : là où il est interdit, OpenTofu (`tofu`, 1.6+) exécute les mêmes
+fichiers `.tftest.hcl`. Le script prend `terraform` s'il est dans le PATH, sinon `tofu` ;
+`--terraform-bin tofu` ou `TOOLCHAIN_TERRAFORM_BIN=tofu` l'imposent. Avec tofu, `versions.tf`
+est généré avec la source qualifiée `registry.terraform.io/bp2i/orchestrator` (sans hôte, tofu
+irait chercher sur `registry.opentofu.org`), le `tofu login` est reconnu dans
+`credentials.tofurc.json`, et `~/.terraformrc` reste lu en l'absence de `~/.tofurc`.
+
+```bash
+brew install opentofu            # ou : tenv tofu install 1.9.0 && tenv tofu use 1.9.0
+tofu login repo.artifactory-dogen.group.echonet
+python toolchain_env.py --env int --terraform-bin tofu --reinit --run test -- -filter=tests/10_cos.tftest.hcl
+```
+
 ### Lancer
 
 ```bash

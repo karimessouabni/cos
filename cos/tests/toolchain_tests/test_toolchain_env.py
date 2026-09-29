@@ -154,9 +154,38 @@ class TerraformLoginDetectionTest(unittest.TestCase):
             self.assertTrue(te.terraform_logged_in(te.TERRAFORM_HOST, env))
             self.assertFalse(te.terraform_logged_in(te.TERRAFORM_HOST, {}))
 
+    def test_tofu_credentials_and_source(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {te.TERRAFORM_BIN_ENV: "tofu"}), \
+                mock.patch.object(te.os.path, "expanduser", return_value=home):
+            self.assertTrue(te.is_tofu())
+            paths = te.terraform_credentials_paths()
+            self.assertEqual([os.path.basename(p) for p in paths], ["credentials.tofurc.json", "credentials.tfrc.json"])
+            os.makedirs(os.path.dirname(paths[0]))
+            self.assertFalse(te.terraform_logged_in(te.TERRAFORM_HOST, {}))
+            with open(paths[0], "w") as fh:
+                json.dump({"credentials": {te.TERRAFORM_HOST: {"token": "t"}}}, fh)
+            self.assertTrue(te.terraform_logged_in(te.TERRAFORM_HOST, {}))
+            root = tempfile.mkdtemp(prefix="tfroot-")
+            os.makedirs(os.path.join(root, "envs"))
+            open(os.path.join(root, "envs", "int.tfvars"), "w").write('provider_version = "2.3.0-int"\n')
+            te.write_versions_tf(root, "int")
+            self.assertIn('source  = "registry.terraform.io/bp2i/orchestrator"', open(os.path.join(root, "versions.tf")).read())
+        with mock.patch.dict(os.environ, {te.TERRAFORM_BIN_ENV: "terraform"}):
+            self.assertFalse(te.is_tofu())
+
+    def test_resolve_terraform_bin(self):
+        self.assertEqual(te.resolve_terraform_bin("tofu"), "tofu")
+        with mock.patch.object(te.shutil, "which", side_effect=lambda c: "/usr/bin/tofu" if c == "tofu" else None):
+            self.assertEqual(te.resolve_terraform_bin(None), "tofu")
+        with mock.patch.object(te.shutil, "which", return_value=None):
+            self.assertEqual(te.resolve_terraform_bin(None), "terraform")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            self.assertEqual(te.parse_args(["--terraform-bin", "tofu"]).terraform_bin, "tofu")
+            self.assertEqual(os.environ[te.TERRAFORM_BIN_ENV], "tofu")
+
     def test_credentials_file(self):
         with tempfile.TemporaryDirectory() as home, mock.patch.object(
-                te, "terraform_credentials_path", return_value=os.path.join(home, "credentials.tfrc.json")):
+                te, "terraform_credentials_paths", return_value=[os.path.join(home, "credentials.tfrc.json")]):
             self.assertFalse(te.terraform_logged_in(te.TERRAFORM_HOST, {}))
             with open(os.path.join(home, "credentials.tfrc.json"), "w") as fh:
                 json.dump({"credentials": {te.TERRAFORM_HOST: {"token": "abc"}}}, fh)
