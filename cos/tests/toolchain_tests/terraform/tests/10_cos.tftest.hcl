@@ -1,17 +1,12 @@
 # Instance COS seule : création, puis destruction automatique en fin de fichier.
 
-run "create_cos" {
-  module { source = "./modules/cos" }
-  variables {
-    environment = var.environment
-    realm       = var.realm
-    apcode      = var.apcode
-    tier        = var.tier
-    description = "${var.prefix} cos create/delete"
-  }
+variables {
+  scenario = "cos"
+}
 
+run "create_cos" {
   assert {
-    condition     = output.name != "" && output.id != ""
+    condition     = orchestrator_subscription_cos_v1.cos.name != "" && orchestrator_subscription_cos_v1.cos.id != ""
     error_message = "La souscription COS n'a pas de name / id."
   }
 }

@@ -11,13 +11,11 @@ toolchain_tests/
 ├── terraform/                  root unique de `terraform test`
 │   ├── versions.tf             GÉNÉRÉ par toolchain_env.py : version du provider de l'environnement
 │   ├── providers.tf            provider "orchestrator" {} (API key lue dans l'environnement)
-│   ├── variables.tf            environment, realm, provider_version, apcode, tier, prefix
+│   ├── main.tf                 LES VRAIES RESSOURCES : cos, vault (count), buckets (for_each)
+│   ├── variables.tf            contexte (environment, realm, apcode, tier, prefix) + ce que les
+│   │                           scénarios font varier : scenario, with_vault, buckets (map typée
+│   │                           + validations de l'ADR 0001)
 │   ├── envs/<env>.tfvars       ce qui change par environnement : realm + version du provider
-│   ├── modules/
-│   │   ├── cos/                orchestrator_subscription_cos_v1
-│   │   ├── backup_vault/       orchestrator_subscription_cosbackup_vault_v1
-│   │   ├── bucket/             orchestrator_subscription_cosbucket_v1 + payload typé + validations
-│   │   └── buckets/            N buckets en un run (for_each) sur la même instance COS
 │   └── tests/*.tftest.hcl      un fichier par fonctionnalité (voir la stratégie)
 └── int/, pprod/, ...           anciens test.tf monolithiques (à supprimer quand la suite est adoptée)
 ```
@@ -46,13 +44,16 @@ toolchain_tests/
    |---|---|---|
    | `10_cos.tftest.hcl` | instance COS | create → destroy |
    | `20_bucket_basic.tftest.hcl` | bucket standard | create → update versioning → update custom permissions → destroy |
-   | `21_bucket_storage_classes.tftest.hcl` | vault, cold, smart | create ×3 (un run, module `buckets`) → destroy |
+   | `21_bucket_storage_classes.tftest.hcl` | vault, cold, smart | create ×3 en un run → destroy |
    | `30_bucket_retention.tftest.hcl` | rétention jours et années (ADR 0001) | create ×2 → update des bornes en jours → destroy |
    | `40_bucket_immutability.tftest.hcl` | object lock | create (durée 1 j + versioning) → update durée → destroy |
    | `50_bucket_backup.tftest.hcl` | backup vault | cos → vault → bucket sauvegardé → update rétention backup → destroy (ordre inverse) |
 
-   Chaque `update` vérifie que `output.name` n'a pas changé : une mise à jour qui recrée la
-   souscription est un échec. La destruction est faite par `terraform test` lui-même, en ordre
+   Un `run` ne contient que ce qui change (`buckets = { basic = { enable_versioning = true } }`)
+   et ses assertions lisent directement les attributs des ressources du provider
+   (`orchestrator_subscription_cosbucket_v1.bucket["basic"].payload.enable_versioning`) :
+   pas de module, pas de contexte recopié. Chaque `update` vérifie que `name` n'a pas changé :
+   une mise à jour qui recrée la souscription est un échec. La destruction est faite par `terraform test` lui-même, en ordre
    inverse des `run`, même quand une assertion échoue : plus de fichier `.tf` vidé à la main ni
    de souscriptions oubliées (en cas de coupure réseau, `subscriptions_cleanup.py` reste là).
 3. **Fumée en pprod / prod** — `-filter=tests/10_cos.tftest.hcl` (ou `20_`) après une mise à jour
@@ -60,9 +61,9 @@ toolchain_tests/
 
 ### Pièges connus de `terraform test`
 
-- Deux `run` sur le **même module partagent un seul state** : un second `run` sur
-  `modules/bucket` est une mise à jour, pas une création. Pour plusieurs buckets indépendants
-  dans un fichier, passer par `modules/buckets` (map + `for_each`).
+- Tous les `run` d'un fichier travaillent sur **le même state** : une clé de `buckets` qui
+  reste d'un run à l'autre est mise à jour, une clé qui disparaît est détruite, une clé
+  nouvelle est créée. Plusieurs buckets indépendants = plusieurs clés dans un même run.
 - La **version du provider** ne peut pas être une variable : `versions.tf` est réécrit par
   `toolchain_env.py` depuis `provider_version` du tfvars (suivi d'un `init -upgrade` quand elle
   change). Ne pas l'éditer à la main.

@@ -13,7 +13,7 @@ cos/
 ├── tests/toolchain_tests/
 │   ├── toolchain_env.py              ← prépare l'env Terraform toolchain (login, init, proxy, token Vault, API key)
 │   ├── test_toolchain_env.py
-│   ├── terraform/                    ← suite `terraform test` : modules cos / backup_vault / bucket(s),
+│   ├── terraform/                    ← suite `terraform test` : main.tf = ressources cos / vault / buckets,
 │   │   ├── envs/<env>.tfvars            realm + version du provider par environnement,
 │   │   └── tests/*.tftest.hcl           un scénario par fonctionnalité (create → update → destroy)
 │   └── <int|qual|pprod|prod>/        ← anciens test.tf monolithiques, non versionnés ici
