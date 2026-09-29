@@ -194,7 +194,7 @@ Déroulé d'un `tofu test` :
 | `10_cos.tftest.hcl` | instance COS | create → destroy |
 | `20_bucket_basic.tftest.hcl` | bucket standard | create → update versioning → update custom permissions → destroy |
 | `21_bucket_storage_classes.tftest.hcl` | vault, cold, smart | create ×3 en un run → destroy |
-| `30_bucket_retention.tftest.hcl` | rétention jours et années (ADR 0001) | create ×2 → update des bornes en jours → destroy |
+| `30_bucket_retention.tftest.hcl` | rétention jours, années et format historique `default` / `minimum` / `maximum` (ADR 0001) | create ×3 → update des bornes en jours → destroy |
 | `40_bucket_immutability.tftest.hcl` | object lock | create (durée 1 j + versioning) → update durée → destroy |
 | `50_bucket_backup.tftest.hcl` | backup vault | cos → vault → bucket sauvegardé → update rétention backup → destroy |
 

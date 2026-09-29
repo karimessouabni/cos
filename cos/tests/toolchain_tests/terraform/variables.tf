@@ -63,12 +63,17 @@ variable "buckets" {
     backup_retention_days      = optional(number) # crée le backup vault automatiquement
     retention = optional(object({
       retention_enabled = optional(bool, true)
-      default_days      = optional(number)
-      minimum_days      = optional(number)
-      maximum_days      = optional(number)
-      default_years     = optional(number)
-      minimum_years     = optional(number)
-      maximum_years     = optional(number)
+      # format historique (ADR 0001) : jours implicites, déprécié mais accepté
+      default = optional(number)
+      minimum = optional(number)
+      maximum = optional(number)
+      # format courant : une seule unité par demande
+      default_days  = optional(number)
+      minimum_days  = optional(number)
+      maximum_days  = optional(number)
+      default_years = optional(number)
+      minimum_years = optional(number)
+      maximum_years = optional(number)
     }))
   }))
   default = {}

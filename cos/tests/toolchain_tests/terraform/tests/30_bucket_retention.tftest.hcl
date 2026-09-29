@@ -1,5 +1,7 @@
-# Rétention (ADR 0001) : un bucket en jours et un en années, créés ensemble,
-# puis mise à jour des bornes du bucket en jours (l'autre ne doit pas bouger).
+# Rétention (ADR 0001) : un bucket en jours, un en années et un au format
+# historique (default / minimum / maximum = jours implicites, déprécié mais
+# accepté), créés ensemble, puis mise à jour des bornes du bucket en jours
+# (les deux autres ne doivent pas bouger).
 # Le "second plan sans changement" se vérifie avec
 # toolchain_env.py --run plan -- -detailed-exitcode (code 2 = drift).
 
@@ -10,11 +12,16 @@ variables {
 run "create_days_and_years" {
   variables {
     buckets = {
-      days  = { retention = { minimum_days = 1, default_days = 2, maximum_days = 3 } }
-      years = { retention = { minimum_years = 1, default_years = 2, maximum_years = 5 } }
+      days   = { retention = { minimum_days = 1, default_days = 2, maximum_days = 3 } }
+      years  = { retention = { minimum_years = 1, default_years = 2, maximum_years = 5 } }
+      legacy = { retention = { minimum = 1, default = 2, maximum = 3 } }
     }
   }
 
+  assert {
+    condition     = orchestrator_subscription_cosbucket_v1.bucket["legacy"].payload.retention.default == 2 && !contains(keys(orchestrator_subscription_cosbucket_v1.bucket["legacy"].payload.retention), "default_days")
+    error_message = "Le format historique doit partir tel quel (default / minimum / maximum) : c'est le DAG qui le convertit en *_days."
+  }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["days"].payload.retention.default_days == 2
     error_message = "retention.default_days attendu : 2."
@@ -32,8 +39,9 @@ run "create_days_and_years" {
 run "update_days_bounds" {
   variables {
     buckets = {
-      days  = { retention = { minimum_days = 1, default_days = 5, maximum_days = 10 } }
-      years = { retention = { minimum_years = 1, default_years = 2, maximum_years = 5 } }
+      days   = { retention = { minimum_days = 1, default_days = 5, maximum_days = 10 } }
+      years  = { retention = { minimum_years = 1, default_years = 2, maximum_years = 5 } }
+      legacy = { retention = { minimum = 1, default = 2, maximum = 3 } }
     }
   }
 
