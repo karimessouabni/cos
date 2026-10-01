@@ -80,7 +80,7 @@ Chaque étape est sautée quand elle est déjà faite et encore valable.
 | 1 | `tofu login repo.artifactory-dogen.group.echonet` | un credential est déjà enregistré |
 | 2 | `versions.tf` réécrit avec `provider_version` de `envs/<env>.tfvars` | inchangé |
 | 3 | `tofu init` dans `terraform/` (`-upgrade` si la version du provider a changé) | `.terraform/` existe déjà (`--reinit` pour forcer) |
-| 4 | **proxy** `http://<user>:<mdp>@ncproxy.fr.net.intra:8080` : user et mot de passe demandés, puis testés sur `iam.cloud.ibm.com` (407 = identifiants refusés, arrêt) | `https_proxy` déjà exporté dans le shell **et** il répond (sinon il est abandonné pour ncproxy), ou `--no-proxy` |
+| 4 | **proxy** `http://<user>:<mdp>@ncproxy.fr.net.intra:8080` : user et mot de passe demandés **une fois**, testés sur `iam.cloud.ibm.com` (407 = identifiants refusés), puis mémorisés | le mot de passe mémorisé est encore accepté ; ou `https_proxy` déjà exporté dans le shell **et** il répond (sinon il est abandonné pour ncproxy) ; ou `--no-proxy` |
 | 5 | **token Vault** : `GET https://s02vl9956141:4430/v1/token/<uid>?namespace=AP85135` (service token, joint en direct, puis en IPv4 seul, puis via le proxy) ; `auth.client_token` est un token Vault de 30 jours | le token sauvegardé est encore accepté (`lookup-self`), ou `$VAULT_TOKEN` / `--vault-token` |
 | 6 | **API key IBM Cloud** : `GET <vault>/v1/ibm_<compte>/creds/<rôle>_buhub` avec `X-Vault-Token` et `X-Vault-Namespace: AP85135` | l'API key sauvegardée a encore un lease valide |
 | 7 | variables exportées : `IBM_CLOUD_API_KEY`, `ORCHESTRATOR_IBMCLOUD_API_KEY`, `http_proxy` / `https_proxy` / `no_proxy` (minuscules et majuscules : tofu lit les majuscules d'abord, curl l'inverse), `TF_VAR_prefix` (ton user) | jamais |
@@ -88,7 +88,11 @@ Chaque étape est sautée quand elle est déjà faite et encore valable.
 
 Ce qui est mémorisé, dans `~/.cache/cos-toolchain/state.json` (lisible par toi seul) : le
 token Vault, l'API key et son lease, ton uid pour le service token, ton user proxy. Le mot de
-passe du proxy est redemandé à chaque lancement et n'est jamais écrit. `--forget` efface tout.
+passe du proxy est mémorisé après sa première vérification, dans le **trousseau macOS**
+(service `cos-toolchain-proxy`, visible dans Trousseaux d'accès) et, hors macOS, dans ce même
+fichier. S'il est refusé un jour (mot de passe changé), il est oublié et redemandé.
+`--new-proxy-password` pour en saisir un autre, `--forget-proxy-password` pour l'oublier,
+`--forget` efface tout.
 
 ### Environnement → Vault → secret
 
@@ -129,7 +133,8 @@ Premier lancement après installation d'OpenTofu, ou après un changement de ver
 provider : ajouter `--reinit`.
 
 Options utiles : `--uid`, `--proxy-user` / `--proxy-password` (ou `$PROXY_USER` /
-`$PROXY_PASSWORD`) pour ne rien saisir, `--no-proxy`, `--prefix` (préfixe des descriptions),
+`$PROXY_PASSWORD`) pour un lancement sans aucune saisie (CI), `--new-proxy-password`,
+`--forget-proxy-password`, `--no-proxy`, `--prefix` (préfixe des descriptions),
 `--tf-log` (`TF_LOG=debug`), `--new-token`, `--new-key`, `--forget`, `--probe` (diagnostic
 réseau du service token), `--vault` / `--vault-url` / `--token-service` / `--secret-path` /
 `--namespace` pour sortir des valeurs par défaut. `--help` liste tout.
@@ -268,7 +273,8 @@ $ tofu test -var-file=envs/int.tfvars ...
 |---|---|---|
 | `Cannot init client API … iam.cloud.ibm.com … authenticationrequired` | tofu sort vers IBM via un proxy sans identifiants valides (407) | laisser le script exporter le proxy ; à la main, vérifier `env \| grep -i proxy` (majuscules et minuscules) |
 | `Proxy du shell inutilisable (… 503 Service Unavailable)` | un `https_proxy` du profil shell pointe sur un proxy local arrêté (ex. `127.0.0.1:8079`) | rien : le script bascule sur ncproxy ; ou `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY` |
-| `proxy … : identifiants refusés (HTTP 407)` | user ou mot de passe ncproxy faux, ou compte bloqué | ressaisir ; `--proxy-user` / `--proxy-password` pour éviter les prompts |
+| `proxy … : identifiants refusés (HTTP 407)` | user ou mot de passe ncproxy faux, ou compte bloqué | le mot de passe mémorisé est oublié et redemandé ; `--new-proxy-password` pour forcer |
+| `fichier de scénario introuvable … contient : …` | le `-filter` ne correspond à aucun fichier de `terraform/tests/` ; un nom listé avec une espace avant la virgule a un caractère parasite | le script prend le fichier quand même et le signale : renommer le fichier proprement |
 | `service token injoignable` + sondage TCP | l'hôte `s02vl9956141` n'est pas joignable depuis le poste (VPN, DNS) | `--probe` pour le détail ; nom complet via `--token-service` ; `--browser-token` en attendant |
 | `flag provided but not defined: -filter` | tofu 1.6 | le script émule ; ou passer en 1.7+ |
 | `tofu 1.5.x : tofu test demande OpenTofu 1.6 au minimum` | binaire trop ancien | installer OpenTofu ≥ 1.6 puis `--reinit` |

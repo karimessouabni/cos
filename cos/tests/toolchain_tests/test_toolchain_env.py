@@ -289,6 +289,37 @@ class ProxyTest(unittest.TestCase):
         self.assertIn("h90871", asked[0])
         self.assertEqual(proxy["https_proxy"], f"http://h90871:x@{te.DEFAULT_PROXY}")
 
+    def test_password_remembered_after_check(self):
+        with mock.patch.object(te, "_keychain", return_value=None), \
+                mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("https_proxy", None); os.environ.pop("HTTPS_PROXY", None)
+            asked = []
+            proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: "h90871",
+                                               ask_secret=lambda q: (asked.append(q), "pw1")[1], check=lambda pv: "")
+            self.assertEqual(proxy["https_proxy"], f"http://h90871:pw1@{te.DEFAULT_PROXY}")
+            self.assertEqual(len(asked), 1)
+            self.assertEqual(te.load_proxy_password("h90871"), "pw1")
+            # second lancement : rien n'est redemandé
+            proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: self.fail("prompt"),
+                                               ask_secret=lambda q: self.fail("prompt"), check=lambda pv: "")
+            self.assertEqual(proxy["https_proxy"], f"http://h90871:pw1@{te.DEFAULT_PROXY}")
+            # mot de passe mémorisé refusé : oublié, redemandé, re-mémorisé
+            checks = iter(["identifiants refusés (HTTP 407)", ""])
+            proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: "",
+                                               ask_secret=lambda q: "pw2", check=lambda pv: next(checks))
+            self.assertEqual(proxy["https_proxy"], f"http://h90871:pw2@{te.DEFAULT_PROXY}")
+            self.assertEqual(te.load_proxy_password("h90871"), "pw2")
+            # --new-proxy-password force la saisie ; --forget-proxy-password oublie
+            proxy = te.resolve_and_check_proxy(te.parse_args(["--new-proxy-password"]), ask=lambda q: "",
+                                               ask_secret=lambda q: "pw3", check=lambda pv: "")
+            self.assertEqual(te.load_proxy_password("h90871"), "pw3")
+            self.assertEqual(te.main(["--forget-proxy-password"]), 0)
+            self.assertEqual(te.load_proxy_password("h90871"), "")
+            # un mot de passe non vérifié (check sauté) n'est pas mémorisé
+            te.resolve_and_check_proxy(te.parse_args(["--skip-proxy-check"]), ask=lambda q: "",
+                                       ask_secret=lambda q: "pw4", check=lambda pv: self.fail("check"))
+            self.assertEqual(te.load_proxy_password("h90871"), "")
+
     def test_cli_credentials_without_prompt(self):
         args = te.parse_args(["--proxy-user", "u", "--proxy-password", "p", "--proxy", "p:1"])
         proxy = te.resolve_proxy(args, ask=lambda q: self.fail("prompt"), ask_secret=lambda q: self.fail("prompt"),
@@ -779,6 +810,11 @@ class TerraformRootTest(unittest.TestCase):
         self.assertTrue(os.path.islink(link) and os.path.isfile(link))
         with self.assertRaises(te.CliExit):
             te.adapt_test_filter(["test", "-filter=tests/nope.tftest.hcl"], self.root, (1, 6, 6))
+
+    def test_normalize_test_filter_with_stray_characters(self):
+        os.makedirs(os.path.join(self.root, "tests"))
+        open(os.path.join(self.root, "tests", "a.tftest.hcl "), "w").write("")  # espace finale
+        self.assertEqual(te.normalize_test_filter("tests/a.tftest.hcl", self.root), "tests/a.tftest.hcl ")
 
     def test_normalize_test_filter(self):
         os.makedirs(os.path.join(self.root, "tests"))

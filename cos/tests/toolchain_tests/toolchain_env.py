@@ -11,12 +11,10 @@ main avant un `terraform plan` est enchaîné par le script.
                                      si .terraform/ n'existe pas encore (--reinit
                                      pour forcer)
 3. proxy                             http://<user>:<mot de passe>@ncproxy.fr.net.intra:8080
-                                     user et mot de passe demandés à chaque
-                                     lancement (le mot de passe n'est jamais
-                                     sauvegardé), vérifiés tout de suite sur
-                                     iam.cloud.ibm.com (407 = refusés) ; utilisé
-                                     pour les appels suivants et exporté pour
-                                     terraform
+                                     user et mot de passe demandés une fois,
+                                     vérifiés sur iam.cloud.ibm.com (407 =
+                                     refusés) puis mémorisés ; utilisés pour
+                                     les appels suivants et exportés pour tofu
 4. token Vault                       de l'instance Vault de l'environnement
                                      (int -> hvault-dev) : token sauvegardé s'il
                                      est encore valide, sinon
@@ -50,8 +48,12 @@ Utilisation
 Proxy
     export PROXY_USER=h12345 PROXY_PASSWORD=...   # ou --proxy-user / --proxy-password
     --no-proxy                                    # pas de proxy du tout
-Si https_proxy est déjà exporté dans le shell, il est réutilisé tel quel sans
-rien demander. Le user est mémorisé (pas le mot de passe).
+Si https_proxy est déjà exporté dans le shell et répond, il est réutilisé tel
+quel. Sinon user et mot de passe sont demandés une fois, vérifiés sur
+iam.cloud.ibm.com, puis mémorisés (trousseau macOS, sinon
+~/.cache/cos-toolchain/state.json en 0600) : plus rien n'est redemandé tant
+que le proxy les accepte. --new-proxy-password pour en saisir un autre,
+--forget-proxy-password pour l'oublier.
 
 Token Vault
     export VAULT_TOKEN=hvs....                # ou --vault-token
@@ -92,6 +94,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -775,7 +778,55 @@ def save_setting(name: str, value: str) -> None:
     _write_state(state)
 
 
+KEYCHAIN_SERVICE = "cos-toolchain-proxy"
+
+
+def _keychain(*args: str) -> subprocess.CompletedProcess | None:
+    """`security` (trousseau macOS) ; None si indisponible."""
+    if sys.platform != "darwin" or not shutil.which("security"):
+        return None
+    try:
+        return subprocess.run(["security", *args], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def load_proxy_password(user: str) -> str:
+    """Mot de passe du proxy mémorisé pour `user` : trousseau macOS, sinon state.json."""
+    result = _keychain("find-generic-password", "-a", user, "-s", KEYCHAIN_SERVICE, "-w")
+    if result is not None:
+        return result.stdout.strip() if result.returncode == 0 else ""
+    value = (_read_state().get("proxy_passwords") or {}).get(user)
+    return value if isinstance(value, str) else ""
+
+
+def save_proxy_password(user: str, password: str) -> None:
+    """Mémorise le mot de passe validé : trousseau macOS (`security`), sinon
+    state.json (fichier 0600, lisible par toi seul)."""
+    result = _keychain("add-generic-password", "-a", user, "-s", KEYCHAIN_SERVICE, "-w", password, "-U")
+    if result is not None:
+        if result.returncode == 0:
+            _log(f"Mot de passe du proxy mémorisé dans le trousseau macOS (service {KEYCHAIN_SERVICE}).")
+            return
+        _log(f"Trousseau macOS indisponible ({result.stderr.strip()}) : mot de passe gardé dans {state_path()}.")
+    else:
+        _log(f"Mot de passe du proxy mémorisé dans {state_path()} (lisible par toi seul).")
+    state = _read_state()
+    state.setdefault("proxy_passwords", {})[user] = password
+    _write_state(state)
+
+
+def forget_proxy_password(user: str) -> None:
+    _keychain("delete-generic-password", "-a", user, "-s", KEYCHAIN_SERVICE)
+    state = _read_state()
+    if (state.get("proxy_passwords") or {}).pop(user, None) is not None:
+        _write_state(state)
+
+
 def forget_all() -> None:
+    for user in list(_read_state().get("proxy_passwords") or {}) + [load_setting("proxy_user")]:
+        if user:
+            forget_proxy_password(user)
     try:
         os.remove(state_path())
     except FileNotFoundError:
@@ -906,6 +957,18 @@ def normalize_test_filter(path: str, cwd: str) -> str:
         if os.path.isfile(full):
             return os.path.relpath(full, cwd)
     tests_dir = os.path.join(cwd, "tests")
+    # Nom qui ne diffère que par des espaces / caractères invisibles (fichier
+    # renommé à la main) : on le prend tel quel et on conseille de le renommer.
+    wanted = unicodedata.normalize("NFC", os.path.basename(path)).strip()
+    try:
+        entries = os.listdir(tests_dir)
+    except OSError:
+        entries = []
+    for entry in entries:
+        cleaned = "".join(c for c in unicodedata.normalize("NFC", entry) if c.isprintable() and not c.isspace())
+        if cleaned == wanted and os.path.isfile(os.path.join(tests_dir, entry)):
+            _log(f"Fichier trouvé sous le nom {entry!r} (caractères parasites) : à renommer en {wanted!r}.")
+            return os.path.join("tests", entry)
     try:
         found = ", ".join(sorted(os.listdir(tests_dir))) or "(vide)"
     except OSError as exc:
@@ -1015,20 +1078,28 @@ def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
                 "no_proxy": environ.get("no_proxy") or environ.get("NO_PROXY") or args.no_proxy_hosts}
     args.proxy_origin = "asked"
     user = args.proxy_user or load_setting("proxy_user")
-    password = args.proxy_password
+    password = args.proxy_password or (load_proxy_password(user) if user and not args.new_proxy_password else "")
+    if password and not args.proxy_password:
+        _log(f"Proxy {args.proxy} : mot de passe mémorisé pour {user} réutilisé (--new-proxy-password pour le changer).")
+        args.proxy_origin = "saved"
     if not user or not password:
         if not sys.stdin.isatty():
             raise CliExit(EXIT_USAGE, f"proxy {args.proxy} : passer --proxy-user / --proxy-password "
                                       f"(ou ${PROXY_USER_ENV} / ${PROXY_PASSWORD_ENV}), ou --no-proxy")
-        _log(f"Proxy {args.proxy} : identifiants de ton compte (le mot de passe n'est pas sauvegardé).")
+        _log(f"Proxy {args.proxy} : identifiants de ton compte (mémorisés après vérification).")
         user = (ask(f"User du proxy{f' [Entrée = {user}]' if user else ''} : ").strip() or user)
         if not user:
             raise CliExit(EXIT_USAGE, "user du proxy manquant")
-        password = password or ask_secret(f"Mot de passe du proxy pour {user} : ")
-        if not password:
-            raise CliExit(EXIT_USAGE, "mot de passe du proxy manquant")
+        password = args.proxy_password or (load_proxy_password(user) if not args.new_proxy_password else "")
+        if password and not args.proxy_password:
+            args.proxy_origin = "saved"
+        else:
+            password = ask_secret(f"Mot de passe du proxy pour {user} : ")
+            if not password:
+                raise CliExit(EXIT_USAGE, "mot de passe du proxy manquant")
     if user != load_setting("proxy_user"):
         save_setting("proxy_user", user)
+    args.proxy_credentials = (user, password)
     url = proxy_url(args.proxy, user, password)
     return {"http_proxy": url, "https_proxy": url, "no_proxy": args.no_proxy_hosts}
 
@@ -1097,11 +1168,20 @@ def resolve_and_check_proxy(args: argparse.Namespace, ask: Callable[[str], str] 
         _log(f"Proxy du shell inutilisable ({problem}) : passage au proxy {args.proxy} avec identifiants.")
         proxy_vars = resolve_proxy(args, ask, ask_secret, ignore_shell=True)
         problem = check(proxy_vars)
+    if problem and "identifiants refusés" in problem and args.proxy_origin == "saved" and sys.stdin.isatty():
+        user = args.proxy_credentials[0]
+        _log(f"Mot de passe mémorisé refusé par le proxy ({problem}) : oublié, à ressaisir.")
+        forget_proxy_password(user)
+        args.new_proxy_password = True
+        proxy_vars = resolve_proxy(args, ask, ask_secret, ignore_shell=True)
+        problem = check(proxy_vars)
     if problem:
         if "identifiants refusés" in problem:
             raise CliExit(EXIT_USAGE, f"proxy {mask_url(proxy_vars['https_proxy'])} : {problem}. Vérifier le user "
                                       "et le mot de passe (--proxy-user / --proxy-password), ou le compte bloqué.")
         _log(f"Proxy non vérifié ({problem}) ; tofu échouera si le proxy refuse.")
+    elif args.proxy_origin == "asked" and getattr(args, "proxy_credentials", None):
+        save_proxy_password(*args.proxy_credentials)
     return proxy_vars
 
 
@@ -1271,7 +1351,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     vault.add_argument("--probe", action="store_true",
                        help="diagnostic réseau du service token (sondage TCP + GET direct / IPv4 / proxy), puis quitter")
     vault.add_argument("--forget", action="store_true",
-                       help="supprimer tout ce qui est sauvegardé (tokens, API keys), puis quitter")
+                       help="supprimer tout ce qui est sauvegardé (tokens, API keys, mot de passe proxy), puis quitter")
     vault.add_argument("--verify-tls", action="store_true",
                        help="vérifier le certificat de Vault (ignoré par défaut : certificats internes)")
 
@@ -1291,6 +1371,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                        help=f"user du proxy (défaut: ${PROXY_USER_ENV}, sinon mémorisé ou demandé)")
     proxy.add_argument("--proxy-password", default=os.environ.get(PROXY_PASSWORD_ENV),
                        help=f"mot de passe du proxy (défaut: ${PROXY_PASSWORD_ENV}, sinon demandé sans écho)")
+    proxy.add_argument("--new-proxy-password", action="store_true",
+                       help="ignorer le mot de passe du proxy mémorisé et le redemander")
+    proxy.add_argument("--forget-proxy-password", action="store_true",
+                       help="oublier le mot de passe du proxy mémorisé (trousseau / cache), puis quitter")
     proxy.add_argument("--no-proxy", action="store_true", help="aucun proxy")
     proxy.add_argument("--no-proxy-hosts", default=DEFAULT_NO_PROXY, metavar="HOSTS",
                        help=f"valeur de no_proxy (défaut: {DEFAULT_NO_PROXY} ; l'hôte du service token "
@@ -1485,7 +1569,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.forget:
         forget_all()
-        _log(f"Cache supprimé ({state_path()}).")
+        _log(f"Cache supprimé ({state_path()}), mot de passe du proxy oublié.")
+        return EXIT_OK
+    if args.forget_proxy_password:
+        user = args.proxy_user or load_setting("proxy_user")
+        if user:
+            forget_proxy_password(user)
+        _log(f"Mot de passe du proxy oublié pour {user or '(aucun user mémorisé)'}.")
         return EXIT_OK
     if args.probe:
         return probe(args)
