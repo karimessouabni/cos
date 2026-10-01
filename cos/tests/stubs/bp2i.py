@@ -18,7 +18,11 @@ from enum import Enum
 
 try:  # vraie lib présente : on réutilise ses exceptions
     from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
-except ImportError:  # pragma: no cover - dépend de l'environnement
+except Exception:  # pragma: no cover - dépend de l'environnement
+    # ImportError si la lib est absente ; mais aussi KeyError & co. quand elle
+    # est installée (CI) et que son import charge sa config, qui lit des
+    # variables d'environnement sans défaut (ORCHESTRATOR_MULTIREADER_SERVICE_*).
+    # Les tests unitaires ne doivent pas en dépendre : doublure dans les deux cas.
 
     class DeclineDemandException(Exception):
         """Refus fonctionnel d'une demande."""

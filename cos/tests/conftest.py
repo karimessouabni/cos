@@ -41,6 +41,10 @@ for _key, _value in {
     "DEFAULT_PRODUCT_BRANCH": "main",
     "AIRFLOW__CORE__UNIT_TEST_MODE": "True",
     "AIRFLOW__CORE__LOAD_EXAMPLES": "False",
+    # config/multireader.py de la lib : os.environ[...] sans défaut (vu en CI)
+    "ORCHESTRATOR_MULTIREADER_SERVICE_HOST": "localhost",
+    "ORCHESTRATOR_MULTIREADER_SERVICE_PORT": "8080",
+    "ORCHESTRATOR_MULTIREADER_SERVICE_URL": "http://localhost:8080",
 }.items():
     os.environ.setdefault(_key, _value)
 
@@ -56,7 +60,7 @@ FORCE_STUBS = os.environ.get("COS_TESTS_FORCE_STUBS", "1") != "0"
 def _install_if_missing(name: str, module: types.ModuleType) -> None:
     try:
         importlib.import_module(name)
-    except ImportError:
+    except Exception:  # ImportError, ou l'import de la vraie lib qui échoue sur sa config (KeyError)
         sys.modules[name] = module
 
 
