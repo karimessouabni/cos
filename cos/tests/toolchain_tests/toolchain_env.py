@@ -893,11 +893,28 @@ def terraform_version(terraform: str | None = None) -> tuple[int, ...] | None:
     return tuple(int(x) for x in match.groups()) if match else None
 
 
+def normalize_test_filter(path: str, cwd: str) -> str:
+    """Chemin d'un -filter relatif à <cwd> (là où tofu tourne) : accepte aussi
+    un chemin depuis le dossier du script (terraform/tests/x), un chemin absolu,
+    ou le seul nom du fichier (x -> tests/x)."""
+    candidates = [path, os.path.join("tests", os.path.basename(path))]
+    parts = path.replace("\\", "/").split("/")
+    candidates += ["/".join(parts[i:]) for i in range(1, len(parts))]
+    for candidate in candidates:
+        full = candidate if os.path.isabs(candidate) else os.path.join(cwd, candidate)
+        if os.path.isfile(full):
+            return os.path.relpath(full, cwd)
+    raise CliExit(EXIT_USAGE, f"fichier de scénario introuvable : {path} (chemins relatifs à {cwd}, "
+                              "ex. -filter=tests/20_bucket_basic.tftest.hcl)")
+
+
 def adapt_test_filter(command: Sequence[str], cwd: str, version: tuple[int, ...] | None) -> list[str]:
-    """`terraform test -filter=<fichier>` n'existe qu'à partir de 1.7 : avant,
-    les fichiers demandés sont liés dans <cwd>/.tftest-filter/ et terraform
-    reçoit -test-directory=.tftest-filter à la place."""
-    command = list(command)
+    """Normalise les -filter (relatifs au dossier où tofu tourne). Puis, comme
+    `test -filter=<fichier>` n'existe qu'à partir de 1.7, en 1.6 les fichiers
+    demandés sont liés dans <cwd>/.tftest-filter/ et tofu reçoit
+    -test-directory=.tftest-filter à la place."""
+    command = [f"-filter={normalize_test_filter(a[len('-filter='):], cwd)}" if a.startswith("-filter=") else a
+               for a in command] if command and command[0] == "test" else list(command)
     filters = [a[len("-filter="):] for a in command if a.startswith("-filter=")]
     if not command or command[0] != "test" or not filters or version is None or version >= (1, 7):
         return command
@@ -906,8 +923,6 @@ def adapt_test_filter(command: Sequence[str], cwd: str, version: tuple[int, ...]
     os.makedirs(link_dir)
     for f in filters:
         target = os.path.join(cwd, f)
-        if not os.path.isfile(target):
-            raise CliExit(EXIT_USAGE, f"fichier de scénario introuvable : {target}")
         os.symlink(os.path.relpath(target, link_dir), os.path.join(link_dir, os.path.basename(f)))
     _log(f"{TERRAFORM_BIN} {'.'.join(map(str, version))} : -filter émulé via -test-directory={TEST_FILTER_DIR} "
          f"(passer en {TERRAFORM_BIN} >= 1.7 pour le vrai -filter).")

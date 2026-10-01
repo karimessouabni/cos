@@ -780,6 +780,18 @@ class TerraformRootTest(unittest.TestCase):
         with self.assertRaises(te.CliExit):
             te.adapt_test_filter(["test", "-filter=tests/nope.tftest.hcl"], self.root, (1, 6, 6))
 
+    def test_normalize_test_filter(self):
+        os.makedirs(os.path.join(self.root, "tests"))
+        open(os.path.join(self.root, "tests", "a.tftest.hcl"), "w").write("")
+        base = os.path.basename(self.root)
+        for given in ("tests/a.tftest.hcl", f"{base}/tests/a.tftest.hcl", "a.tftest.hcl",
+                      os.path.join(self.root, "tests", "a.tftest.hcl"), f"x/y/{base}/tests/a.tftest.hcl"):
+            self.assertEqual(te.normalize_test_filter(given, self.root), "tests/a.tftest.hcl", given)
+        self.assertEqual(te.adapt_test_filter(["test", f"-filter={base}/tests/a.tftest.hcl"], self.root, (1, 9, 0)),
+                         ["test", "-filter=tests/a.tftest.hcl"])
+        with self.assertRaises(te.CliExit):
+            te.normalize_test_filter("tests/zz.tftest.hcl", self.root)
+
     def test_terraform_version(self):
         with mock.patch.object(te.subprocess, "run", return_value=mock.Mock(stdout='{"terraform_version": "1.6.6"}')):
             self.assertEqual(te.terraform_version(), (1, 6, 6))
