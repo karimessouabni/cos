@@ -897,6 +897,7 @@ def normalize_test_filter(path: str, cwd: str) -> str:
     """Chemin d'un -filter relatif à <cwd> (là où tofu tourne) : accepte aussi
     un chemin depuis le dossier du script (terraform/tests/x), un chemin absolu,
     ou le seul nom du fichier (x -> tests/x)."""
+    path = path.strip().strip("\"'").replace("\u00a0", "").replace("\u2011", "-").replace("\u2013", "-")
     candidates = [path, os.path.join("tests", os.path.basename(path))]
     parts = path.replace("\\", "/").split("/")
     candidates += ["/".join(parts[i:]) for i in range(1, len(parts))]
@@ -904,8 +905,13 @@ def normalize_test_filter(path: str, cwd: str) -> str:
         full = candidate if os.path.isabs(candidate) else os.path.join(cwd, candidate)
         if os.path.isfile(full):
             return os.path.relpath(full, cwd)
-    raise CliExit(EXIT_USAGE, f"fichier de scénario introuvable : {path} (chemins relatifs à {cwd}, "
-                              "ex. -filter=tests/20_bucket_basic.tftest.hcl)")
+    tests_dir = os.path.join(cwd, "tests")
+    try:
+        found = ", ".join(sorted(os.listdir(tests_dir))) or "(vide)"
+    except OSError as exc:
+        found = f"dossier absent ({exc.strerror})"
+    raise CliExit(EXIT_USAGE, f"fichier de scénario introuvable : {path!r} (chemins relatifs à {cwd}, "
+                              f"ex. -filter=tests/20_bucket_basic.tftest.hcl).\n  {tests_dir} contient : {found}")
 
 
 def adapt_test_filter(command: Sequence[str], cwd: str, version: tuple[int, ...] | None) -> list[str]:
