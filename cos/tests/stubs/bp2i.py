@@ -16,13 +16,24 @@ que les ``pytest.raises`` fonctionnent quel que soit le module qui lève.
 import types
 from enum import Enum
 
-try:  # vraie lib présente : on réutilise ses exceptions
-    from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
-except Exception:  # pragma: no cover - dépend de l'environnement
-    # ImportError si la lib est absente ; mais aussi KeyError & co. quand elle
-    # est installée (CI) et que son import charge sa config, qui lit des
-    # variables d'environnement sans défaut (ORCHESTRATOR_MULTIREADER_SERVICE_*).
-    # Les tests unitaires ne doivent pas en dépendre : doublure dans les deux cas.
+# Importer la vraie lib charge toute sa config, qui lit des variables
+# d'environnement sans défaut (ORCHESTRATOR_MULTIREADER_SERVICE_PORT,
+# READER_URL, ...) : KeyError en CI, où la lib est installée sans la
+# plateforme. En mode stubs (défaut), on ne l'importe donc jamais ; seul
+# COS_TESTS_FORCE_STUBS=0 (venv complet, tests d'intégration) réutilise sa
+# classe d'exception, pour que les pytest.raises fonctionnent quel que soit
+# le module qui lève.
+import os
+
+if os.environ.get("COS_TESTS_FORCE_STUBS", "1") == "0":
+    try:
+        from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
+    except Exception:  # pragma: no cover - dépend de l'environnement
+        DeclineDemandException = None
+else:
+    DeclineDemandException = None
+
+if DeclineDemandException is None:
 
     class DeclineDemandException(Exception):
         """Refus fonctionnel d'une demande."""

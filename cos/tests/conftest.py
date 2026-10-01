@@ -45,6 +45,7 @@ for _key, _value in {
     "ORCHESTRATOR_MULTIREADER_SERVICE_HOST": "localhost",
     "ORCHESTRATOR_MULTIREADER_SERVICE_PORT": "8080",
     "ORCHESTRATOR_MULTIREADER_SERVICE_URL": "http://localhost:8080",
+    "READER_URL": "http://localhost:8080",
 }.items():
     os.environ.setdefault(_key, _value)
 
