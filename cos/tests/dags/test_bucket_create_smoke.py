@@ -18,12 +18,7 @@ import pytest
 
 from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
 
-from tests.dags.test_bucket_create import (  # noqa: F401 - fixtures réutilisées
-    REALM,
-    happy_services,
-    make_payload,
-    state_manager,
-)
+from tests.dags.support import REALM
 
 
 def test_le_dag_declare_six_etapes_dans_l_ordre(dag):

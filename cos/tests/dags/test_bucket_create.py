@@ -5,7 +5,6 @@ Chaque étape est appelée comme une fonction (voir la fixture ``dag`` dans
 ``cos_service.services.*`` sont des ``MagicMock`` (fixture ``services``), sauf
 ``immutability_service`` qui est le vrai.
 """
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -16,47 +15,11 @@ from cos_service.schemas.bucket_retention import BucketRetention
 from cos_service.schemas.immutability import Immutability
 from cos_service.schemas.status import Status
 from cos_service.schemas.subscription_status import SubscriptionStatus
+from tests.dags.support import ACCOUNT_CRNS, BACKUP_VAULT, COS_INSTANCE, REALM, TF_OUTPUTS
 
 
 # --- helpers ------------------------------------------------------------------
 
-class FakeRow(dict):
-    """Ligne ORM factice : supporte ``dict(row)`` et ``row.attribut``."""
-
-    def __getattr__(self, name):
-        try:
-            return self[name]
-        except KeyError as exc:
-            raise AttributeError(name) from exc
-
-
-REALM = {
-    "name": "realm-a",
-    "realm_apcode_details": [{"apcode": "AP1"}],
-    "wklapp_account_number": "wk-123",
-}
-
-COS_INSTANCE = FakeRow(
-    subscription_id="cos-sub",
-    crn="crn:cos",
-    name="cos-a",
-    environment="dev",
-    context={"realm": "realm-a", "app_code": "AP1", "wklapp_account_name": "wklapp-a"},
-)
-
-BACKUP_VAULT = {"subscription_id": "bv-sub", "crn": "crn:bv"}
-
-ACCOUNT_CRNS = {"cloudlogs": "crn:logs", "encryption_key": "crn:kms"}
-
-SECRETS = {
-    "vault_read_token": "rt",
-    "vault_read_addr": "ra",
-    "vault_write_token": "wt",
-    "vault_write_addr": "wa",
-    "gitlab_token": "gl",
-}
-
-TF_OUTPUTS = {"bucket_name": {"value": "bucket-a"}, "bucket_crn": {"value": "crn:bucket"}}
 
 
 def fresh_immutability(versioning=False, choice=Immutability.NONE) -> dict:
@@ -73,44 +36,6 @@ def fresh_immutability(versioning=False, choice=Immutability.NONE) -> dict:
 
 def validated(backup_vault=None) -> dict:
     return {"realm": REALM, "cos_instance": dict(COS_INSTANCE), "backup_vault": backup_vault}
-
-
-@pytest.fixture
-def make_payload(dag):
-    def factory(**overrides):
-        fields = dict(
-            realm="realm-a",
-            apcode="AP1",
-            environment="dev",
-            region="eu-de",
-            subscription_id="sub-1",
-            cos_instance="co21000001",
-            storage_class=dag.module.BucketCreatePayload.StorageClass.STANDARD,
-        )
-        fields.update(overrides)
-        return dag.module.BucketCreatePayload(**fields)
-
-    return factory
-
-
-@pytest.fixture
-def state_manager():
-    manager = MagicMock(name="state_manager")
-    manager.get_subscription.return_value.description = "my bucket"
-    return manager
-
-
-@pytest.fixture
-def happy_services(services):
-    """Mocks configurés pour une demande valide."""
-    services.contextService.get_realm.return_value = REALM
-    services.contextService.get_apcodes.return_value = ["AP1"]
-    services.contextService.get_account_instances_crn.return_value = ACCOUNT_CRNS
-    services.cosService.get_cos_instance_by_name.return_value = COS_INSTANCE
-    services.cosService.get_cos_instance_status.return_value = SubscriptionStatus.ACTIVE.value
-    services.backup_vault_service.get_backup_vault_by_name.return_value = BACKUP_VAULT
-    services.vault_service.get_vault_secrets.return_value = SECRETS
-    return services
 
 
 # --- câblage ------------------------------------------------------------------

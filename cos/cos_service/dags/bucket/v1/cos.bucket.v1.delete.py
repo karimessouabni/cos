@@ -11,11 +11,11 @@ from bp2i_airflow_library import add_project_to_path
 
 add_project_to_path()
 
-import logging
-from pathlib import Path
+import logging  # noqa: E402 - après add_project_to_path()
+from pathlib import Path  # noqa: E402 - après add_project_to_path()
 
-from bp2i_airflow_library.dag import product_action, step
-from bp2i_airflow_library.dependencies import (
+from bp2i_airflow_library.dag import product_action, step  # noqa: E402 - après add_project_to_path()
+from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_project_to_path()
     SASession,
     SchematicsBackend,
     Vault,
@@ -25,13 +25,13 @@ from bp2i_airflow_library.dependencies import (
     sqlalchemy_session_dependency,
     vault_dependency,
 )
-from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
-from bp2i_airflow_library.schemas import ProductActionConfig, ProductActionPayload
-from bp2i_terraform.components.cooldown_policies import LinearCooldownPolicy
+from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException  # noqa: E402 - après add_project_to_path()
+from bp2i_airflow_library.schemas import ProductActionConfig, ProductActionPayload  # noqa: E402 - après add_project_to_path()
+from bp2i_terraform.components.cooldown_policies import LinearCooldownPolicy  # noqa: E402 - après add_project_to_path()
 
-from cos_service.schemas.action import Action
-from cos_service.schemas.status import Status
-from cos_service.schemas.subscription_status import SubscriptionStatus
+from cos_service.schemas.action import Action  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.status import Status  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.subscription_status import SubscriptionStatus  # noqa: E402 - après add_project_to_path()
 
 logger = logging.getLogger(__name__)
 

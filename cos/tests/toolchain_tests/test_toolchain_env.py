@@ -292,7 +292,8 @@ class ProxyTest(unittest.TestCase):
     def test_password_remembered_after_check(self):
         with mock.patch.object(te, "_keychain", return_value=None), \
                 mock.patch.object(sys.stdin, "isatty", return_value=True), mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("https_proxy", None); os.environ.pop("HTTPS_PROXY", None)
+            os.environ.pop("https_proxy", None)
+            os.environ.pop("HTTPS_PROXY", None)
             asked = []
             proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: "h90871",
                                                ask_secret=lambda q: (asked.append(q), "pw1")[1], check=lambda pv: "")
@@ -380,7 +381,8 @@ class ProxyTest(unittest.TestCase):
     def test_rejected_credentials_stop(self):
         args = te.parse_args(["--proxy-user", "u", "--proxy-password", "p"])
         with mock.patch.dict(os.environ, {}, clear=False), self.assertRaises(te.CliExit) as ctx:
-            os.environ.pop("https_proxy", None); os.environ.pop("HTTPS_PROXY", None)
+            os.environ.pop("https_proxy", None)
+            os.environ.pop("HTTPS_PROXY", None)
             te.resolve_and_check_proxy(args, check=lambda pv: "identifiants refusés (HTTP 407)")
         self.assertIn("identifiants refusés", str(ctx.exception))
         self.assertNotIn(":p@", str(ctx.exception))

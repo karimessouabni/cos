@@ -4,17 +4,16 @@ from typing import Optional
 
 add_project_to_path()
 
-import logging
-from pathlib import Path
+import logging  # noqa: E402 - après add_project_to_path()
+from pathlib import Path  # noqa: E402 - après add_project_to_path()
 
-from bp2i_airflow_library.config import ENVIRONMENT
-from bp2i_airflow_library.dag import product_action, step
-from bp2i_airflow_library.dependencies import (
+from bp2i_airflow_library.config import ENVIRONMENT  # noqa: E402 - après add_project_to_path()
+from bp2i_airflow_library.dag import product_action, step  # noqa: E402 - après add_project_to_path()
+from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_project_to_path()
     SASession,
     SchematicsBackend,
     StateManager,
     Vault,
-    airflow_context_dependency,
     depends,
     payload_dependency,
     smart_schematics_backend_dependency,
@@ -22,17 +21,16 @@ from bp2i_airflow_library.dependencies import (
     state_manager_dependency,
     vault_dependency,
 )
-from bp2i_airflow_library.exceptions.flow_control import (
+from bp2i_airflow_library.exceptions.flow_control import (  # noqa: E402 - après add_project_to_path()
     DeclineDemandException,
-    mark_task_as_declined,
 )
-from bp2i_airflow_library.schemas import Field, ProductCreatePayload
+from bp2i_airflow_library.schemas import Field, ProductCreatePayload  # noqa: E402 - après add_project_to_path()
 
-from cos_service.schemas.bucket_retention import BucketRetention
-from cos_service.schemas.bucket_backup import BucketBackup
-from cos_service.schemas.immutability import Immutability
-from cos_service.schemas.status import Status
-from cos_service.schemas.subscription_status import SubscriptionStatus
+from cos_service.schemas.bucket_retention import BucketRetention  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.bucket_backup import BucketBackup  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.immutability import Immutability  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.status import Status  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.subscription_status import SubscriptionStatus  # noqa: E402 - après add_project_to_path()
 
 logger = logging.getLogger(__name__)
 

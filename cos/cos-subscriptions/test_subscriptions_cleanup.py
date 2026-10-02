@@ -220,7 +220,11 @@ class PaginationTests(unittest.TestCase):
 
     def test_first_page_and_max_pages(self):
         calls = []
-        full = lambda p, s: (calls.append(p), {"result": {"rows": [_row(f"a{p}", []), _row(f"b{p}", [])]}})[1]
+
+        def full(p, s):
+            calls.append(p)
+            return {"result": {"rows": [_row(f"a{p}", []), _row(f"b{p}", [])]}}
+
         rows = sc.iterate_pages(full, size=2, first_page=0, max_pages=3)
         self.assertEqual(calls, [0, 1, 2])
         self.assertEqual(len(rows), 6)

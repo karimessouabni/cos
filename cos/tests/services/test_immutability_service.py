@@ -1,7 +1,4 @@
 """Tests du service d'immutabilité : logique pure, sans Airflow ni base."""
-import sys
-from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError

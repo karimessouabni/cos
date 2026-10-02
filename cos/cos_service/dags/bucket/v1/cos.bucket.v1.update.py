@@ -11,13 +11,13 @@ from bp2i_airflow_library import add_project_to_path
 
 add_project_to_path()
 
-import logging
-from pathlib import Path
+import logging  # noqa: E402 - après add_project_to_path()
+from pathlib import Path  # noqa: E402 - après add_project_to_path()
 
-from airflow.sensors.date_time import DateTimeSensorAsync  # Airflow 2.x
+from airflow.sensors.date_time import DateTimeSensorAsync  # Airflow 2.x  # noqa: E402 - après add_project_to_path()
 
-from bp2i_airflow_library.dag import product_action, step
-from bp2i_airflow_library.dependencies import (
+from bp2i_airflow_library.dag import product_action, step  # noqa: E402 - après add_project_to_path()
+from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_project_to_path()
     SASession,
     SchematicsBackend,
     StateManager,
@@ -29,13 +29,13 @@ from bp2i_airflow_library.dependencies import (
     state_manager_dependency,
     vault_dependency,
 )
-from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
-from bp2i_airflow_library.schemas import Field, ProductActionPayload
+from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException  # noqa: E402 - après add_project_to_path()
+from bp2i_airflow_library.schemas import Field, ProductActionPayload  # noqa: E402 - après add_project_to_path()
 
-from cos_service.schemas.bucket_backup import BucketBackup
-from cos_service.schemas.bucket_retention import BucketRetention
-from cos_service.schemas.status import Status
-from cos_service.schemas.subscription_status import SubscriptionStatus
+from cos_service.schemas.bucket_backup import BucketBackup  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.bucket_retention import BucketRetention  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.status import Status  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.subscription_status import SubscriptionStatus  # noqa: E402 - après add_project_to_path()
 
 logger = logging.getLogger(__name__)
 

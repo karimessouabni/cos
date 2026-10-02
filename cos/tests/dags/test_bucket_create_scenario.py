@@ -20,7 +20,6 @@ Lancement :
     python -m pytest tests/dags/test_bucket_create_scenario.py -v
 """
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -30,17 +29,7 @@ from cos_service.schemas.immutability import Immutability
 from cos_service.schemas.status import Status
 from cos_service.schemas.subscription_status import SubscriptionStatus
 
-# Fixtures et constantes partagées avec les tests par étape.
-from tests.dags.test_bucket_create import (  # noqa: F401 - fixtures importées pour pytest
-    ACCOUNT_CRNS,
-    BACKUP_VAULT,
-    COS_INSTANCE,
-    REALM,
-    TF_OUTPUTS,
-    happy_services,
-    make_payload,
-    state_manager,
-)
+from tests.dags.support import ACCOUNT_CRNS, BACKUP_VAULT, COS_INSTANCE, REALM, TF_OUTPUTS
 
 SESSION = "session"
 TF = "tf"

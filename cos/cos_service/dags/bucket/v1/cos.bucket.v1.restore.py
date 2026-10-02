@@ -13,9 +13,8 @@ from __future__ import annotations
 import json
 import logging
 import time
-from os import access
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List
 
 # ---------------------------------------------------------------
 # 2  Ajustement du PYTHONPATH (doit être fait avant
@@ -28,36 +27,31 @@ add_project_to_path()  # <-- exécuté immédiatement
 # ---------------------------------------------------------------
 # 3  Imports de tiers / packages externes
 # ---------------------------------------------------------------
-from airflow.sensors.base import PokeReturnValue
 
 # ---------------------------------------------------------------
 # 4  Imports de projet (bp2i_airflow_library)
 # ---------------------------------------------------------------
-from bp2i_airflow_library.config import ENVIRONMENT
-from bp2i_airflow_library.dag import product_action, step
-from bp2i_airflow_library.dependencies import (
+from bp2i_airflow_library.config import ENVIRONMENT  # noqa: E402 - après add_project_to_path()
+from bp2i_airflow_library.dag import product_action, step  # noqa: E402 - après add_project_to_path()
+from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_project_to_path()
     Vault,
     StateManager,
     depends,
     payload_dependency,
     state_manager_dependency,
-    airflow_context_dependency,
     sqlalchemy_session_dependency,
     smart_schematics_backend_dependency,
     SchematicsBackend,
     vault_dependency,
     SASession,
 )
-from bp2i_airflow_library.schemas import Field, ProductActionPayload, ProductActionConfig
-from cos_service.schemas.subscription_status import SubscriptionStatus
-from cos_service.schemas.status import Status
+from bp2i_airflow_library.schemas import Field, ProductActionPayload, ProductActionConfig  # noqa: E402 - après add_project_to_path()
 
 # ---------------------------------------------------------------
 # 5  Imports de projet (cos_service)
 # ---------------------------------------------------------------
-from cos_service.models.BackupVault import BackupVault
-from cos_service.models.BackupVaultRestore import BackupVaultRestore
-from cos_service.schemas.restore_status import RestoreStatus
+from cos_service.models.BackupVaultRestore import BackupVaultRestore  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.restore_status import RestoreStatus  # noqa: E402 - après add_project_to_path()
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +97,7 @@ def bucket_restore_backup_vault():
             errors.append(
                 "A clean-bucket operation on source bucket is already ongoing. Restore cannot be started meanwhile."
             )
-        if source_bucket.get("object_versioning_enabled") == False:
+        if source_bucket.get("object_versioning_enabled") is False:
             errors.append(
                 "The source bucket must have versioning enabled."
             )
@@ -282,12 +276,13 @@ def bucket_restore_backup_vault():
         }
 
         description = state_manager.get_subscription().description
+        ws_id_created = None  # workspace créé, supprimé dans le finally
+        restore_id = None
 
         try:
             if True:  # restore_backup_vault["workspace"]["workspace_id"] is None:
                 logger.info("Terraform create workspace")
                 stale_list = []
-                ws_id_created = None  # <- initialisé ici, utilisé par le finally
                 stale_ws = None
                 try:
                     stale_list = tf.workspaces.get_by_name(ws_name) or []
@@ -325,6 +320,7 @@ def bucket_restore_backup_vault():
                     secrets["gitlab_token"],
                     product_branch=payload.product_branch,
                 )
+                ws_id_created = create_ws_result["id"]
 
                 # 3) No restore found =>  persist REQUESTED
                 restore = BackupVaultRestore(
@@ -350,10 +346,9 @@ def bucket_restore_backup_vault():
                 state_manager.push_state({"workspace_name": ws_name})
                 tf_workspace = tf.workspaces.get_by_id(create_ws_result["id"])
                 tf_workspace.plan()
-                apply_activity = tf_workspace.apply()
+                tf_workspace.apply()
                 # --- récupérer le restore_id via les outputs, puis persister ---
                 ws_outputs = tf_workspace.get_outputs()  # adapte au nom exact dans la lib
-                restore_id = None
                 for out in ws_outputs:  # un par template_data
                     for values in out.output_values:  # liste de dicts d'outputs
                         if "restore_id" in values:
@@ -370,9 +365,9 @@ def bucket_restore_backup_vault():
                 mark_complete(session, restore.id, restore_id)
                 return create_ws_result["id"]
 
-            else:
+            else:  # pragma: no cover - branche inactive tant que le `if True` ci-dessus tient
                 logger.info("Workspace already created")
-                return workspace['workspace_id']
+                return ws_id_created
 
         except Exception as e:
             # update_bucket_status(payload.subscription_id, SubscriptionStatus.LOCKED, session)
@@ -381,17 +376,20 @@ def bucket_restore_backup_vault():
                 mark_failed(session, restore.id, restore_id, e)
             raise e
         finally:
-            try:
-                workspace = tf.workspaces.get_by_id(workspace_id=workspace['workspace_id'])
-                workspace.delete()
-            except Exception:
-                logger.warning("ws cleanup failed ")
+            # Workspace de restauration temporaire : supprimé quoi qu'il arrive.
+            # (Avant : `workspace['workspace_id']` n'existait pas -> NameError
+            # avalé par le except, le workspace n'était jamais nettoyé.)
+            if ws_id_created is not None:
+                try:
+                    tf.workspaces.get_by_id(workspace_id=ws_id_created).delete()
+                except Exception:
+                    logger.warning("ws cleanup failed for %s", ws_id_created)
 
     input_user_validation = input_user_validation()
     iam_token = get_wklapp_iam_token()
-    backup_vault = validate_backup_vault()
+    validate_backup_vault()
     restore_target = select_recovery_range(iam_token, input_user_validation)
-    restore_result = create_tf_workspace_and_launch_restore(iam_token, input_user_validation, restore_target)
+    create_tf_workspace_and_launch_restore(iam_token, input_user_validation, restore_target)
 
 
 bucket_restore_backup_vault()

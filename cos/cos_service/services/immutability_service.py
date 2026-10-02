@@ -1,7 +1,5 @@
 import logging
-from datetime import date
 
-from dateutil.relativedelta import relativedelta
 from cos_service.schemas.bucket_backup import BucketBackup
 from cos_service.schemas.immutability import Immutability
 from bp2i_airflow_library.exceptions.flow_control import (

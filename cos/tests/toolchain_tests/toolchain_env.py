@@ -1280,7 +1280,7 @@ def resolve_vault_token(args: argparse.Namespace, client: VaultClient,
     ttl = _check_token(client, token, "récupéré")
     if ttl is False:
         raise CliExit(EXIT_USAGE, "le token récupéré est refusé par Vault")
-    _log(f"Token Vault récupéré, valide" + ("." if ttl is None else f" encore {_duration(ttl)}."))
+    _log("Token Vault récupéré, valide" + ("." if ttl is None else f" encore {_duration(ttl)}."))
     save_cached_token(args.vault_url, token)
     return token
 
