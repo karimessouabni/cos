@@ -392,7 +392,7 @@ la branche de l'INT, créer un bucket de test.
    `create_tf_workspace`, et `workspaceService.build_bucket_workspace_details`
    pour l'update : l'ajouter au dictionnaire `variables`.
 
-Puis un test unitaire dans `tests/dags/test_bucket_create.py`, classe
+Puis un test unitaire dans `tests/unit/dags/test_bucket_create.py`, classe
 `TestCreateTfWorkspace`, qui vérifie que la variable est envoyée avec la bonne
 valeur : c'est le seul endroit où l'écart entre Python et Terraform est
 détectable sans lancer Schematics.

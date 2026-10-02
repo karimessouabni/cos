@@ -3,7 +3,7 @@
 Nécessite le venv complet (Airflow + bp2i_airflow_library) et les doublures
 désactivées :
 
-    COS_TESTS_FORCE_STUBS=0 python -m pytest -m integration tests/integration -v
+    COS_TESTS_FORCE_STUBS=0 python -m pytest -m integration tests/unit/integration -v
 
 Ignoré automatiquement quand Airflow ou la lib manquent, ou quand les
 doublures sont actives.
@@ -15,14 +15,14 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-DAGS_DIR = Path(__file__).resolve().parents[2] / "cos_service" / "dags"
+DAGS_DIR = Path(__file__).resolve().parents[3] / "cos_service" / "dags"
 
 
 def _real_module_or_skip(name: str):
-    """importorskip qui refuse les doublures de tests/stubs (elles n'ont pas de __file__)."""
+    """importorskip qui refuse les doublures de tests/unit/stubs (elles n'ont pas de __file__)."""
     module = pytest.importorskip(name, reason=f"{name} absent")
     if not getattr(module, "__file__", None):
-        pytest.skip(f"{name} est une doublure de tests/stubs : venv complet requis")
+        pytest.skip(f"{name} est une doublure de tests/unit/stubs : venv complet requis")
     return module
 
 

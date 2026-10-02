@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from cos_service.schemas.subscription_status import SubscriptionStatus
-from tests.dags.support import ACCOUNT_CRNS, BACKUP_VAULT, COS_INSTANCE, REALM, SECRETS
+from tests.unit.dags.support import ACCOUNT_CRNS, BACKUP_VAULT, COS_INSTANCE, REALM, SECRETS
 
 
 @pytest.fixture

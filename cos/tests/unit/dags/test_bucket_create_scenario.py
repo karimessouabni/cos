@@ -13,11 +13,11 @@ de chacune à la suivante exactement comme le fait ``bucket_create()`` :
 
 Les services ``cos_service.services.*`` sont des ``MagicMock`` (fixture
 ``happy_services``), ``immutability_service`` est le vrai module. Aucune lib
-interne, Airflow ni base de données n'est nécessaire : voir ``tests/README.md``.
+interne, Airflow ni base de données n'est nécessaire : voir ``tests/unit/README.md``.
 
 Lancement :
 
-    python -m pytest tests/dags/test_bucket_create_scenario.py -v
+    python -m pytest tests/unit/dags/test_bucket_create_scenario.py -v
 """
 from types import SimpleNamespace
 
@@ -29,7 +29,7 @@ from cos_service.schemas.immutability import Immutability
 from cos_service.schemas.status import Status
 from cos_service.schemas.subscription_status import SubscriptionStatus
 
-from tests.dags.support import ACCOUNT_CRNS, BACKUP_VAULT, COS_INSTANCE, REALM, TF_OUTPUTS
+from tests.unit.dags.support import ACCOUNT_CRNS, BACKUP_VAULT, COS_INSTANCE, REALM, TF_OUTPUTS
 
 SESSION = "session"
 TF = "tf"

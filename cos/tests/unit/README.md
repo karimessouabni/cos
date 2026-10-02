@@ -1,12 +1,16 @@
 # Tests unitaires `cos` sans les librairies internes
 
+Ce dossier `tests/unit/` regroupe les tests des DAGs, des schémas et des services,
+leurs doublures (`stubs/`) et le `conftest.py` qui les installe. Les tests de la
+toolchain Terraform sont à côté, dans `tests/toolchain_tests/`.
+
 Ces tests chargent les DAGs et les services **sans** `bp2i_airflow_library`,
 `bp2i_terraform`, Airflow ni les SDK IBM. La seule dépendance est `pytest`.
 
 ## Comment ça marche
 
 - `conftest.py` met la racine du projet dans `sys.path` et installe des
-  doublures (`tests/stubs/`) à deux niveaux :
+  doublures (`tests/unit/stubs/`) à deux niveaux :
   - **toujours**, pour la frontière d'infrastructure dont les tests unitaires
     dépendent : `bp2i_airflow_library`, `bp2i_terraform`, `airflow`,
     `sqlalchemy` et les modèles `cos_service.models.*`. Même avec le venv
@@ -15,7 +19,7 @@ Ces tests chargent les DAGs et les services **sans** `bp2i_airflow_library`,
     `cos_service.schemas.*`, `cos_service.utils.*`, `cos_service.repository.*`.
     Sur le venv complet, ce sont les vrais schémas et constantes.
   - `COS_TESTS_FORCE_STUBS=0` désactive le premier niveau (tout ce qui existe
-    reste réel) : utile pour `tests/integration`, pas pour les unitaires.
+    reste réel) : utile pour `tests/unit/integration`, pas pour les unitaires.
 - Les services et les étapes de DAG testés sont toujours le vrai code.
 - La fixture `frozen_today` (autouse) fige `date.today()` du schéma de rétention au
   2025-03-01 : les conversions années -> jours (bissextiles) deviennent déterministes
@@ -46,11 +50,11 @@ python3 -m venv .venv-tests && source .venv-tests/bin/activate   # optionnel
 python3 -m pip install -r requirements-test.txt                  # = pytest
 
 # premier test : trois cas simples sur le DAG create
-python3 -m pytest tests/dags/test_bucket_create_smoke.py -v
+python3 -m pytest tests/unit/dags/test_bucket_create_smoke.py -v
 
 # tout le DAG create (39 tests par étape), puis les 7 scénarios bout-en-bout, puis toute la suite
-python3 -m pytest tests/dags/test_bucket_create.py -v
-python3 -m pytest tests/dags/test_bucket_create_scenario.py -v
+python3 -m pytest tests/unit/dags/test_bucket_create.py -v
+python3 -m pytest tests/unit/dags/test_bucket_create_scenario.py -v
 python3 -m pytest
 ```
 
@@ -88,11 +92,11 @@ son propre runner de couverture : ne pas mettre `--cov` dans `addopts` de
 ## Avec le venv complet (lib bp2i, Airflow, SQLAlchemy installés)
 
 Les unitaires se lancent pareil, `python3 -m pytest`, et restent isolés de
-l'infrastructure. En plus, `tests/integration/test_dag_integrity.py` charge
+l'infrastructure. En plus, `tests/unit/integration/test_dag_integrity.py` charge
 les DAGs avec le **vrai** framework via le `DagBag` Airflow :
 
 ```bash
-COS_TESTS_FORCE_STUBS=0 python3 -m pytest -m integration tests/integration -v
+COS_TESTS_FORCE_STUBS=0 python3 -m pytest -m integration tests/unit/integration -v
 ```
 
 Il est exclu du run par défaut (`-m "not integration"` dans `pytest.ini`) et
@@ -111,7 +115,7 @@ déballé de ses wrappers (`__wrapped__`). Les mêmes tests tournent alors sur
 les vrais décorateurs :
 
 ```bash
-COS_TESTS_FORCE_STUBS=0 python -m pytest tests/dags/test_bucket_create.py -v
+COS_TESTS_FORCE_STUBS=0 python -m pytest tests/unit/dags/test_bucket_create.py -v
 ```
 
 Deux échecs possibles, tous deux explicites dans le message d'erreur :

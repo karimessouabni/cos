@@ -1,7 +1,7 @@
 """Configuration pytest commune.
 
 * met la racine du projet dans ``sys.path`` pour importer ``cos_service`` ;
-* installe les doublures de ``tests/stubs`` :
+* installe les doublures de ``tests/unit/stubs`` :
   - TOUJOURS (sauf ``COS_TESTS_FORCE_STUBS=0``) pour la frontière
     d'infrastructure dont les tests unitaires dépendent : le framework
     ``bp2i_airflow_library`` / ``bp2i_terraform``, ``airflow``, ``sqlalchemy``
@@ -29,7 +29,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -49,7 +49,7 @@ for _key, _value in {
 }.items():
     os.environ.setdefault(_key, _value)
 
-from tests.stubs import bp2i, orm as orm_stubs, schemas as schema_stubs  # noqa: E402
+from tests.unit.stubs import bp2i, orm as orm_stubs, schemas as schema_stubs  # noqa: E402
 
 DAGS_DIR = ROOT / "cos_service" / "dags" / "bucket" / "v1"
 DAG_PATH = DAGS_DIR / "cos.bucket.v1.create.py"
@@ -143,7 +143,7 @@ _install_if_missing(
 
 
 def _is_real_module(name: str) -> bool:
-    """True si ``name`` est importable et n'est pas une doublure de tests/stubs."""
+    """True si ``name`` est importable et n'est pas une doublure de tests/unit/stubs."""
     try:
         module = importlib.import_module(name)
     except Exception:  # noqa: BLE001 - import cassé (re2, KeyError d'env...) = pas de vraie lib
@@ -274,7 +274,7 @@ def _load_dag_with_real_library(monkeypatch, filename: str) -> SimpleNamespace:
     if not steps:
         raise RuntimeError(
             f"{filename}: aucune étape retrouvée dans dag.tasks. Tâches vues : {foreign}. "
-            "Le wrapper de @step n'expose sans doute pas __wrapped__ : voir tests/README.md."
+            "Le wrapper de @step n'expose sans doute pas __wrapped__ : voir tests/unit/README.md."
         )
     return SimpleNamespace(module=module, steps=steps, dag=dag, framework_tasks=foreign)
 
@@ -285,7 +285,7 @@ def load_dag(monkeypatch):
     (nom -> fonction brute), plus ``dag`` et ``framework_tasks`` avec la vraie lib.
 
     - par défaut : ``step`` est remplacé par un enregistreur et ``depends(...)``
-      vaut ``None`` (doublures de ``tests/stubs/bp2i.py``) ;
+      vaut ``None`` (doublures de ``tests/unit/stubs/bp2i.py``) ;
     - avec ``COS_TESTS_FORCE_STUBS=0`` et la vraie lib importable : le vrai
       ``product_action`` construit le DAG Airflow et les étapes sont extraites des
       tâches (``_load_dag_with_real_library``).

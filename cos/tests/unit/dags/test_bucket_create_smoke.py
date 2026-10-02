@@ -2,11 +2,11 @@
 
 Lancement :
 
-    python -m pytest tests/dags/test_bucket_create_smoke.py -v
+    python -m pytest tests/unit/dags/test_bucket_create_smoke.py -v
 
 Ce qu'il faut savoir, et rien de plus :
 
-- ``dag`` (fixture de ``tests/conftest.py``) charge le fichier du DAG et expose
+- ``dag`` (fixture de ``tests/unit/conftest.py``) charge le fichier du DAG et expose
   chaque étape comme une fonction Python : ``dag.steps["validate_request"]`` ;
 - ``happy_services`` remplace les services (``contextService``, ``cosService``...)
   par des ``MagicMock`` déjà configurés pour une demande valide ;
@@ -18,7 +18,7 @@ import pytest
 
 from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
 
-from tests.dags.support import REALM
+from tests.unit.dags.support import REALM
 
 
 def test_le_dag_declare_six_etapes_dans_l_ordre(dag):

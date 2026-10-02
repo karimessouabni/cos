@@ -18,7 +18,7 @@ check_no_feature_branch_in_code:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(main|preprod|prod)$/'
 
-# Tests unitaires (sans Airflow ni libs internes, voir tests/README.md), en
+# Tests unitaires (sans Airflow ni libs internes, voir tests/unit/README.md), en
 # feu rouge avant le scan CoE qui tourne sur le miroir.
 unit_tests:
   extends: [.base_job]

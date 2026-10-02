@@ -1,4 +1,4 @@
-# Couverture des tests unitaires : python -m pytest --cov  (voir tests/README.md)
+# Couverture des tests unitaires : python -m pytest --cov  (voir tests/unit/README.md)
 [run]
 source = cos_service
 branch = True

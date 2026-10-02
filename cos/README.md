@@ -476,14 +476,14 @@ Ce que la suite couvre :
 
 Deux conventions à connaître : la date du jour est figée dans les tests (les conversions
 années → jours comptent les 29 février) ; et un test marqué `integration` exige le venv
-complet avec la vraie librairie. Tout est décrit dans [`tests/README.md`](tests/README.md).
+complet avec la vraie librairie. Tout est décrit dans [`tests/unit/README.md`](tests/unit/README.md).
 
 ## 14. Documentation associée
 
 | Document | Sujet |
 |---|---|
 | [`terraform/README.md`](terraform/README.md) | Chaîne DAG → Schematics → modules, variables, versions, points d'attention |
-| [`tests/README.md`](tests/README.md) | Harnais de test, doublures, fixtures |
+| [`tests/unit/README.md`](tests/unit/README.md) | Harnais de test unitaire, doublures, fixtures |
 | [`docs/adr/0001-retention-unites-jours-annees.md`](docs/adr/0001-retention-unites-jours-annees.md) | Rétention jours/années sans rupture du contrat v1 |
 | [`docs/adr/0002-branche-terraform-suit-la-demande.md`](docs/adr/0002-branche-terraform-suit-la-demande.md) | Schematics clone la branche sur laquelle le DAG tourne |
 | `STRUCTURE.md` | Arborescence du projet d'origine |

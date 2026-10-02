@@ -10,65 +10,15 @@ cos/
 ├── cos-subscriptions/
 │   ├── subscriptions_cleanup.py      ← nettoyage des souscriptions orchestrator (--delete, --on-error)
 │   └── test_subscriptions_cleanup.py
-├── tests/toolchain_tests/
-│   ├── toolchain_env.py              ← prépare l'env Terraform toolchain (login, init, proxy, token Vault, API key)
-│   ├── test_toolchain_env.py
-│   ├── terraform/                    ← suite `tofu test` (OpenTofu) : main.tf = ressources cos / vault / buckets,
-│   │   ├── envs/<env>.tfvars            realm + version du provider par environnement,
-│   │   └── tests/*.tftest.hcl           un scénario par fonctionnalité (create → update → destroy)
-│   └── <int|qual|pprod|prod>/        ← anciens test.tf monolithiques, non versionnés ici
-├── cos_service/
-│   ├── __init__.py
-│   ├── dags/
-│   │   ├── __init__.py
-│   │   ├── backup_vault/
-│   │   ├── bucket/
-│   │   │   └── v1/
-│   │   │       ├── cos.bucket.v1.clean.py
-│   │   │       ├── cos.bucket.v1.create.py                      ← reconstitué
-│   │   │       ├── cos.bucket.v1.create_lifecycle_policy_rule.py
-│   │   │       ├── cos.bucket.v1.delete.py                      ← reconstitué + corrigé
-│   │   │       ├── cos.bucket.v1.delete_lifecycle_policy_rule.py
-│   │   │       ├── cos.bucket.v1.force_clean.py
-│   │   │       ├── cos.bucket.v1.refresh_restore_ranges.py
-│   │   │       ├── cos.bucket.v1.restore.py                     ← reconstitué (+ restore_point_in_time)
-│   │   │       ├── cos.bucket.v1.update.py                      ← reconstitué + corrigé
-│   │   │       └── cos.bucket.v1.update_lifecycle_policy_rule.py
-│   │   ├── bucket_migration/
-│   │   ├── cos/
-│   │   ├── product/
-│   │   └── v1/
-│   ├── dependencies/
-│   ├── models/
-│   ├── repository/
-│   ├── schemas/
-│   │   ├── bucket_backup.py          (déduit)  BucketBackup
-│   │   ├── bucket_retention.py                  ← reconstitué : deux formats de payload (historique en jours, *_days/*_years), jours canoniques
-│   │   ├── immutability.py                      ← reconstitué (enum Immutability)
-│   │   ├── status.py                 (déduit)  Status
-│   │   └── subscription_status.py    (déduit)  SubscriptionStatus
-│   ├── services/
-│   │   ├── backup_vault_service.py   (déduit)  get_backup_vault_by_name, get_backup_vault_by_sub_id
-│   │   ├── bucketService.py                     ← reconstitué + corrigé (lecture, appels S3, process_bucket_creation, update_bucket_*, complete_bucket_create)
-│   │   ├── contextService.py         (déduit)  get_realm, get_apcodes, get_account_instances_crn
-│   │   ├── cosService.py             (déduit)  get_cos_instance_by_name, get_cos_instance_status
-│   │   ├── immutability_service.py              ← reconstitué (+ bornes vérifiées au create, retention_state_for_client)
-│   │   ├── recovery_range_service.py            ← nouveau : point de restauration et choix du range
-│   │   ├── schematics_service.py                ← reconstitué + corrigé (create_or_update_ws, update_ws, update_ws_variables, run_workspace)
-│   │   ├── vault_service.py          (déduit)  get_vault_secrets
-│   │   └── workspaceService.py       (déduit)  update_bucket_workspace, build_bucket_workspace_details
-│   ├── sql/                                     ← scripts SQL gérés à la main (cible Alembic)
-│   └── utils/
-├── terraform/
-│   ├── README.md                     ← chaîne DAG -> Schematics -> modules, schémas et points d'attention
-│   ├── v1.12/backup_vault/main.tf                   ← reconstitué
-│   └── v1.12/bucket/main.tf                         ← reconstitué + corrigé (backup_policies)
-├── tests/                            ← tests unitaires sans les libs internes (voir tests/README.md)
-│   ├── conftest.py                       stubs installés seulement si le vrai module manque
-│   ├── stubs/                            bp2i.py (step/depends), orm.py (sqlalchemy, modèles), schemas.py
-│   ├── dags/                             test_bucket_create.py, _delete.py, _update.py, _restore.py
-│   ├── schemas/                          test_bucket_retention.py (contrat des deux formats)
-│   └── services/
+├── tests/
+│   ├── unit/                         ← tests unitaires sans les libs internes (voir tests/unit/README.md)
+│   │   ├── conftest.py                   stubs installés seulement si le vrai module manque
+│   │   ├── stubs/                        bp2i.py (step/depends), orm.py (sqlalchemy, modèles), schemas.py
+│   │   ├── dags/                         test_bucket_create.py, _delete.py, _update.py, _restore.py, support.py, conftest.py
+│   │   ├── schemas/                      test_bucket_retention.py (contrat des deux formats)
+│   │   ├── services/
+│   │   └── integration/                  DagBag réel (COS_TESTS_FORCE_STUBS=0 -m integration)
+│   └── toolchain_tests/              ← scénarios Terraform contre la toolchain (voir tests/toolchain_tests/README.md)
 ├── docs/adr/                         ← décisions d'architecture (0001 rétention jours/années ; 0002 branche Terraform = branche de la demande)
 ├── .gitlab-ci.yml                    ← CI : standards des MR (changelog, Conventional Commit, .airflowignore), miroir ITG, scans CoE
 ├── .gitlab-ci.standards.yml          ← tests unitaires + garde-fou branche de feature dans schematics_service

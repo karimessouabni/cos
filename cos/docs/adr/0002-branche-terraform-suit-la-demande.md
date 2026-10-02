@@ -46,4 +46,4 @@ branche de feature codé en dur pour l'INT. Une seule feature Terraform pouvait 
   existe. Supprimer les buckets de test avant de supprimer la branche.
 - Le champ `product_branch` fait partie du payload de base fourni par
   `bp2i_airflow_library` ; il est aussi porté par la doublure de test
-  (`tests/stubs/bp2i.py`).
+  (`tests/unit/stubs/bp2i.py`).
