@@ -18,7 +18,7 @@ import pytest
 
 from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
 
-from tests.unit.dags.support import REALM
+from tests.unit.dags.support import REALM_DICT
 
 
 def test_le_dag_declare_six_etapes_dans_l_ordre(dag):
@@ -39,7 +39,7 @@ def test_une_demande_valide_passe_la_validation(dag, happy_services, make_payloa
         state_manager=state_manager,
     )
 
-    assert result["realm"] == REALM
+    assert result["realm"] == REALM_DICT
     assert result["cos_instance"]["name"] == "cos-a"
     assert result["backup_vault"] is None
     state_manager.push_state.assert_called_once_with({"cos_instance": "co21000001"})

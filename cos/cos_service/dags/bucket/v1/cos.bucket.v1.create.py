@@ -1,13 +1,28 @@
-from bp2i_airflow_library import add_project_to_path
 from enum import Enum
 from typing import Optional
 
+from bp2i_airflow_library import add_project_to_path
+
 add_project_to_path()
+
+try:
+    from bp2i_airflow_library.version_compat import AIRFLOW_V_3_0_PLUS
+except ImportError:
+    AIRFLOW_V_3_0_PLUS = False
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import Context as AirflowContext  # noqa: F401
+    from airflow.sdk import TriggerRule, task, task_group  # noqa: F401
+else:
+    from airflow.decorators import task, task_group  # noqa: F401, AIR301
+    from airflow.utils.context import Context as AirflowContext  # noqa: F401, AIR301
+    from airflow.utils.trigger_rule import TriggerRule  # noqa: F401, AIR301
 
 import logging  # noqa: E402 - après add_project_to_path()
 from pathlib import Path  # noqa: E402 - après add_project_to_path()
 
 from bp2i_airflow_library.config import ENVIRONMENT  # noqa: E402 - après add_project_to_path()
+from bp2i_airflow_library.connectors.reader import ReaderConnector  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.dag import product_action, step  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_project_to_path()
     SASession,
@@ -16,6 +31,7 @@ from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_proje
     Vault,
     depends,
     payload_dependency,
+    reader_dependency,
     smart_schematics_backend_dependency,
     sqlalchemy_session_dependency,
     state_manager_dependency,
@@ -52,11 +68,18 @@ class BucketCreatePayload(ProductCreatePayload):
     backup: BucketBackup | None = Field(updatable=True)
 
 
-@product_action(Path(__file__).stem, tags=["cos"], payload=BucketCreatePayload)
+@product_action(
+    action_id=Path(__file__).stem.replace(".v1.", ".v2.")
+    if AIRFLOW_V_3_0_PLUS and not ENVIRONMENT.endswith("prod")
+    else Path(__file__).stem,
+    tags=["cos"],
+    payload=BucketCreatePayload,
+)
 def bucket_create():
     @step
     def validate_request(
         payload: BucketCreatePayload = depends(payload_dependency),
+        reader: ReaderConnector = depends(reader_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
         state_manager: StateManager = depends(state_manager_dependency),
     ) -> dict:
@@ -76,10 +99,10 @@ def bucket_create():
         if not payload.realm:
             errors.append("the realm is empty")
         else:
-            realm = get_realm(payload.realm)
-            if realm is None or str(realm.get("status", "")) == "404":
+            realm = get_realm(reader)
+            if realm is None or str(realm.status) == "404":
                 errors.append(f"the realm {payload.realm} doesn't exist")
-            elif not realm.get("realm_apcode_details"):
+            elif not realm.realm_apcode_details:
                 errors.append(f"there is no apcodes on this realm {payload.realm}")
             elif payload.apcode not in get_apcodes(realm):
                 errors.append(f"appCode {payload.apcode} doesn't belong to this realm {payload.realm}")
@@ -90,7 +113,7 @@ def bucket_create():
         if cos_instance is None:
             errors.append(f"the cos instance {payload.cos_instance} doesn't exist")
         else:
-            cos_instance_status = get_cos_instance_status(cos_instance.subscription_id)
+            cos_instance_status = get_cos_instance_status(cos_instance.name, reader=reader)
             if cos_instance_status != SubscriptionStatus.ACTIVE.value:
                 errors.append(f"Bad cos instance status : {cos_instance_status}")
 
@@ -123,7 +146,7 @@ def bucket_create():
         if errors:
             raise DeclineDemandException(" | ".join(errors))
 
-        return {"realm": realm, "cos_instance": cos_instance, "backup_vault": backup_vault}
+        return {"realm": realm.model_dump(), "cos_instance": cos_instance, "backup_vault": backup_vault}
 
     @step
     def process_protection_configuration(
@@ -167,12 +190,10 @@ def bucket_create():
         )
 
     @step
-    def get_account_instances_crn(validated: dict) -> dict:
+    def get_account_instances_crn(reader: ReaderConnector = depends(reader_dependency)) -> dict:
         from cos_service.services.contextService import get_account_instances_crn
 
-        context = validated["cos_instance"]["context"]
-        wklapp_account_name = context["wklapp_account_name"]
-        account_instances_crn = get_account_instances_crn(wklapp_account_name)
+        account_instances_crn = get_account_instances_crn(reader=reader)
         return account_instances_crn
 
     @step
@@ -182,6 +203,7 @@ def bucket_create():
         immutability: dict,
         tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
         state_manager: StateManager = depends(state_manager_dependency),
+        reader: ReaderConnector = depends(reader_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
         payload: BucketCreatePayload = depends(payload_dependency),
         vault: Vault = depends(vault_dependency),
@@ -195,6 +217,7 @@ def bucket_create():
             update_bucket_workspace_status,
             update_bucket_status,
         )
+        from cos_service.services.contextService import get_account_sub_type
         from cos_service.services.cosService import get_cos_instance_by_name
         from cos_service.services.vault_service import get_vault_secrets
         from cos_service.services.backup_vault_service import get_backup_vault_by_sub_id
@@ -203,9 +226,10 @@ def bucket_create():
         cos_instance = validated["cos_instance"]
         backup_vault = validated["backup_vault"]
 
-        secrets = get_vault_secrets(realm=realm.get("name", None), apcode=payload.apcode, vault=vault)
+        secrets = get_vault_secrets(realm_name=realm["name"], apcode=payload.apcode, vault=vault, reader=reader)
         ws_name = f"ws_bucket_{payload.subscription_id}"
         tf_directory = f"terraform/v{TERRAFORM_VERSION}/bucket"
+        wkld_account_sub_type = get_account_sub_type(reader=reader)
 
         variables = {
             "region": payload.region,
@@ -233,6 +257,7 @@ def bucket_create():
             "target_backup_vault_crn": backup_vault["crn"] if backup_vault is not None else None,
             "initial_delete_after_days": immutability["backup"]["backup_retention_days"],
             "cloud_type": "3" if payload.region == "eu-de" else "2",
+            "wkld_account_sub_type": wkld_account_sub_type,
         }
 
         description = state_manager.get_subscription().description
@@ -292,6 +317,7 @@ def bucket_create():
         immutability: dict,
         tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
         state_manager: StateManager = depends(state_manager_dependency),
+        reader: ReaderConnector = depends(reader_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
         payload: BucketCreatePayload = depends(payload_dependency),
         vault: Vault = depends(vault_dependency),
@@ -331,7 +357,9 @@ def bucket_create():
             update_bucket_status(payload.subscription_id, SubscriptionStatus.CREATING, session)
             update_bucket_workspace_status(payload.subscription_id, Status.INPROGRESS, session)
 
-            update_bucket_workspace(payload=payload, workspace_details=workspace_details, vault=vault, tf=tf)
+            update_bucket_workspace(
+                payload=payload, workspace_details=workspace_details, vault=vault, tf=tf, reader=reader
+            )
 
             return run_workspace(tf, workspace_id)
         except Exception:

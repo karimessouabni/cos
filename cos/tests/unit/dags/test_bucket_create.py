@@ -15,7 +15,7 @@ from cos_service.schemas.bucket_retention import BucketRetention
 from cos_service.schemas.immutability import Immutability
 from cos_service.schemas.status import Status
 from cos_service.schemas.subscription_status import SubscriptionStatus
-from tests.unit.dags.support import ACCOUNT_CRNS, BACKUP_VAULT, COS_INSTANCE, REALM, TF_OUTPUTS
+from tests.unit.dags.support import ACCOUNT_CRNS, BACKUP_VAULT, COS_INSTANCE, REALM, REALM_DICT, FakeModel, TF_OUTPUTS
 
 
 # --- helpers ------------------------------------------------------------------
@@ -35,7 +35,8 @@ def fresh_immutability(versioning=False, choice=Immutability.NONE) -> dict:
 
 
 def validated(backup_vault=None) -> dict:
-    return {"realm": REALM, "cos_instance": dict(COS_INSTANCE), "backup_vault": backup_vault}
+    # validated["realm"] est le model_dump() du modèle renvoyé par get_realm(reader)
+    return {"realm": dict(REALM_DICT), "cos_instance": dict(COS_INSTANCE), "backup_vault": backup_vault}
 
 
 # --- câblage ------------------------------------------------------------------
@@ -74,9 +75,12 @@ class TestValidateRequest:
     def test_valid_request_returns_realm_instance_and_no_vault(self, dag, happy_services, make_payload, state_manager):
         result = self.run(dag, make_payload(), state_manager)
 
-        assert result == {"realm": REALM, "cos_instance": dict(COS_INSTANCE), "backup_vault": None}
+        assert result == {"realm": REALM_DICT, "cos_instance": dict(COS_INSTANCE), "backup_vault": None}
         state_manager.push_state.assert_called_once_with({"cos_instance": "co21000001"})
         happy_services.backup_vault_service.get_backup_vault_by_name.assert_not_called()
+        # Le realm est lu par le connecteur reader, le statut de l'instance aussi (par son nom).
+        happy_services.contextService.get_realm.assert_called_once_with(None)
+        happy_services.cosService.get_cos_instance_status.assert_called_once_with("cos-a", reader=None)
 
     def test_empty_realm_does_not_call_the_context_service(self, dag, happy_services, make_payload, state_manager):
         errors = self.errors_of(dag, make_payload(realm=""), state_manager)
@@ -93,7 +97,7 @@ class TestValidateRequest:
         assert self.errors_of(dag, make_payload(), state_manager) == ["the realm realm-a doesn't exist"]
 
     def test_realm_404_is_treated_as_unknown(self, dag, happy_services, make_payload, state_manager):
-        happy_services.contextService.get_realm.return_value = {"status": 404}
+        happy_services.contextService.get_realm.return_value = FakeModel(status=404, realm_apcode_details=[])
 
         errors = self.errors_of(dag, make_payload(), state_manager)
 
@@ -101,7 +105,7 @@ class TestValidateRequest:
         happy_services.contextService.get_apcodes.assert_not_called()
 
     def test_realm_without_apcodes(self, dag, happy_services, make_payload, state_manager):
-        happy_services.contextService.get_realm.return_value = {**REALM, "realm_apcode_details": None}
+        happy_services.contextService.get_realm.return_value = FakeModel(**{**REALM_DICT, "realm_apcode_details": None})
 
         assert self.errors_of(dag, make_payload(), state_manager) == ["there is no apcodes on this realm realm-a"]
 
@@ -240,10 +244,10 @@ class TestProcessProtectionConfiguration:
 
 # --- get_account_instances_crn -----------------------------------------------------
 
-def test_get_account_instances_crn_uses_the_wklapp_account_name(dag, happy_services):
-    result = dag.steps["get_account_instances_crn"](validated=validated())
+def test_get_account_instances_crn_goes_through_the_reader(dag, happy_services):
+    result = dag.steps["get_account_instances_crn"](reader="reader")
 
-    happy_services.contextService.get_account_instances_crn.assert_called_once_with("wklapp-a")
+    happy_services.contextService.get_account_instances_crn.assert_called_once_with(reader="reader")
     assert result == ACCOUNT_CRNS
 
 
@@ -310,10 +314,12 @@ class TestCreateTfWorkspace:
         assert variables["target_backup_vault_crn"] == "crn:bv"
         assert variables["kms_key_crn"] == "crn:kms"
         assert variables["cloud_type"] == "3"
+        assert variables["wkld_account_sub_type"] == happy_services.contextService.get_account_sub_type.return_value
         assert isinstance(variables["vault_read_token"], TerraformVar)
         happy_services.vault_service.get_vault_secrets.assert_called_once_with(
-            realm="realm-a", apcode="AP1", vault="vault"
+            realm_name="realm-a", apcode="AP1", vault="vault", reader=None
         )
+        happy_services.contextService.get_account_sub_type.assert_called_once_with(reader=None)
 
     def test_no_realm_or_vault_query_is_repeated(self, dag, happy_services, make_payload, state_manager):
         happy_services.bucketService.get_bucket_by_sub_id.return_value = {"workspace": {"workspace_id": "ws-1"}}

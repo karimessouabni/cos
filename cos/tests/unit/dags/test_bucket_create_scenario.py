@@ -6,7 +6,7 @@ de chacune à la suivante exactement comme le fait ``bucket_create()`` :
 
     validate_request
       -> process_protection_configuration(validated)
-      -> get_account_instances_crn(validated)
+      -> get_account_instances_crn(reader)
       -> create_tf_workspace(validated, account_instances_crn, immutability)
       -> apply_tf_workspace(validated, workspace_id, account_instances_crn, immutability)
       -> save_bucket_in_db(apply_tf_result, immutability)
@@ -29,7 +29,7 @@ from cos_service.schemas.immutability import Immutability
 from cos_service.schemas.status import Status
 from cos_service.schemas.subscription_status import SubscriptionStatus
 
-from tests.unit.dags.support import ACCOUNT_CRNS, BACKUP_VAULT, COS_INSTANCE, REALM, TF_OUTPUTS
+from tests.unit.dags.support import ACCOUNT_CRNS, BACKUP_VAULT, COS_INSTANCE, REALM_DICT, TF_OUTPUTS
 
 SESSION = "session"
 TF = "tf"
@@ -41,7 +41,7 @@ def run_create_dag(dag, payload, state_manager, session=SESSION, tf=TF, vault=VA
     steps = dag.steps
     validated = steps["validate_request"](payload=payload, session=session, state_manager=state_manager)
     immutability = steps["process_protection_configuration"](validated=validated, payload=payload)
-    account_instances_crn = steps["get_account_instances_crn"](validated=validated)
+    account_instances_crn = steps["get_account_instances_crn"]()
     workspace_id = steps["create_tf_workspace"](
         validated=validated,
         account_instances_crn=account_instances_crn,
@@ -103,7 +103,7 @@ def test_happy_path_creates_the_bucket_end_to_end(dag, infra, make_payload, stat
     run = run_create_dag(dag, payload, state_manager)
 
     # chaque étape a transmis le bon objet à la suivante
-    assert run.validated == {"realm": REALM, "cos_instance": dict(COS_INSTANCE), "backup_vault": None}
+    assert run.validated == {"realm": REALM_DICT, "cos_instance": dict(COS_INSTANCE), "backup_vault": None}
     assert run.immutability["immutability_choice"] == Immutability.NONE.value
     assert run.account_instances_crn == ACCOUNT_CRNS
     assert run.workspace_id == "ws-1"

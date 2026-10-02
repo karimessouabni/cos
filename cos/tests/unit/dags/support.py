@@ -11,11 +11,27 @@ class FakeRow(dict):
             raise AttributeError(name) from exc
 
 
-REALM = {
+class FakeModel:
+    """Modèle renvoyé par le ReaderConnector (pydantic) : attributs + ``model_dump()``."""
+
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+    def model_dump(self) -> dict:
+        return dict(self.__dict__)
+
+    def __eq__(self, other):
+        return isinstance(other, FakeModel) and self.__dict__ == other.__dict__
+
+
+REALM_DICT = {
     "name": "realm-a",
+    "status": 200,
     "realm_apcode_details": [{"apcode": "AP1"}],
     "wklapp_account_number": "wk-123",
 }
+# Ce que get_realm(reader) renvoie : un modèle à attributs ; validated["realm"] en est le model_dump().
+REALM = FakeModel(**REALM_DICT)
 
 COS_INSTANCE = FakeRow(
     subscription_id="cos-sub",
