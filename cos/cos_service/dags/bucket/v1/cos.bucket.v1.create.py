@@ -100,7 +100,7 @@ def bucket_create():
             errors.append("the realm is empty")
         else:
             realm = get_realm(reader)
-            if realm is None or str(realm.status) == "404":
+            if realm is None or realm.status == "404":
                 errors.append(f"the realm {payload.realm} doesn't exist")
             elif not realm.realm_apcode_details:
                 errors.append(f"there is no apcodes on this realm {payload.realm}")

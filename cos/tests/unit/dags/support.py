@@ -26,7 +26,7 @@ class FakeModel:
 
 REALM_DICT = {
     "name": "realm-a",
-    "status": 200,
+    "status": "200",  # le reader renvoie le statut HTTP en chaîne ; le DAG compare à "404"
     "realm_apcode_details": [{"apcode": "AP1"}],
     "wklapp_account_number": "wk-123",
 }

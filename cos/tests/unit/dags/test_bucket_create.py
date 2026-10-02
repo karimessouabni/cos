@@ -97,7 +97,7 @@ class TestValidateRequest:
         assert self.errors_of(dag, make_payload(), state_manager) == ["the realm realm-a doesn't exist"]
 
     def test_realm_404_is_treated_as_unknown(self, dag, happy_services, make_payload, state_manager):
-        happy_services.contextService.get_realm.return_value = FakeModel(status=404, realm_apcode_details=[])
+        happy_services.contextService.get_realm.return_value = FakeModel(status="404", realm_apcode_details=[])
 
         errors = self.errors_of(dag, make_payload(), state_manager)
 
