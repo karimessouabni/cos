@@ -170,6 +170,21 @@ class StateManager: ...
 class Vault: ...
 
 
+class ReaderConnector:
+    """Connecteur de lecture de l'orchestrateur (multireader) : doublure vide."""
+
+
+class TriggerRule(str, Enum):
+    ALL_SUCCESS = "all_success"
+    ALL_FAILED = "all_failed"
+    ALL_DONE = "all_done"
+    ONE_SUCCESS = "one_success"
+    ONE_FAILED = "one_failed"
+    NONE_FAILED = "none_failed"
+    NONE_FAILED_MIN_ONE_SUCCESS = "none_failed_min_one_success"
+    ALWAYS = "always"
+
+
 def build_modules() -> dict[str, types.ModuleType]:
     """Construit un jeu frais de modules doublures, indexé par nom qualifié."""
     registry: dict[str, Step] = {}
@@ -177,18 +192,26 @@ def build_modules() -> dict[str, types.ModuleType]:
     def step(fn):
         return Step(fn, registry)
 
-    def product_action(name, tags=None, payload=None, config=None):
+    def product_action(name=None, tags=None, payload=None, config=None, *, action_id=None, **_ignored):
+        """Accepte l'ancienne forme positionnelle et la forme ``action_id=`` du vrai DAG."""
+
         def decorator(fn):
             def run():
                 fn()
                 return registry
 
-            run.dag_name = name
+            run.dag_name = action_id or name
             run.payload = payload
             run.config = config
             return run
 
         return decorator
+
+    def passthrough_decorator(*dargs, **dkwargs):
+        """``@task`` / ``@task_group`` d'Airflow : avec ou sans parenthèses, rend la fonction telle quelle."""
+        if len(dargs) == 1 and callable(dargs[0]) and not dkwargs:
+            return dargs[0]
+        return lambda fn: fn
 
     def depends(dependency):
         return None
@@ -200,6 +223,16 @@ def build_modules() -> dict[str, types.ModuleType]:
     config = types.ModuleType("bp2i_airflow_library.config")
     config.ENVIRONMENT = OrchestratorEnvironment.INT.value
     config.OrchestratorEnvironment = OrchestratorEnvironment
+
+    # Le vrai DAG teste la version d'Airflow pour choisir ses imports ; en
+    # doublure on reste sur la branche Airflow 2 (airflow.decorators, airflow.utils).
+    version_compat = types.ModuleType("bp2i_airflow_library.version_compat")
+    version_compat.AIRFLOW_V_3_0_PLUS = False
+
+    connectors = types.ModuleType("bp2i_airflow_library.connectors")
+    connectors.__path__ = []
+    reader = types.ModuleType("bp2i_airflow_library.connectors.reader")
+    reader.ReaderConnector = ReaderConnector
 
     dag = types.ModuleType("bp2i_airflow_library.dag")
     dag.step = step
@@ -215,6 +248,7 @@ def build_modules() -> dict[str, types.ModuleType]:
     for marker in (
         "airflow_context_dependency",
         "payload_dependency",
+        "reader_dependency",
         "smart_schematics_backend_dependency",
         "sqlalchemy_session_dependency",
         "state_manager_dependency",
@@ -255,11 +289,35 @@ def build_modules() -> dict[str, types.ModuleType]:
     sensors.__path__ = []
     date_time = types.ModuleType("airflow.sensors.date_time")
     date_time.DateTimeSensorAsync = DateTimeSensorAsync
+    # Imports du bloc de compatibilité du vrai DAG (branche Airflow 2).
+    decorators = types.ModuleType("airflow.decorators")
+    decorators.task = passthrough_decorator
+    decorators.task_group = passthrough_decorator
+    utils = types.ModuleType("airflow.utils")
+    utils.__path__ = []
+    trigger_rule = types.ModuleType("airflow.utils.trigger_rule")
+    trigger_rule.TriggerRule = TriggerRule
+    context = types.ModuleType("airflow.utils.context")
+    context.Context = dict
+    # Branche Airflow 3 (airflow.sdk) : fournie aussi, au cas où AIRFLOW_V_3_0_PLUS serait forcé.
+    sdk = types.ModuleType("airflow.sdk")
+    sdk.Context = dict
+    sdk.TriggerRule = TriggerRule
+    sdk.task = passthrough_decorator
+    sdk.task_group = passthrough_decorator
 
     return {
         "airflow": airflow,
         "airflow.sensors": sensors,
         "airflow.sensors.date_time": date_time,
+        "airflow.decorators": decorators,
+        "airflow.utils": utils,
+        "airflow.utils.trigger_rule": trigger_rule,
+        "airflow.utils.context": context,
+        "airflow.sdk": sdk,
+        "bp2i_airflow_library.version_compat": version_compat,
+        "bp2i_airflow_library.connectors": connectors,
+        "bp2i_airflow_library.connectors.reader": reader,
         "bp2i_terraform.components": components,
         "bp2i_terraform.components.cooldown_policies": cooldown,
         "bp2i_airflow_library": root,
@@ -280,8 +338,16 @@ def build_modules() -> dict[str, types.ModuleType]:
 DAG_OVERRIDES = (
     "bp2i_airflow_library",
     "bp2i_airflow_library.config",
+    "bp2i_airflow_library.version_compat",
+    "bp2i_airflow_library.connectors",
+    "bp2i_airflow_library.connectors.reader",
     "bp2i_airflow_library.dag",
     "bp2i_airflow_library.dependencies",
+    "airflow.decorators",
+    "airflow.utils",
+    "airflow.utils.trigger_rule",
+    "airflow.utils.context",
+    "airflow.sdk",
     "bp2i_airflow_library.schemas",
     "airflow",
     "airflow.sensors",
