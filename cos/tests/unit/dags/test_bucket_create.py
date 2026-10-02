@@ -292,8 +292,8 @@ class TestCreateTfWorkspace:
 
         happy_services.backup_vault_service.get_backup_vault_by_sub_id.assert_called_once_with("bv-sub", "session")
         args = happy_services.bucketService.process_bucket_creation.call_args.args
-        assert args[5] is COS_INSTANCE  # ligne ORM, pas le dict de `validated`
-        assert args[6] is vault_row
+        assert args[4] is COS_INSTANCE  # ligne ORM, pas le dict de `validated`
+        assert args[5] is vault_row
 
     def test_terraform_variables_come_from_validated_data(self, dag, happy_services, make_payload, state_manager):
         happy_services.bucketService.get_bucket_by_sub_id.return_value = {"workspace": {"workspace_id": None}}

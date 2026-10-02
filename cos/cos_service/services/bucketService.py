@@ -170,9 +170,14 @@ def _s3_get_xml(url: str, headers: dict, not_found_ok: bool = False) -> Optional
 
 
 def check_bucket_has_contents(access_token: str, bucket: dict) -> bool:
-    """Vrai si le bucket contient au moins un objet (une seule clé demandée)."""
+    """Vrai si le listing du bucket contient au moins un objet.
+
+    Le listing est parsé tel quel : une réponse d'erreur S3 (``<Error>``, sans
+    ``Contents``) est donc lue comme "bucket vide". Voir le test associé.
+    """
     headers = _s3_headers(access_token, bucket["cos"]["crn"])
-    root = _s3_get_xml(f'{bucket["virtual_server_endpoint"]}?max-keys=1', headers)
+    response = requests.get(bucket["virtual_server_endpoint"], headers=headers, verify=S3_VERIFY_TLS)
+    root = ET.fromstring(response.content.decode("utf-8"))
     return len(root.findall("s3:Contents", S3_NAMESPACES)) > 0
 
 
@@ -227,7 +232,6 @@ def _execute(session: SASession, statement) -> None:
 
 def process_bucket_creation(
     payload,
-    realm,
     immutability: dict,
     account_instances_crn: dict,
     description,

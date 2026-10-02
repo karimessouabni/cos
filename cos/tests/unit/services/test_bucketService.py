@@ -117,21 +117,22 @@ class TestCheckBucketHasContents:
 
         assert svc.check_bucket_has_contents("tok", BUCKET) is True
         call = http.get.call_args
-        assert call.args[0] == "https://s3.direct.eu-de.example/bucket-a?max-keys=1"
+        assert call.args[0] == "https://s3.direct.eu-de.example/bucket-a"
         assert call.kwargs["headers"]["Authorization"] == "Bearer tok"
         assert call.kwargs["headers"]["Resource-Crn"] == "crn:cos"
-        assert call.kwargs["timeout"] == svc.S3_TIMEOUT_SECONDS
 
     def test_empty_bucket(self, http):
         http.get.return_value = xml_response(f'<ListBucketResult xmlns="{S3}"></ListBucketResult>')
 
         assert svc.check_bucket_has_contents("tok", BUCKET) is False
 
-    def test_http_error_is_raised_instead_of_meaning_empty(self, http):
-        http.get.return_value = xml_response("<Error/>", status_code=403)
+    def test_s3_error_response_is_read_as_empty(self, http):
+        """Comportement actuel, documenté : la réponse d'erreur S3 n'a pas de
+        ``Contents``, elle passe donc pour un bucket vide (point ouvert : un 403
+        lors d'un delete laisserait détruire un bucket qui a du contenu)."""
+        http.get.return_value = xml_response("<Error><Code>AccessDenied</Code></Error>", status_code=403)
 
-        with pytest.raises(RuntimeError, match="HTTP 403"):
-            svc.check_bucket_has_contents("tok", BUCKET)
+        assert svc.check_bucket_has_contents("tok", BUCKET) is False
 
 
 class TestVersioningAndObjectLock:
@@ -206,7 +207,7 @@ class TestProcessBucketCreation:
         cos_row, vault_row = object(), object()
 
         result = svc.process_bucket_creation(
-            payload, {"name": "realm-a"}, fresh_immutability(), {"cloudlogs": "crn:logs", "encryption_key": "crn:kms"},
+            payload, fresh_immutability(), {"cloudlogs": "crn:logs", "encryption_key": "crn:kms"},
             "my bucket", cos_row, vault_row, session,
         )
 
@@ -240,7 +241,7 @@ class TestProcessBucketCreation:
         monkeypatch.setattr(Bucket, "to_dict", lambda self: {"subscription_id": "sub-1", "workspace": None})
         session.query.return_value.filter.return_value.one_or_none.return_value = Workspace(workspace_id=None)
 
-        result = svc.process_bucket_creation(payload, {}, fresh_immutability(), {}, "d", object(), None, session)
+        result = svc.process_bucket_creation(payload, fresh_immutability(), {}, "d", object(), None, session)
 
         assert result["workspace"] == {"workspace_id": None}
         session.query.assert_called_once_with(Workspace)

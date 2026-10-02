@@ -276,7 +276,7 @@ def bucket_create():
                     else None
                 )
                 bucket = process_bucket_creation(
-                    payload, realm, immutability, account_instances_crn, description,
+                    payload, immutability, account_instances_crn, description,
                     cos_instance_row, backup_vault_row, session,
                 )
 
