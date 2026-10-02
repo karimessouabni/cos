@@ -146,7 +146,7 @@ def test_happy_path_creates_the_bucket_end_to_end(dag, infra, make_payload, stat
     )
     infra.bucketService.complete_bucket_create.assert_called_once_with(
         payload.subscription_id,
-        "https://s3.direct.eu-de.cloud-object-storage.appdomain.cloud/bucket-a",
+        "https://bucket-a.s3.direct.eu-de.cloud-object-storage.appdomain.cloud",
         TF_OUTPUTS,
         SESSION,
     )

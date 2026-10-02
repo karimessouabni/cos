@@ -372,22 +372,32 @@ def bucket_create():
         apply_tf_result: dict,
         immutability: dict,
         payload: BucketCreatePayload = depends(payload_dependency),
+        reader: ReaderConnector = depends(reader_dependency),
         state_manager: StateManager = depends(state_manager_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> dict | None:
         from cos_service.services.bucketService import complete_bucket_create
+        from cos_service.services.contextService import get_account_sub_type
         from cos_service.services.immutability_service import deprecations_for_client, retention_state_for_client
 
         bucket_name = apply_tf_result["bucket_name"]["value"]
-        vpe = f"s3.direct.{payload.region}.cloud-object-storage.appdomain.cloud"
-        vip = f"https://{vpe}/{bucket_name}"
+        wkld_account_sub_type = get_account_sub_type(reader=reader)
 
-        virtual_server_endpoint = {
-            "path_style": f"https://{vpe}/{bucket_name}",
-            "host_style": f"https://{bucket_name}.{vpe}",
-        } if payload.region == "eu-fr2" else {
-            "host_style": f"https://{bucket_name}.{vpe}",
-        }
+        # Le path-style n'existe qu'en eu-fr2 et hors comptes vitaux (PO-VITAL, VITAL).
+        vpe = f"s3.direct.{payload.region}.cloud-object-storage.appdomain.cloud"
+        path_style_available = payload.region == "eu-fr2" and wkld_account_sub_type not in ("PO-VITAL", "VITAL")
+        vip = f"https://{vpe}/{bucket_name}" if path_style_available else f"https://{bucket_name}.{vpe}"
+
+        virtual_server_endpoint = (
+            {
+                "path_style": f"https://{vpe}/{bucket_name}",
+                "host_style": f"https://{bucket_name}.{vpe}",
+            }
+            if path_style_available
+            else {
+                "host_style": f"https://{bucket_name}.{vpe}",
+            }
+        )
 
         # The state reflects the effective configuration computed by the
         # immutability service (defaults included), not what the client typed.

@@ -534,11 +534,34 @@ class TestSaveBucketInDb:
         }
 
     def test_completes_the_bucket_with_its_vip(self, dag, happy_services, make_payload, state_manager):
+        # Hors eu-fr2, seule l'adresse host-style existe : c'est elle qui sert de VIP.
         self.run(dag, make_payload(region="eu-de"), state_manager)
 
         happy_services.bucketService.complete_bucket_create.assert_called_once_with(
             "sub-1",
-            "https://s3.direct.eu-de.cloud-object-storage.appdomain.cloud/bucket-a",
+            "https://bucket-a.s3.direct.eu-de.cloud-object-storage.appdomain.cloud",
             TF_OUTPUTS,
             "session",
         )
+
+    def test_eu_fr2_vip_is_path_style_for_a_standard_account(self, dag, happy_services, make_payload, state_manager):
+        happy_services.contextService.get_account_sub_type.return_value = "STANDARD"
+
+        self.run(dag, make_payload(region="eu-fr2"), state_manager)
+
+        vip = happy_services.bucketService.complete_bucket_create.call_args.args[1]
+        assert vip == "https://s3.direct.eu-fr2.cloud-object-storage.appdomain.cloud/bucket-a"
+        happy_services.contextService.get_account_sub_type.assert_called_once_with(reader=None)
+
+    @pytest.mark.parametrize("sub_type", ["PO-VITAL", "VITAL"])
+    def test_eu_fr2_vital_accounts_only_get_host_style(self, dag, happy_services, make_payload, state_manager, sub_type):
+        happy_services.contextService.get_account_sub_type.return_value = sub_type
+
+        self.run(dag, make_payload(region="eu-fr2"), state_manager)
+
+        state = state_manager.push_state.call_args.args[0]
+        assert state["virtual_server_endpoint"] == {
+            "host_style": "https://bucket-a.s3.direct.eu-fr2.cloud-object-storage.appdomain.cloud",
+        }
+        vip = happy_services.bucketService.complete_bucket_create.call_args.args[1]
+        assert vip == "https://bucket-a.s3.direct.eu-fr2.cloud-object-storage.appdomain.cloud"
