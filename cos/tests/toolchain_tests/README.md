@@ -84,7 +84,7 @@ Chaque étape est sautée quand elle est déjà faite et encore valable.
 | 5 | **token Vault** : `GET https://s02vl9956141:4430/v1/token/<uid>?namespace=AP85135` (service token, joint en direct, puis en IPv4 seul, puis via le proxy) ; `auth.client_token` est un token Vault de 30 jours | le token sauvegardé est encore accepté (`lookup-self`), ou `$VAULT_TOKEN` / `--vault-token` |
 | 6 | **API key IBM Cloud** : `GET <vault>/v1/ibm_<compte>/creds/<rôle>_buhub` avec `X-Vault-Token` et `X-Vault-Namespace: AP85135` | l'API key sauvegardée a encore un lease valide |
 | 7 | variables exportées : `IBM_CLOUD_API_KEY`, `ORCHESTRATOR_IBMCLOUD_API_KEY`, `http_proxy` / `https_proxy` / `no_proxy` (minuscules et majuscules : tofu lit les majuscules d'abord, curl l'inverse), `TF_VAR_prefix` (ton user) | jamais |
-| 8 | `tofu <commande> -var-file=envs/<env>.tfvars …` dans `terraform/` | seulement avec `--run` |
+| 8 | `tofu <commande> -var-file=envs/<env>.tfvars …` dans `terraform/`, journal dans `terraform/logs/` et lignes importantes en direct | seulement avec `--run` |
 
 Ce qui est mémorisé, dans `~/.cache/cos-toolchain/state.json` (lisible par toi seul) : le
 token Vault, l'API key et son lease, ton uid pour le service token, ton user proxy. Le mot de
@@ -122,6 +122,7 @@ cd tests/toolchain_tests
 python toolchain_env.py --env int --run test                                   # tous les scénarios
 python toolchain_env.py --env int --run test -- -filter=tests/10_cos.tftest.hcl  # un seul
 python toolchain_env.py --env int --run test -- -verbose                       # plans et state à chaque run
+python toolchain_env.py --env int --run test --follow debug                    # tout le détail du provider en direct
 python toolchain_env.py --env pprod --run test -- -filter=tests/10_cos.tftest.hcl
 
 python toolchain_env.py                     # mode guidé : menus numérotés
@@ -135,9 +136,42 @@ provider : ajouter `--reinit`.
 Options utiles : `--uid`, `--proxy-user` / `--proxy-password` (ou `$PROXY_USER` /
 `$PROXY_PASSWORD`) pour un lancement sans aucune saisie (CI), `--new-proxy-password`,
 `--forget-proxy-password`, `--no-proxy`, `--prefix` (préfixe des descriptions),
-`--tf-log` (`TF_LOG=debug`), `--new-token`, `--new-key`, `--forget`, `--probe` (diagnostic
+`--follow`, `--tf-log`, `--no-log-file` (voir ci-dessous), `--new-token`, `--new-key`, `--forget`, `--probe` (diagnostic
 réseau du service token), `--vault` / `--vault-url` / `--token-service` / `--secret-path` /
 `--namespace` pour sortir des valeurs par défaut. `--help` liste tout.
+
+### Voir ce qui se passe pendant un run
+
+`tofu test` n'écrit une ligne qu'à la **fin** de chaque `run` (`run "create_bucket"... pass`) :
+pendant les minutes où l'orchestrateur crée la souscription, le terminal reste muet, et
+`-verbose` n'ajoute le plan et le state qu'après coup. Avec `--run`, le script active donc le
+journal de tofu et du provider :
+
+- le journal complet (`TF_LOG=debug` : appels du provider à l'orchestrateur, attente des
+  souscriptions, erreurs) est écrit dans `terraform/logs/<horodatage>-<env>-<commande>.log` ;
+  son chemin est affiché au début et à la fin ;
+- les lignes `info`, `warn` et `error` sont recopiées en direct dans le terminal, préfixées
+  par `|`, entre les lignes de `tofu test` :
+
+```
+tests/20_bucket_basic.tftest.hcl... in progress
+  | 14:02:11 [INFO]  Starting apply for orchestrator_subscription_cos_v1.cos
+  | 14:03:40 [INFO]  Starting apply for orchestrator_subscription_cosbucket_v1.bucket["basic"]
+  run "create_bucket"... pass
+```
+
+| Option | Effet |
+|---|---|
+| `--follow debug` (ou `trace`) | tout le détail en direct, dont les requêtes du provider |
+| `--follow warn` / `error` | seulement les avertissements / les erreurs |
+| `--follow off` | rien en direct ; `tail -f terraform/logs/<fichier>.log` dans un autre terminal |
+| `--tf-log trace` | niveau du journal (défaut `debug`) |
+| `--no-log-file` | pas de journal ; avec `--tf-log`, `TF_LOG` sort brut sur le terminal, comme avant |
+
+Les journaux sont lisibles par toi seul (un journal `debug` peut contenir des en-têtes HTTP),
+ignorés par git, et seuls les 20 derniers sont gardés. Ce que les lignes du provider
+contiennent dépend de ce que le provider `orchestrator` journalise : si `info` est trop
+pauvre ou trop bavard, changer `DEFAULT_FOLLOW_LEVEL` en tête du script.
 
 ## 5. Comment fonctionnent les tests (`tofu test`)
 
@@ -264,7 +298,10 @@ Proxy OK (https://iam.cloud.ibm.com/... joignable).
 Token Vault sauvegardé valide encore 29 jours.        (ou : Service token joint direct.)
 API key sauvegardée réutilisée (...).                 (ou : API key lue dans Vault (..., lease 2 h).)
 Variables exportées : IBM_CLOUD_API_KEY, ORCHESTRATOR_IBMCLOUD_API_KEY, http_proxy, ..., TF_VAR_prefix
+Journal tofu (TF_LOG=debug) : .../terraform/logs/20261002-140200-int-test.log
 $ tofu test -var-file=envs/int.tfvars ...
+  | 14:02:11 [INFO]  Starting apply for ...           (lignes du journal, en direct)
+Journal complet : .../terraform/logs/20261002-140200-int-test.log
 ```
 
 ### Problèmes rencontrés et leur cause

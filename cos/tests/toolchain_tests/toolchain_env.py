@@ -39,6 +39,16 @@ Utilisation
     python toolchain_env.py --env int --run test -- -filter=tests/20_bucket_basic.tftest.hcl
     python toolchain_env.py --env int --run plan
 
+Logs
+Avec --run, le journal de tofu (TF_LOG=debug : appels du provider à
+l'orchestrateur, attente des souscriptions) est écrit dans
+<dossier terraform>/logs/<horodatage>-<env>-<commande>.log, et ses lignes
+info, warn et error sont recopiées en direct dans le terminal, préfixées par
+« | » : `tofu test` n'affiche sinon rien tant qu'un run n'est pas fini.
+    --follow debug        tout le détail en direct (trace, debug, info, warn, error, off)
+    --tf-log trace        niveau du journal
+    --no-log-file         pas de journal (comportement d'avant)
+
     # ou un sous-shell avec les variables déjà exportées
     python toolchain_env.py --env int --shell
 
@@ -93,6 +103,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -183,6 +194,19 @@ terraform {
   }
 }
 """
+# Journal de tofu : avec --run, TF_LOG part dans <dossier terraform>/logs/
+# <horodatage>-<env>-<commande>.log (TF_LOG_PATH) au lieu de noyer la sortie
+# de la commande, et les lignes d'un niveau >= --follow sont recopiées en
+# direct dans le terminal. `tofu test` n'affiche rien pendant qu'un run tourne :
+# c'est le seul moyen de voir ce qui se passe.
+LOGS_DIR = "logs"
+LOGS_KEPT = 20  # journaux gardés par dossier, les plus anciens sont supprimés
+TF_LOG_LEVELS = ("trace", "debug", "info", "warn", "error")
+DEFAULT_JOURNAL_LEVEL = "debug"
+DEFAULT_FOLLOW_LEVEL = "info"
+FOLLOW_OFF = "off"
+_TF_LOG_LINE = re.compile(r"^(?:\d{4}-\d\d-\d\dT(\d\d:\d\d:\d\d)\S*|\S+) \[(TRACE|DEBUG|INFO|WARN|ERROR)\]")
+
 # Sous-commandes terraform qui acceptent -var-file : envs/<env>.tfvars y est ajouté.
 VAR_FILE_COMMANDS = frozenset({"plan", "apply", "destroy", "test", "refresh", "console"})
 
@@ -888,6 +912,104 @@ def run_terraform(args: Sequence[str], cwd: str, env: dict[str, str] | None = No
         raise CliExit(EXIT_TERRAFORM_FAILED, f"{terraform} : {exc}") from exc
 
 
+def new_journal(cwd: str, env: str, command: str, now: float | None = None) -> str:
+    """Crée <cwd>/logs/<horodatage>-<env>-<commande>.log, vide et lisible par
+    toi seul (TF_LOG=debug peut contenir des en-têtes HTTP), et ne garde que
+    les LOGS_KEPT journaux les plus récents du dossier."""
+    directory = os.path.join(cwd, LOGS_DIR)
+    os.makedirs(directory, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+    path = os.path.join(directory, f"{stamp}-{env}-{re.sub(r'[^A-Za-z0-9]+', '_', command)}.log")
+    os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))
+    for name in sorted(f for f in os.listdir(directory) if f.endswith(".log"))[:-LOGS_KEPT]:
+        try:
+            os.remove(os.path.join(directory, name))
+        except OSError:
+            pass
+    return path
+
+
+def journal_level(tf_log: str | None, follow: str) -> str:
+    """Niveau TF_LOG du journal : --tf-log (défaut debug), abaissé au niveau
+    de --follow s'il est plus détaillé, sinon il n'y aurait rien à suivre."""
+    level = (tf_log or DEFAULT_JOURNAL_LEVEL).lower()
+    if follow in TF_LOG_LEVELS and level in TF_LOG_LEVELS:
+        return min(level, follow, key=TF_LOG_LEVELS.index)
+    return level
+
+
+class JournalFilter:
+    """Lignes du journal d'un niveau >= seuil, raccourcies pour le terminal
+    (heure seule). Une ligne sans niveau est la suite du message précédent et
+    suit son sort."""
+
+    def __init__(self, level: str):
+        self.threshold = TF_LOG_LEVELS.index(level)
+        self.keeping = False
+
+    def shown(self, line: str) -> str | None:
+        match = _TF_LOG_LINE.match(line)
+        if match:
+            self.keeping = TF_LOG_LEVELS.index(match.group(2).lower()) >= self.threshold
+            if match.group(1):
+                line = match.group(1) + line[match.start(2) - 2:]
+        return line if self.keeping and line.strip() else None
+
+
+def follow_journal(path: str, level: str, stop: threading.Event,
+                   out: Callable[[str], None] | None = None, poll: float = 0.3) -> None:
+    """Recopie dans le terminal les lignes du journal au fil de l'eau, jusqu'à
+    ce que `stop` soit levé et que le fichier soit lu en entier."""
+    out = out or _log
+    journal = JournalFilter(level)
+
+    def show(line: str) -> None:
+        shown = journal.shown(line)
+        if shown is not None:
+            out(f"  | {shown}")
+
+    pending = ""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        while True:
+            chunk = fh.read()
+            if chunk:
+                *lines, pending = (pending + chunk).split("\n")
+                for line in lines:
+                    show(line)
+            elif stop.is_set():
+                break
+            else:
+                stop.wait(poll)
+    if pending:
+        show(pending)
+
+
+def run_with_journal(command: Sequence[str], cwd: str, env: dict[str, str], tf_log: str | None, follow: str,
+                     env_name: str, run: Callable[..., int] | None = None) -> int:
+    """Lance tofu avec son journal dans un fichier de <cwd>/logs/ et, sauf
+    --follow off, les lignes d'un niveau >= follow en direct sur stderr."""
+    run = run or run_terraform
+    journal = new_journal(cwd, env_name, command[0])
+    level = journal_level(tf_log, follow)
+    env = {**env, "TF_LOG": level, "TF_LOG_PATH": journal}
+    following = follow in TF_LOG_LEVELS and level in TF_LOG_LEVELS
+    _log(f"Journal {TERRAFORM_BIN} (TF_LOG={level}) : {journal}\n"
+         + (f"  lignes {follow} et plus affichées ici, préfixées par « | » (--follow NIVEAU pour en voir "
+            f"plus ou moins, --follow {FOLLOW_OFF} pour rien)." if following
+            else f"  à suivre dans un autre terminal : tail -f {shlex.quote(journal)}"))
+    stop = threading.Event()
+    follower = threading.Thread(target=follow_journal, args=(journal, follow, stop), daemon=True) if following else None
+    if follower:
+        follower.start()
+    try:
+        return run(command, cwd, env, to_stderr=False)
+    finally:
+        stop.set()
+        if follower:
+            follower.join(timeout=5)
+        _log(f"Journal complet : {journal}")
+
+
 def ensure_terraform_login(host: str, cwd: str, run: Callable[..., int] = run_terraform) -> None:
     if terraform_logged_in(host):
         _log(f"{TERRAFORM_BIN} login : credentials déjà enregistrés pour {host}.")
@@ -1362,7 +1484,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     terraform.add_argument("--skip-init", action="store_true", help="ne pas faire tofu init")
     terraform.add_argument("--reinit", action="store_true", help="refaire tofu init même si déjà fait")
     terraform.add_argument("--tf-log", nargs="?", const="debug", default=None,
-                           help="exporter TF_LOG (défaut du niveau: debug)")
+                           help="niveau TF_LOG (défaut du niveau: debug) : avec --run, celui du journal "
+                                f"{LOGS_DIR}/<horodatage>-<env>-<commande>.log ; sinon TF_LOG est exporté")
+    terraform.add_argument("--follow", choices=[*TF_LOG_LEVELS, FOLLOW_OFF], default=DEFAULT_FOLLOW_LEVEL,
+                           metavar="NIVEAU",
+                           help="avec --run : niveau des lignes du journal affichées en direct "
+                                f"({', '.join(TF_LOG_LEVELS)}, {FOLLOW_OFF} ; défaut: {DEFAULT_FOLLOW_LEVEL})")
+    terraform.add_argument("--no-log-file", action="store_true",
+                           help="avec --run : pas de journal ; TF_LOG (--tf-log) sort alors sur le terminal")
 
     proxy = parser.add_argument_group("proxy (utilisé pour les appels Vault et exporté pour terraform)")
     proxy.add_argument("--proxy", metavar="HOST:PORT", default=None,
@@ -1484,8 +1613,9 @@ def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
         ("Aucun proxy", ["--no-proxy"]),
     ], ask)
     argv += _choose("Options terraform ?", [
-        ("Aucune", []),
-        ("TF_LOG=debug", ["--tf-log"]),
+        ("Aucune : étapes en direct (niveau info), journal complet dans logs/", []),
+        ("Tout le détail en direct (--follow debug)", ["--follow", "debug"]),
+        ("Rien en direct, seulement le journal (--follow off)", ["--follow", FOLLOW_OFF]),
     ], ask)
     if action and action[-1] == "-filter=":
         action[-1] += "tests/" + _ask_text("Fichier de scénario (dans tests/)", "20_bucket_basic.tftest.hcl", ask)
@@ -1600,7 +1730,9 @@ def main(argv: list[str] | None = None) -> int:
                     raise CliExit(EXIT_TERRAFORM_FAILED, f"{TERRAFORM_BIN} {'.'.join(map(str, version))} : "
                                                          "`tofu test` demande OpenTofu 1.6 au minimum.")
                 command = adapt_test_filter(command, args.dir, version)
-            return run_terraform(command, args.dir, env, to_stderr=False)
+            if args.no_log_file:
+                return run_terraform(command, args.dir, env, to_stderr=False)
+            return run_with_journal(command, args.dir, env, args.tf_log, args.follow, args.env)
         except CliExit as exc:
             _log(str(exc))
             return exc.code

@@ -16,3 +16,5 @@ coverage.xml
 *.tfstate
 *.tfstate.*
 .tftest-filter/
+# journaux TF_LOG écrits par toolchain_env.py --run
+toolchain_tests/**/logs/

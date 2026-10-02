@@ -701,6 +701,17 @@ class MainTest(VaultServerTest):
         self.assertEqual(run.call_args.args[1], tests_dir)
         self.assertEqual(run.call_args.args[2]["IBM_CLOUD_API_KEY"], API_KEY)
         self.assertFalse(run.call_args.kwargs["to_stderr"])
+        journal = run.call_args.args[2]["TF_LOG_PATH"]  # le journal de tofu part dans un fichier de logs/
+        self.assertEqual(os.path.dirname(journal), os.path.join(tests_dir, "logs"))
+        self.assertTrue(journal.endswith("-int-plan.log"))
+        self.assertEqual(run.call_args.args[2]["TF_LOG"], "debug")
+
+    def test_run_without_log_file(self):
+        code, _, run, tests_dir = self._run_main("--skip-init", "--no-log-file", "--tf-log", "trace", "--run", "plan")
+        self.assertEqual(code, 0)
+        self.assertNotIn("TF_LOG_PATH", run.call_args.args[2])
+        self.assertEqual(run.call_args.args[2]["TF_LOG"], "trace")  # comme avant : sur le terminal
+        self.assertFalse(os.path.exists(os.path.join(tests_dir, "logs")))
 
     def test_run_test_in_terraform_root(self):
         root = tempfile.mkdtemp(prefix="tfroot-")
@@ -736,11 +747,93 @@ class MainTest(VaultServerTest):
         self.assertIsNone(te.load_cached_token(self.url))
 
 
+class JournalTest(unittest.TestCase):
+    LINES = [
+        "2026-10-02T12:00:01.123+0200 [INFO]  Starting apply for orchestrator_subscription_cos_v1.cos",
+        "2026-10-02T12:00:02.000+0200 [DEBUG] provider.terraform-provider-orchestrator: GET /subscriptions/1",
+        "  suite du message debug",
+        "2026-10-02T12:00:03.000+0200 [ERROR] provider.terraform-provider-orchestrator: subscription failed",
+        "  détail de l'erreur",
+        "",
+    ]
+
+    def test_new_journal_is_private_and_old_ones_are_pruned(self):
+        cwd = tempfile.mkdtemp(prefix="tfdir-")
+        paths = [te.new_journal(cwd, "int", "test", now=1_800_000_000 + i) for i in range(te.LOGS_KEPT + 2)]
+        self.assertEqual(os.stat(paths[-1]).st_mode & 0o777, 0o600)
+        self.assertTrue(paths[-1].endswith("-int-test.log"))
+        kept = sorted(os.listdir(os.path.join(cwd, "logs")))
+        self.assertEqual(kept, [os.path.basename(p) for p in paths[2:]])
+
+    def test_journal_level(self):
+        self.assertEqual(te.journal_level(None, "info"), "debug")
+        self.assertEqual(te.journal_level("error", "info"), "info")  # sinon rien à suivre
+        self.assertEqual(te.journal_level("trace", "info"), "trace")
+        self.assertEqual(te.journal_level("error", "off"), "error")
+
+    def test_filter_keeps_level_and_its_continuation_lines(self):
+        journal = te.JournalFilter("info")
+        self.assertEqual([journal.shown(line) for line in self.LINES], [
+            "12:00:01 [INFO]  Starting apply for orchestrator_subscription_cos_v1.cos",
+            None, None,
+            "12:00:03 [ERROR] provider.terraform-provider-orchestrator: subscription failed",
+            "  détail de l'erreur",
+            None,
+        ])
+        self.assertEqual(te.JournalFilter("debug").shown(self.LINES[2]), None)  # suite sans message avant
+        self.assertEqual(te.JournalFilter("warn").shown("x [WARN] sans horodatage ISO"), "x [WARN] sans horodatage ISO")
+
+    def test_follow_reads_what_is_written_while_running_and_after_stop(self):
+        path = te.new_journal(tempfile.mkdtemp(prefix="tfdir-"), "int", "test")
+        stop, seen = threading.Event(), []
+        follower = threading.Thread(target=te.follow_journal, args=(path, "info", stop, seen.append, 0.01))
+        follower.start()
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(self.LINES[0] + "\n" + self.LINES[1][:20])  # ligne coupée au milieu d'une écriture
+            fh.flush()
+            deadline = time.time() + 5
+            while not seen and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(seen, ["  | 12:00:01 [INFO]  Starting apply for orchestrator_subscription_cos_v1.cos"])
+            fh.write(self.LINES[1][20:] + "\n" + self.LINES[3])  # dernière ligne sans retour à la ligne
+        stop.set()
+        follower.join(timeout=5)
+        self.assertFalse(follower.is_alive())
+        self.assertEqual(seen[1:], ["  | 12:00:03 [ERROR] provider.terraform-provider-orchestrator: subscription failed"])
+
+    def test_run_with_journal_follows_and_returns_the_exit_code(self):
+        cwd = tempfile.mkdtemp(prefix="tfdir-")
+
+        def fake_tofu(command, cwd, env, to_stderr):
+            with open(env["TF_LOG_PATH"], "a", encoding="utf-8") as fh:
+                fh.write("\n".join(self.LINES))
+            return 7
+
+        shown = []
+        with mock.patch.object(te, "_log", shown.append):
+            code = te.run_with_journal(["test"], cwd, {"A": "b"}, None, "info", "int", run=fake_tofu)
+        self.assertEqual(code, 7)
+        self.assertEqual([line for line in shown if line.startswith("  | ")], [
+            "  | 12:00:01 [INFO]  Starting apply for orchestrator_subscription_cos_v1.cos",
+            "  | 12:00:03 [ERROR] provider.terraform-provider-orchestrator: subscription failed",
+            "  |   détail de l'erreur",
+        ])
+        self.assertIn("Journal complet : ", shown[-1])
+
+    def test_follow_off_only_writes_the_file(self):
+        shown = []
+        run = mock.Mock(return_value=0)
+        with mock.patch.object(te, "_log", shown.append):
+            te.run_with_journal(["plan"], tempfile.mkdtemp(prefix="tfdir-"), {}, "info", "off", "int", run=run)
+        self.assertEqual(run.call_args.args[2]["TF_LOG"], "info")
+        self.assertIn("tail -f", shown[0])
+
+
 class InteractiveTest(unittest.TestCase):
     def test_menu_builds_argv(self):
-        answers = iter(["1", "3", "2", "2", "2"])  # int, plan, nouveau token, sans proxy, TF_LOG
+        answers = iter(["1", "3", "2", "2", "2"])  # int, plan, nouveau token, sans proxy, détail en direct
         argv = te.interactive_argv(ask=lambda q: next(answers))
-        self.assertEqual(argv, ["--new-token", "--no-proxy", "--tf-log", "--run", "plan"])
+        self.assertEqual(argv, ["--new-token", "--no-proxy", "--follow", "debug", "--run", "plan"])
         args = te.parse_args(argv)
         self.assertEqual(args.run, ["plan"])
         self.assertTrue(args.new_token)
