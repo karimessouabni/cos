@@ -60,20 +60,20 @@ Proxy
     --no-proxy                                    # pas de proxy du tout
 Si https_proxy est déjà exporté dans le shell et répond, il est réutilisé tel
 quel. Sinon user et mot de passe sont demandés une fois, vérifiés sur
-iam.cloud.ibm.com, puis mémorisés (trousseau macOS, sinon
-~/.cache/cos-toolchain/state.json en 0600) : plus rien n'est redemandé tant
-que le proxy les accepte. --new-proxy-password pour en saisir un autre,
---forget-proxy-password pour l'oublier.
+iam.cloud.ibm.com, puis mémorisés dans le trousseau macOS (sans trousseau, le
+mot de passe est redemandé à chaque lancement ; il n'est jamais écrit sur le
+disque) : plus rien n'est redemandé tant que le proxy les accepte.
+--new-proxy-password pour en saisir un autre, --forget-proxy-password pour l'oublier.
 
 Token Vault
     export VAULT_TOKEN=hvs....                # ou --vault-token
     --uid lh90871                             # uid passé au service token
                                               # (défaut: $TOOLCHAIN_UID, sinon demandé
                                               # une fois puis mémorisé)
-Le token récupéré est sauvegardé dans ~/.cache/cos-toolchain/state.json
-(lisible par toi seul) avec l'API key et réutilisé tant qu'il est valide
-(vérifié par lookup-self) : le service token n'est rappelé que s'il est expiré
-ou refusé. --new-token force un nouveau token, --new-key une nouvelle API key,
+Le token récupéré est mémorisé dans le trousseau macOS avec l'API key et
+réutilisé tant qu'il est valide (vérifié par lookup-self) : le service token
+n'est rappelé que s'il est expiré ou refusé. ~/.cache/cos-toolchain/state.json
+ne garde que des réglages (user, uid, versions), jamais de secret. --new-token force un nouveau token, --new-key une nouvelle API key,
 --forget efface tout ce qui est sauvegardé.
 Sans service token pour l'instance Vault (--browser-token pour forcer), le
 token est lu dans un Chrome / Edge en navigation privée ouvert sur l'UI Vault
@@ -81,8 +81,10 @@ token est lu dans un Chrome / Edge en navigation privée ouvert sur l'UI Vault
 ouverte dans le navigateur par défaut : "Copy token" dans le menu utilisateur,
 puis Entrée dans le terminal (le token est lu dans le presse-papiers).
 
-Les appels HTTP vers Vault ignorent la vérification TLS (certificats internes),
-comme les curl de la procédure manuelle ; --verify-tls la réactive.
+Les appels HTTPS (Vault, service token, test du proxy) vérifient toujours le
+certificat du serveur. Les CA internes sont lues dans les trousseaux système
+macOS, ou dans un bundle PEM : --ca-bundle, $COS_TOOLCHAIN_CA_BUNDLE ou
+$SSL_CERT_FILE.
 
 Codes de sortie: 0 OK, 1 erreur args/token, 2 erreur Vault, 3 erreur tofu
 (avec --run, le code de sortie de tofu est renvoyé tel quel).
@@ -292,21 +294,55 @@ def read_clipboard() -> str:
 # Client Vault (urllib, sans dépendance)
 # --------------------------------------------------------------------------- #
 
-def insecure_ssl_context() -> ssl.SSLContext:
-    """Contexte TLS sans aucune vérification (certificats internes auto-signés)."""
+CA_BUNDLE_ENV = "COS_TOOLCHAIN_CA_BUNDLE"
+# Trousseaux macOS d'où sont lues les autorités de certification internes
+# (poussées par le MDM) : elles ne sont pas dans le magasin OpenSSL de Python.
+MACOS_CA_KEYCHAINS = ("/Library/Keychains/System.keychain",
+                      "/System/Library/Keychains/SystemRootCertificates.keychain")
+
+
+def ca_bundle_path(explicit: str | None = None, environ: dict[str, str] | None = None) -> str:
+    """Bundle PEM des CA internes : --ca-bundle, sinon $COS_TOOLCHAIN_CA_BUNDLE,
+    sinon $SSL_CERT_FILE ; "" si aucun."""
+    environ = os.environ if environ is None else environ
+    return explicit or environ.get(CA_BUNDLE_ENV) or environ.get("SSL_CERT_FILE") or ""
+
+
+def macos_keychain_cas() -> str:
+    """Certificats (PEM) des trousseaux système macOS, "" hors macOS ou si
+    `security` échoue. Permet de vérifier les certificats internes sans bundle."""
+    pems = []
+    for keychain in MACOS_CA_KEYCHAINS:
+        result = _keychain("find-certificate", "-a", "-p", keychain)
+        if result is not None and result.returncode == 0 and "BEGIN CERTIFICATE" in result.stdout:
+            pems.append(result.stdout)
+    return "\n".join(pems)
+
+
+def tls_context(ca_bundle: str | None = None) -> ssl.SSLContext:
+    """Contexte TLS qui vérifie toujours le certificat du serveur : CA du
+    système, plus le bundle (ca_bundle_path) et les CA des trousseaux macOS.
+    La vérification n'est jamais désactivée."""
     context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
+    bundle = ca_bundle_path(ca_bundle)
+    if bundle:
+        context.load_verify_locations(cafile=bundle)
+    cas = macos_keychain_cas()
+    if cas:
+        try:
+            context.load_verify_locations(cadata=cas)
+        except ssl.SSLError as exc:
+            _log(f"CA du trousseau macOS ignorées ({exc}) : passer --ca-bundle si Vault est refusé.")
     return context
 
 
 class VaultClient:
     def __init__(self, base_url: str, namespace: str, timeout: int = DEFAULT_TIMEOUT,
-                 verify_tls: bool = False):
+                 ca_bundle: str | None = None):
         self.base_url = base_url.rstrip("/")
         self.namespace = namespace
         self.timeout = timeout
-        self._context = ssl.create_default_context() if verify_tls else insecure_ssl_context()
+        self._context = tls_context(ca_bundle)
 
     def _request(self, token: str, path: str) -> dict[str, Any]:
         url = f"{self.base_url}/v1/{path.strip('/')}"
@@ -421,12 +457,12 @@ def token_service_url(base_url: str, uid: str, namespace: str) -> str:
 
 
 def service_token(base_url: str, uid: str, namespace: str, timeout: int = DEFAULT_TIMEOUT,
-                  verify_tls: bool = False) -> str:
+                  ca_bundle: str | None = None) -> str:
     """Token Vault délivré par le service token : GET /v1/token/<uid>?namespace=<ns>,
     champ auth.client_token de la réponse (format Vault)."""
     url = token_service_url(base_url, uid, namespace)
     host = urllib.parse.urlsplit(url).hostname or ""
-    context = ssl.create_default_context() if verify_tls else insecure_ssl_context()
+    context = tls_context(ca_bundle)
     # Le service token est un hôte intranet : selon le poste il se joint en
     # direct ou via le proxy. On essaie les deux (direct d'abord si le nom se
     # résout, sinon le proxy d'abord) avec un délai court chacun.
@@ -644,7 +680,7 @@ def browser_token(
     poll_interval: float = 2,
 ) -> str:
     """Ouvre l'UI Vault dans un Chrome / Edge dédié (profil temporaire, navigation
-    privée, erreurs de certificat ignorées), attend le login SSO, lit le token
+    privée), attend le login SSO, lit le token
     de session dans la page via le protocole DevTools puis ferme le navigateur.
     "" si échec ou délai dépassé."""
     browser = browser or find_chromium_browser()
@@ -654,7 +690,7 @@ def browser_token(
     profile_dir = tempfile.mkdtemp(prefix="cos-toolchain-")
     command = [browser, f"--user-data-dir={profile_dir}", "--remote-debugging-port=0",
                "--no-first-run", "--no-default-browser-check", "--new-window",
-               "--incognito", "--ignore-certificate-errors", ui_url]
+               "--incognito", ui_url]
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         port = _devtools_port(profile_dir, process)
@@ -719,8 +755,21 @@ def acquire_token_interactively(
 
 
 # --------------------------------------------------------------------------- #
-# Cache local : tokens Vault et API keys (réutilisés tant qu'ils sont valides)
+# Cache local : réglages (state.json) et secrets (trousseau macOS)
 # --------------------------------------------------------------------------- #
+#
+# state.json ne contient que des réglages non sensibles (user du proxy, uid,
+# version du provider...) et l'index des secrets mémorisés. Les secrets
+# eux-mêmes (tokens Vault, API keys, mot de passe du proxy) vont dans le
+# trousseau macOS via `security` ; sans trousseau ils ne vivent que le temps
+# du processus et sont redemandés au lancement suivant. Rien de sensible n'est
+# jamais écrit en clair sur le disque.
+
+KEYCHAIN_SERVICE = "cos-toolchain"
+# Anciennes sections de state.json qui contenaient des secrets en clair :
+# purgées à la première lecture (versions antérieures du script).
+LEGACY_SECRET_SECTIONS = ("vault_tokens", "api_keys", "proxy_passwords")
+
 
 def state_path() -> str:
     """~/.cache/cos-toolchain/state.json (ou $XDG_CACHE_HOME/...)."""
@@ -734,7 +783,14 @@ def _read_state() -> dict[str, Any]:
             state = json.load(fh)
     except (OSError, ValueError):
         return {}
-    return state if isinstance(state, dict) else {}
+    if not isinstance(state, dict):
+        return {}
+    if any(section in state for section in LEGACY_SECRET_SECTIONS):
+        for section in LEGACY_SECRET_SECTIONS:
+            state.pop(section, None)
+        _write_state(state)
+        _log(f"Secrets en clair purgés de {state_path()} (ancienne version du script).")
+    return state
 
 
 def _write_state(state: dict[str, Any]) -> None:
@@ -749,48 +805,6 @@ def _write_state(state: dict[str, Any]) -> None:
         _log(f"Cache non sauvegardé ({exc}).")
 
 
-def load_cached_token(vault_url: str) -> str | None:
-    token = (_read_state().get("vault_tokens") or {}).get(vault_url.rstrip("/"))
-    return token if isinstance(token, str) and token else None
-
-
-def save_cached_token(vault_url: str, token: str) -> None:
-    state = _read_state()
-    state.setdefault("vault_tokens", {})[vault_url.rstrip("/")] = token
-    _write_state(state)
-
-
-def forget_cached_token(vault_url: str) -> None:
-    state = _read_state()
-    if (state.get("vault_tokens") or {}).pop(vault_url.rstrip("/"), None) is not None:
-        _write_state(state)
-
-
-def _api_key_cache_key(vault_url: str, secret_path: str) -> str:
-    return f"{vault_url.rstrip('/')}/v1/{secret_path.strip('/')}"
-
-
-def load_cached_api_key(vault_url: str, secret_path: str, now: float | None = None) -> str | None:
-    """API key sauvegardée pour ce secret si son lease est encore valide."""
-    entry = (_read_state().get("api_keys") or {}).get(_api_key_cache_key(vault_url, secret_path))
-    if not isinstance(entry, dict) or not entry.get("api_key"):
-        return None
-    expires_at = entry.get("expires_at")
-    if expires_at is not None and float(expires_at) - (time.time() if now is None else now) < TOKEN_MIN_VALIDITY:
-        return None
-    return str(entry["api_key"])
-
-
-def save_cached_api_key(vault_url: str, secret_path: str, api_key: str, lease: int | None) -> None:
-    state = _read_state()
-    state.setdefault("api_keys", {})[_api_key_cache_key(vault_url, secret_path)] = {
-        "api_key": api_key,
-        "expires_at": None if lease is None else time.time() + lease,
-        "saved_at": time.time(),
-    }
-    _write_state(state)
-
-
 def load_setting(name: str) -> str:
     value = (_read_state().get("settings") or {}).get(name)
     return value if isinstance(value, str) else ""
@@ -800,9 +814,6 @@ def save_setting(name: str, value: str) -> None:
     state = _read_state()
     state.setdefault("settings", {})[name] = value
     _write_state(state)
-
-
-KEYCHAIN_SERVICE = "cos-toolchain-proxy"
 
 
 def _keychain(*args: str) -> subprocess.CompletedProcess | None:
@@ -815,42 +826,129 @@ def _keychain(*args: str) -> subprocess.CompletedProcess | None:
         return None
 
 
-def load_proxy_password(user: str) -> str:
-    """Mot de passe du proxy mémorisé pour `user` : trousseau macOS, sinon state.json."""
-    result = _keychain("find-generic-password", "-a", user, "-s", KEYCHAIN_SERVICE, "-w")
-    if result is not None:
-        return result.stdout.strip() if result.returncode == 0 else ""
-    value = (_read_state().get("proxy_passwords") or {}).get(user)
-    return value if isinstance(value, str) else ""
+class SecretStore:
+    """Secrets nommés : trousseau macOS (service KEYCHAIN_SERVICE, compte = nom),
+    sinon mémoire du processus. L'index des noms mémorisés est gardé dans
+    state.json pour pouvoir tout oublier (--forget)."""
 
+    def __init__(self, keychain: Callable[..., subprocess.CompletedProcess | None] | None = None):
+        self._explicit_keychain = keychain
+        self._memory: dict[str, str] = {}
 
-def save_proxy_password(user: str, password: str) -> None:
-    """Mémorise le mot de passe validé : trousseau macOS (`security`), sinon
-    state.json (fichier 0600, lisible par toi seul)."""
-    result = _keychain("add-generic-password", "-a", user, "-s", KEYCHAIN_SERVICE, "-w", password, "-U")
-    if result is not None:
-        if result.returncode == 0:
-            _log(f"Mot de passe du proxy mémorisé dans le trousseau macOS (service {KEYCHAIN_SERVICE}).")
-            return
-        _log(f"Trousseau macOS indisponible ({result.stderr.strip()}) : mot de passe gardé dans {state_path()}.")
-    else:
-        _log(f"Mot de passe du proxy mémorisé dans {state_path()} (lisible par toi seul).")
-    state = _read_state()
-    state.setdefault("proxy_passwords", {})[user] = password
-    _write_state(state)
+    def _keychain(self, *args: str) -> subprocess.CompletedProcess | None:
+        # Résolu à l'appel (et non à la construction) : les tests remplacent _keychain du module.
+        return (self._explicit_keychain or _keychain)(*args)
 
+    @property
+    def persistent(self) -> bool:
+        """Vrai si les secrets survivent au processus (trousseau disponible)."""
+        return self._keychain("help") is not None
 
-def forget_proxy_password(user: str) -> None:
-    _keychain("delete-generic-password", "-a", user, "-s", KEYCHAIN_SERVICE)
-    state = _read_state()
-    if (state.get("proxy_passwords") or {}).pop(user, None) is not None:
+    def load(self, name: str) -> str:
+        result = self._keychain("find-generic-password", "-a", name, "-s", KEYCHAIN_SERVICE, "-w")
+        if result is not None:
+            return result.stdout.strip() if result.returncode == 0 else ""
+        return self._memory.get(name, "")
+
+    def save(self, name: str, value: str) -> bool:
+        """Mémorise `value` ; vrai si elle survivra au processus."""
+        self._index(name, add=True)
+        result = self._keychain("add-generic-password", "-a", name, "-s", KEYCHAIN_SERVICE, "-w", value, "-U")
+        if result is not None and result.returncode == 0:
+            self._memory.pop(name, None)
+            return True
+        if result is not None:
+            _log(f"Trousseau macOS indisponible ({result.stderr.strip()}) : secret gardé en mémoire seulement.")
+        self._memory[name] = value
+        return False
+
+    def forget(self, name: str) -> None:
+        self._keychain("delete-generic-password", "-a", name, "-s", KEYCHAIN_SERVICE)
+        self._memory.pop(name, None)
+        self._index(name, add=False)
+
+    def forget_all(self) -> None:
+        for name in list(_read_state().get("secrets") or []) + list(self._memory):
+            self.forget(name)
+        self._memory.clear()
+
+    @staticmethod
+    def _index(name: str, add: bool) -> None:
+        state = _read_state()
+        names = [n for n in (state.get("secrets") or []) if isinstance(n, str) and n != name]
+        if add:
+            names.append(name)
+        state["secrets"] = names
         _write_state(state)
 
 
+SECRETS = SecretStore()
+
+
+def _token_name(vault_url: str) -> str:
+    return f"vault-token:{vault_url.rstrip('/')}"
+
+
+def load_cached_token(vault_url: str) -> str | None:
+    return SECRETS.load(_token_name(vault_url)) or None
+
+
+def save_cached_token(vault_url: str, token: str) -> None:
+    SECRETS.save(_token_name(vault_url), token)
+
+
+def forget_cached_token(vault_url: str) -> None:
+    SECRETS.forget(_token_name(vault_url))
+
+
+def _api_key_cache_key(vault_url: str, secret_path: str) -> str:
+    return f"{vault_url.rstrip('/')}/v1/{secret_path.strip('/')}"
+
+
+def load_cached_api_key(vault_url: str, secret_path: str, now: float | None = None) -> str | None:
+    """API key sauvegardée pour ce secret si son lease est encore valide. Le
+    lease (non sensible) est dans state.json, la clé dans le trousseau."""
+    key = _api_key_cache_key(vault_url, secret_path)
+    entry = (_read_state().get("api_key_leases") or {}).get(key)
+    if not isinstance(entry, dict):
+        return None
+    expires_at = entry.get("expires_at")
+    if expires_at is not None and float(expires_at) - (time.time() if now is None else now) < TOKEN_MIN_VALIDITY:
+        return None
+    return SECRETS.load(f"api-key:{key}") or None
+
+
+def save_cached_api_key(vault_url: str, secret_path: str, api_key: str, lease: int | None) -> None:
+    key = _api_key_cache_key(vault_url, secret_path)
+    state = _read_state()
+    state.setdefault("api_key_leases", {})[key] = {
+        "expires_at": None if lease is None else time.time() + lease,
+        "saved_at": time.time(),
+    }
+    _write_state(state)
+    SECRETS.save(f"api-key:{key}", api_key)
+
+
+def load_proxy_password(user: str) -> str:
+    """Mot de passe du proxy mémorisé pour `user` (trousseau macOS)."""
+    return SECRETS.load(f"proxy:{user}")
+
+
+def save_proxy_password(user: str, password: str) -> None:
+    """Mémorise le mot de passe validé dans le trousseau macOS ; sans trousseau
+    il est gardé en mémoire et redemandé au prochain lancement."""
+    if SECRETS.save(f"proxy:{user}", password):
+        _log(f"Mot de passe du proxy mémorisé dans le trousseau macOS (service {KEYCHAIN_SERVICE}).")
+    else:
+        _log("Pas de trousseau : le mot de passe du proxy sera redemandé au prochain lancement.")
+
+
+def forget_proxy_password(user: str) -> None:
+    SECRETS.forget(f"proxy:{user}")
+
+
 def forget_all() -> None:
-    for user in list(_read_state().get("proxy_passwords") or {}) + [load_setting("proxy_user")]:
-        if user:
-            forget_proxy_password(user)
+    SECRETS.forget_all()
     try:
         os.remove(state_path())
     except FileNotFoundError:
@@ -1258,7 +1356,7 @@ def check_proxy(proxy_vars: dict[str, str], url: str = PROXY_CHECK_URL, timeout:
     request = urllib.request.Request(url, method="HEAD")
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({"https": proxy_vars["https_proxy"], "http": proxy_vars["http_proxy"]}),
-        urllib.request.HTTPSHandler(context=insecure_ssl_context()))
+        urllib.request.HTTPSHandler(context=tls_context()))
     try:
         with opener.open(request, timeout=timeout):
             pass
@@ -1390,7 +1488,7 @@ def resolve_vault_token(args: argparse.Namespace, client: VaultClient,
     if args.token_service and not args.browser_token and not args.manual_token:
         try:
             token = service_token(args.token_service, resolve_uid(args), args.namespace,
-                                  args.timeout, args.verify_tls)
+                                  args.timeout, args.ca_bundle)
         except VaultError as exc:
             _log(f"Service token : {exc}\nPassage par l'UI Vault.")
     if not token:
@@ -1474,8 +1572,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                        help="diagnostic réseau du service token (sondage TCP + GET direct / IPv4 / proxy), puis quitter")
     vault.add_argument("--forget", action="store_true",
                        help="supprimer tout ce qui est sauvegardé (tokens, API keys, mot de passe proxy), puis quitter")
-    vault.add_argument("--verify-tls", action="store_true",
-                       help="vérifier le certificat de Vault (ignoré par défaut : certificats internes)")
+    vault.add_argument("--ca-bundle", metavar="PEM",
+                       help=f"bundle PEM des CA internes pour Vault et le service token "
+                            f"(défaut: ${CA_BUNDLE_ENV}, $SSL_CERT_FILE, et les trousseaux système macOS)")
 
     terraform = parser.add_argument_group("opentofu")
     terraform.add_argument("--terraform-host", default=TERRAFORM_HOST,
@@ -1649,7 +1748,7 @@ def prepare(args: argparse.Namespace, acquire: Callable[[str], str] | None = Non
     apply_proxy(proxy_vars)
     if proxy_vars:
         _log(f"Proxy : {mask_url(proxy_vars['https_proxy'])}  no_proxy : {proxy_vars['no_proxy']}")
-    client = VaultClient(args.vault_url, args.namespace, args.timeout, args.verify_tls)
+    client = VaultClient(args.vault_url, args.namespace, args.timeout, args.ca_bundle)
     try:
         api_key = resolve_api_key(args, client, acquire)
     except VaultError as exc:
@@ -1672,7 +1771,7 @@ def probe(args: argparse.Namespace) -> int:
     try:
         proxy_vars = with_no_proxy(resolve_and_check_proxy(args), args.token_service)
         apply_proxy(proxy_vars)
-        token = service_token(args.token_service, resolve_uid(args), args.namespace, args.timeout, args.verify_tls)
+        token = service_token(args.token_service, resolve_uid(args), args.namespace, args.timeout, args.ca_bundle)
     except CliExit as exc:
         _log(str(exc))
         return exc.code
@@ -1699,7 +1798,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.forget:
         forget_all()
-        _log(f"Cache supprimé ({state_path()}), mot de passe du proxy oublié.")
+        _log(f"Cache supprimé ({state_path()}), secrets oubliés (trousseau {KEYCHAIN_SERVICE}).")
         return EXIT_OK
     if args.forget_proxy_password:
         user = args.proxy_user or load_setting("proxy_user")

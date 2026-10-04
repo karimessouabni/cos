@@ -20,6 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import toolchain_env as te  # noqa: E402
 
 os.environ["XDG_CACHE_HOME"] = tempfile.mkdtemp(prefix="cos-toolchain-tests-")
+# Jamais le vrai trousseau macOS : sans `security`, les secrets restent en mémoire du processus.
+mock.patch.object(te, "_keychain", side_effect=lambda *args: None).start()
 
 TOKEN_OK = "hvs.CAESIEKO1gxUBXCdPSqoxyv5kr8P0bG4Mc5lgJEOsaVtqeTq"
 TOKEN_BAD = "hvs.CAESIFXQc9s9BYB1K9iDoRwwugBc3iFctwrVl30RdM9Ml4au"
@@ -604,6 +606,176 @@ class CacheTest(unittest.TestCase):
 # Navigateur : lecture du token dans les pages via DevTools (mocké)
 # --------------------------------------------------------------------------- #
 
+class FakeKeychain:
+    """Doublure de `security` : find/add/delete-generic-password et find-certificate."""
+
+    def __init__(self, certificates: str = "", broken: bool = False):
+        self.items: dict[tuple[str, str], str] = {}
+        self.certificates = certificates
+        self.broken = broken
+
+    def __call__(self, *args: str) -> te.subprocess.CompletedProcess:
+        def done(code: int, out: str = "", err: str = "") -> te.subprocess.CompletedProcess:
+            return te.subprocess.CompletedProcess(["security", *args], code, out, err)
+        command, options = args[0], dict(zip(args[1::2], args[2::2]))
+        if command == "find-certificate":
+            return done(0, self.certificates) if self.certificates else done(44, "", "no certificates")
+        if self.broken:
+            return done(36, "", "keychain locked")
+        key = (options.get("-a", ""), options.get("-s", ""))
+        if command == "add-generic-password":
+            self.items[key] = options["-w"]
+            return done(0)
+        if command == "find-generic-password":
+            return done(0, self.items[key] + "\n") if key in self.items else done(44, "", "not found")
+        if command == "delete-generic-password":
+            return done(0 if self.items.pop(key, None) is not None else 44)
+        return done(0)
+
+
+class SecretStoreTest(unittest.TestCase):
+    """Les secrets vont dans le trousseau, jamais en clair dans state.json."""
+
+    def setUp(self) -> None:
+        te.forget_all()
+
+    def test_without_keychain_secrets_live_in_memory_only(self):
+        store = te.SecretStore(keychain=lambda *args: None)
+        self.assertFalse(store.persistent)
+        self.assertFalse(store.save("vault-token:https://v", TOKEN_OK))
+        self.assertEqual(store.load("vault-token:https://v"), TOKEN_OK)
+        self.assertNotIn(TOKEN_OK, json.dumps(te._read_state()))
+        self.assertEqual(te._read_state()["secrets"], ["vault-token:https://v"])
+        store.forget("vault-token:https://v")
+        self.assertEqual(store.load("vault-token:https://v"), "")
+        self.assertEqual(te._read_state()["secrets"], [])
+
+    def test_with_keychain_secrets_go_to_the_keychain(self):
+        keychain = FakeKeychain()
+        store = te.SecretStore(keychain=keychain)
+        self.assertTrue(store.persistent)
+        self.assertTrue(store.save("proxy:h90871", "Pass!"))
+        self.assertEqual(keychain.items, {("proxy:h90871", te.KEYCHAIN_SERVICE): "Pass!"})
+        self.assertEqual(store.load("proxy:h90871"), "Pass!")
+        self.assertNotIn("Pass!", json.dumps(te._read_state()))
+        store.forget_all()
+        self.assertEqual(keychain.items, {})
+        self.assertEqual(store.load("proxy:h90871"), "")
+
+    def test_locked_keychain_falls_back_to_memory(self):
+        keychain = FakeKeychain(broken=True)
+        store = te.SecretStore(keychain=keychain)
+        with mock.patch.object(te, "_log") as log:
+            self.assertFalse(store.save("api-key:k", API_KEY))
+        self.assertIn("mémoire seulement", log.call_args.args[0])
+        self.assertEqual(store.load("api-key:k"), "")  # le trousseau cassé répond "non trouvé"
+        self.assertEqual(store._memory["api-key:k"], API_KEY)
+
+    def test_module_store_follows_the_patched_keychain(self):
+        keychain = FakeKeychain()
+        with mock.patch.object(te, "_keychain", side_effect=keychain):
+            te.save_cached_token("https://v", TOKEN_OK)
+            self.assertIn(("vault-token:https://v", te.KEYCHAIN_SERVICE), keychain.items)
+            self.assertEqual(te.load_cached_token("https://v"), TOKEN_OK)
+            te.save_cached_api_key("https://v", "p", API_KEY, 1000)
+            self.assertEqual(te.load_cached_api_key("https://v", "p"), API_KEY)
+            self.assertEqual(set(te._read_state()["api_key_leases"]), {"https://v/v1/p"})
+            self.assertNotIn(API_KEY, json.dumps(te._read_state()))
+            te.save_proxy_password("h90871", "pw")
+            self.assertEqual(te.load_proxy_password("h90871"), "pw")
+            te.forget_all()
+            self.assertEqual(keychain.items, {})
+            self.assertFalse(os.path.exists(te.state_path()))
+
+    def test_legacy_plaintext_secrets_are_purged_on_read(self):
+        os.makedirs(os.path.dirname(te.state_path()), exist_ok=True)
+        with open(te.state_path(), "w", encoding="utf-8") as fh:
+            json.dump({"settings": {"proxy_user": "h90871"}, "vault_tokens": {"https://v": TOKEN_OK},
+                       "api_keys": {"k": {"api_key": API_KEY}}, "proxy_passwords": {"h90871": "pw"}}, fh)
+        with mock.patch.object(te, "_log") as log:
+            state = te._read_state()
+        self.assertEqual(state, {"settings": {"proxy_user": "h90871"}})
+        with open(te.state_path(), encoding="utf-8") as fh:
+            on_disk = fh.read()
+        for secret in (TOKEN_OK, API_KEY, "pw"):
+            self.assertNotIn(secret, on_disk)
+        self.assertIn("purgés", log.call_args.args[0])
+        self.assertIsNone(te.load_cached_token("https://v"))
+
+
+def _first_pem_certificate() -> str:
+    """Un certificat PEM du magasin système (pour tester le chargement de CA)."""
+    cafile = te.ssl.get_default_verify_paths().cafile
+    if not cafile or not os.path.exists(cafile):
+        return ""
+    with open(cafile, encoding="utf-8", errors="ignore") as fh:
+        content = fh.read()
+    start = content.find("-----BEGIN CERTIFICATE-----")
+    end = content.find("-----END CERTIFICATE-----", start)
+    return content[start:end + len("-----END CERTIFICATE-----")] + "\n" if start >= 0 and end > 0 else ""
+
+
+class TlsContextTest(unittest.TestCase):
+    """La vérification TLS n'est jamais désactivée ; les CA internes s'ajoutent."""
+
+    def assert_verifying(self, context: te.ssl.SSLContext) -> None:
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, te.ssl.CERT_REQUIRED)
+
+    def test_default_context_verifies(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(te.CA_BUNDLE_ENV, None)
+            os.environ.pop("SSL_CERT_FILE", None)
+            self.assert_verifying(te.tls_context())
+            self.assert_verifying(te.VaultClient("https://v", "ns")._context)
+
+    def test_bundle_precedence(self):
+        self.assertEqual(te.ca_bundle_path("explicit.pem", {te.CA_BUNDLE_ENV: "env.pem", "SSL_CERT_FILE": "ssl.pem"}),
+                         "explicit.pem")
+        self.assertEqual(te.ca_bundle_path(None, {te.CA_BUNDLE_ENV: "env.pem", "SSL_CERT_FILE": "ssl.pem"}), "env.pem")
+        self.assertEqual(te.ca_bundle_path(None, {"SSL_CERT_FILE": "ssl.pem"}), "ssl.pem")
+        self.assertEqual(te.ca_bundle_path(None, {}), "")
+
+    def test_bundle_is_loaded_and_still_verifies(self):
+        pem = _first_pem_certificate()
+        if not pem:
+            self.skipTest("pas de magasin de CA système lisible")
+        with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as fh:
+            fh.write(pem)
+        with mock.patch.dict(os.environ, {te.CA_BUNDLE_ENV: fh.name}):
+            context = te.tls_context()
+        self.assert_verifying(context)
+        self.assertGreaterEqual(context.cert_store_stats()["x509"], 1)
+
+    def test_missing_bundle_is_an_error_not_a_bypass(self):
+        with self.assertRaises(OSError):
+            te.tls_context(os.path.join(tempfile.mkdtemp(), "absent.pem"))
+
+    def test_macos_keychain_cas_are_added(self):
+        pem = _first_pem_certificate()
+        if not pem:
+            self.skipTest("pas de magasin de CA système lisible")
+        with mock.patch.object(te, "_keychain", side_effect=FakeKeychain(certificates=pem)):
+            self.assertIn("BEGIN CERTIFICATE", te.macos_keychain_cas())
+            context = te.tls_context()
+        self.assert_verifying(context)
+        self.assertGreaterEqual(context.cert_store_stats()["x509"], 1)
+        with mock.patch.object(te, "_keychain", side_effect=FakeKeychain()):
+            self.assertEqual(te.macos_keychain_cas(), "")
+
+    def test_unreadable_keychain_cas_are_ignored_with_a_log(self):
+        with mock.patch.object(te, "_keychain", side_effect=FakeKeychain(certificates="-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n")), \
+                mock.patch.object(te, "_log") as log:
+            self.assert_verifying(te.tls_context())
+        self.assertIn("--ca-bundle", log.call_args.args[0])
+
+    def test_ca_bundle_argument(self):
+        self.assertEqual(te.parse_args(["--ca-bundle", "/tmp/ca.pem"]).ca_bundle, "/tmp/ca.pem")
+        self.assertIsNone(te.parse_args([]).ca_bundle)
+        with self.assertRaises(SystemExit):
+            te.parse_args(["--verify-tls"])
+
+
 class BrowserTokenTest(unittest.TestCase):
     def _targets(self, *args, **kwargs):
         class Response:
@@ -626,6 +798,26 @@ class BrowserTokenTest(unittest.TestCase):
             self.assertEqual(te._find_token_in_pages(1234, mock.Mock(return_value="")), "")
             self.assertEqual(te._find_token_in_pages(1234, mock.Mock(return_value="not-a-token")), "")
             self.assertEqual(te._find_token_in_pages(1234, mock.Mock(side_effect=OSError)), "")
+
+    def test_browser_is_launched_without_ignoring_certificate_errors(self):
+        class Process:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                pass
+
+        with mock.patch.object(te.subprocess, "Popen", return_value=Process()) as popen, \
+                mock.patch.object(te, "_devtools_port", side_effect=RuntimeError("no devtools")):
+            self.assertEqual(te.browser_token("https://v/ui/", browser="/usr/bin/chrome", timeout=0.1), "")
+        command = popen.call_args.args[0]
+        self.assertEqual(command[0], "/usr/bin/chrome")
+        self.assertIn("--incognito", command)
+        self.assertNotIn("--ignore-certificate-errors", command)
+        self.assertEqual(command[-1], "https://v/ui/")
 
     def test_no_browser_falls_back_to_clipboard(self):
         with mock.patch.object(sys.stdin, "isatty", return_value=True):

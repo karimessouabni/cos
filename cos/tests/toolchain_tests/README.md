@@ -86,13 +86,25 @@ Chaque étape est sautée quand elle est déjà faite et encore valable.
 | 7 | variables exportées : `IBM_CLOUD_API_KEY`, `ORCHESTRATOR_IBMCLOUD_API_KEY`, `http_proxy` / `https_proxy` / `no_proxy` (minuscules et majuscules : tofu lit les majuscules d'abord, curl l'inverse), `TF_VAR_prefix` (ton user) | jamais |
 | 8 | `tofu <commande> -var-file=envs/<env>.tfvars …` dans `terraform/`, journal dans `terraform/logs/` et lignes importantes en direct | seulement avec `--run` |
 
-Ce qui est mémorisé, dans `~/.cache/cos-toolchain/state.json` (lisible par toi seul) : le
-token Vault, l'API key et son lease, ton uid pour le service token, ton user proxy. Le mot de
-passe du proxy est mémorisé après sa première vérification, dans le **trousseau macOS**
-(service `cos-toolchain-proxy`, visible dans Trousseaux d'accès) et, hors macOS, dans ce même
-fichier. S'il est refusé un jour (mot de passe changé), il est oublié et redemandé.
-`--new-proxy-password` pour en saisir un autre, `--forget-proxy-password` pour l'oublier,
-`--forget` efface tout.
+Ce qui est mémorisé, et où :
+
+- **Secrets** (token Vault, API key, mot de passe du proxy) : dans le **trousseau macOS**
+  (service `cos-toolchain`, visible dans Trousseaux d'accès). Sans trousseau (Linux, Windows),
+  ils ne vivent que le temps du processus et sont redemandés au lancement suivant. Aucun secret
+  n'est jamais écrit en clair sur le disque ; un `state.json` d'une ancienne version qui en
+  contenait est purgé à la première lecture.
+- **Réglages** non sensibles, dans `~/.cache/cos-toolchain/state.json` (0600) : lease de l'API
+  key, uid pour le service token, user proxy, versions, et l'index des secrets mémorisés.
+
+Le mot de passe du proxy est mémorisé après sa première vérification. S'il est refusé un jour
+(mot de passe changé), il est oublié et redemandé. `--new-proxy-password` pour en saisir un
+autre, `--forget-proxy-password` pour l'oublier, `--forget` efface tout.
+
+**TLS** : tous les appels HTTPS du script (Vault, service token, test du proxy) vérifient le
+certificat du serveur, sans option pour désactiver la vérification. Les CA internes sont lues
+automatiquement dans les trousseaux système macOS ; ailleurs, passer un bundle PEM avec
+`--ca-bundle`, `$COS_TOOLCHAIN_CA_BUNDLE` ou `$SSL_CERT_FILE`. Le Chrome / Edge piloté pour
+le login SSO n'ignore plus les erreurs de certificat.
 
 ### Environnement → Vault → secret
 
