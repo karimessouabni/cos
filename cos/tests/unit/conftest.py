@@ -168,6 +168,7 @@ SERVICE_MODULES = (
     "backup_vault_service",
     "bucketService",
     "ibm_iam_service",
+    "lifecyclePolicyRuleService",
     "restore_service",
     "schematics_service",
     "vault_service",

@@ -1,9 +1,7 @@
 """DAG cos.bucket.v1.clean : vide un bucket par une règle d'expiration, puis la retire.
 
-[PARTIEL] Lignes 21 à 138 du fichier d'entreprise reprises telles quelles
-(captures). L'en-tête (lignes 1 à 20) suit le modèle des autres DAGs ; le
-corps de ``create_expiration_rule``, les étapes suivantes (dont le sensor qui
-importe ``PokeReturnValue``) et l'enchaînement final restent à reporter.
+Reprise du fichier d'entreprise (lignes 21 à 274 d'après les captures) ; les
+lignes 1 à 20 suivent l'en-tête des autres DAGs.
 """
 from bp2i_airflow_library import add_project_to_path
 
@@ -17,7 +15,7 @@ except ImportError:
 import logging  # noqa: E402 - après add_project_to_path()
 from pathlib import Path  # noqa: E402 - après add_project_to_path()
 
-from airflow.sensors.base import PokeReturnValue  # noqa: E402, F401 - après add_project_to_path()
+from airflow.sensors.base import PokeReturnValue  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.config import ENVIRONMENT  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.connectors.reader import ReaderConnector  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.dag import product_action, step  # noqa: E402 - après add_project_to_path()
@@ -134,11 +132,141 @@ def bucket_clean() -> None:
         state_manager: StateManager = depends(state_manager_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> bool:
-        # [À REPORTER] corps du fichier d'entreprise à partir de la ligne 138.
-        raise NotImplementedError("create_expiration_rule : corps à reporter depuis le fichier d'entreprise")
+        from cos_service.services.bucketService import (
+            create_expiration_rule,
+            update_bucket_clean_status,
+        )
+        from cos_service.services.ibm_iam_service import get_iam_access_token
 
-    # [À REPORTER] étapes suivantes (sensor PokeReturnValue, retrait de la règle,
-    # statut final) et enchaînement des étapes, lignes 138 et suivantes.
+        try:
+            update_bucket_clean_status(bucket["subscription_id"], Status.INPROGRESS, session)
+            if not is_bucket_empty:
+                access_token = get_iam_access_token(api_key)
+                return create_expiration_rule(access_token, bucket)
+            return False
+        except Exception as e:
+            update_bucket_clean_status(bucket["subscription_id"], Status.FAILED, session)
+            state_manager.push_state({"clean_status": Status.FAILED.value})
+            raise e
+
+    @step
+    def save_create_expiration_rule_in_db(
+        is_expiration_created: bool,
+        bucket: dict,
+        payload: BucketCleanPayload = depends(payload_dependency),
+        session: SASession = depends(sqlalchemy_session_dependency),
+    ) -> None:
+        from cos_service.services.lifecyclePolicyRuleService import (
+            complete_lifecycle_policy_rule_creation,
+            disable_lifecycle_policy_rules_by_bucket_sub_id,
+        )
+
+        try:
+            if is_expiration_created:
+                disable_lifecycle_policy_rules_by_bucket_sub_id(bucket, payload.requestor, session)
+                # [À VÉRIFIER] la fin de l'appel est coupée sur la capture (après
+                # expiration_days=1) : non_current_version_expiration_days, requestor, session ?
+                complete_lifecycle_policy_rule_creation(bucket, "clean_bucket", "", 1, 1, payload.requestor, session)
+        except Exception as e:
+            raise e
+
+    @step.sensor(
+        exponential_backoff=False,
+        poke_interval=10800,  # todo : 3h #1minute for the preview
+        # timeout=5400,
+        # mode="poke"              # <5 min
+        mode="reschedule",  # >= 5min
+    )
+    def scheduler_clean_bucket(
+        bucket: dict,
+        api_key: str,
+        is_expiration_created: bool,
+        state_manager: StateManager = depends(state_manager_dependency),
+        session: SASession = depends(sqlalchemy_session_dependency),
+    ) -> PokeReturnValue:
+        from cos_service.services.bucketService import (
+            check_bucket_has_contents,
+            update_bucket_clean_status,
+        )
+        from cos_service.services.ibm_iam_service import get_iam_access_token
+
+        try:
+            if is_expiration_created:
+                update_bucket_clean_status(bucket["subscription_id"], Status.INPROGRESS, session)
+                access_token = get_iam_access_token(api_key)
+
+                has_contents = check_bucket_has_contents(access_token, bucket)
+
+                return PokeReturnValue(
+                    is_done=not has_contents,  # bool
+                    xcom_value={"content": "clean"},
+                )
+            return PokeReturnValue(
+                is_done=True,  # bool
+                xcom_value={"content": "clean"},
+            )
+        except Exception as e:
+            update_bucket_clean_status(bucket["subscription_id"], Status.FAILED, session)
+            state_manager.push_state({"clean_status": Status.FAILED.value})
+            raise e
+
+    @step()
+    def delete_expiration_rule(
+        bucket: dict,
+        api_key: str,
+        check_clean_done: PokeReturnValue,
+        state_manager: StateManager = depends(state_manager_dependency),
+        session: SASession = depends(sqlalchemy_session_dependency),
+    ) -> bool:
+        from cos_service.services.bucketService import (
+            delete_lifecycle_policy,
+            update_bucket_clean_status,
+        )
+        from cos_service.services.ibm_iam_service import get_iam_access_token
+
+        try:
+            if check_clean_done:
+                access_token = get_iam_access_token(api_key)
+                update_bucket_clean_status(bucket["subscription_id"], Status.SUCCESS, session)
+                state_manager.push_state({"clean_status": Status.SUCCESS.value})
+                delete_lifecycle_policy(access_token, bucket)
+                return True
+
+            return False
+        except Exception as e:
+            if str(e.code) != "404":
+                update_bucket_clean_status(bucket["subscription_id"], Status.FAILED, session)
+                state_manager.push_state({"clean_status": Status.FAILED.value})
+                raise e
+
+    @step
+    def save_delete_expiration_rule_in_db(
+        is_expiration_deleted: bool,
+        bucket: dict,
+        payload: BucketCleanPayload = depends(payload_dependency),
+        session: SASession = depends(sqlalchemy_session_dependency),
+    ) -> None:
+        from cos_service.services.lifecyclePolicyRuleService import (
+            disable_lifecycle_policy_rules_by_bucket_sub_id,
+        )
+
+        try:
+            if is_expiration_deleted:
+                disable_lifecycle_policy_rules_by_bucket_sub_id(bucket, payload.requestor, session)
+        except Exception as e:
+            raise e
+
+    # validation data
+    bucket = validate_bucket()
+    api_key = get_cos_api_key(bucket=bucket)
+    is_bucket_empty = is_bucket_empty(bucket=bucket, api_key=api_key)
+    is_expiration_created = create_expiration_rule(api_key=api_key, bucket=bucket, is_bucket_empty=is_bucket_empty)
+    save_create_expiration_rule_in_db(is_expiration_created=is_expiration_created, bucket=bucket)
+    check_clean_done = scheduler_clean_bucket(
+        bucket=bucket, api_key=api_key, is_expiration_created=is_expiration_created
+    )
+    is_expiration_deleted = delete_expiration_rule(bucket=bucket, api_key=api_key, check_clean_done=check_clean_done)
+    save_delete_expiration_rule_in_db(is_expiration_deleted=is_expiration_deleted, bucket=bucket)
 
 
 bucket_clean()

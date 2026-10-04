@@ -189,8 +189,15 @@ def build_modules() -> dict[str, types.ModuleType]:
     """Construit un jeu frais de modules doublures, indexé par nom qualifié."""
     registry: dict[str, Step] = {}
 
-    def step(fn):
+    def step(fn=None, **options):
+        """``@step``, ``@step()`` et ``@step.sensor(...)`` du vrai DAG ; les
+        options du sensor sont gardées sur la fonction (``fn.sensor_options``)."""
+        if fn is None:
+            return lambda f: step(f, **options)
+        fn.sensor_options = options.pop("sensor_options", None)
         return Step(fn, registry)
+
+    step.sensor = lambda **options: step(sensor_options=options)
 
     def product_action(name=None, tags=None, payload=None, config=None, *, action_id=None, **_ignored):
         """Accepte l'ancienne forme positionnelle et la forme ``action_id=`` du vrai DAG."""
