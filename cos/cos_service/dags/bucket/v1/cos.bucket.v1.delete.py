@@ -1,19 +1,26 @@
-"""DAG cos.bucket.v1.delete : détruit les ressources Terraform, puis le workspace.
-
-[RECONSTITUTION] Reconstitué depuis les captures PyCharm (273 lignes, toutes
-visibles). Corrections par rapport à l'original, voir les commits : une seule
-étape de validation en tête (bucket, workspace, instance, contenu) qui décline
-avec toutes les erreurs à la fois, l'immutabilité relue par le service au lieu
-d'être recomposée à la main, la tolérance au 404 Schematics factorisée, plus de
-SQL brut dans le DAG, statuts posés une fois, ``raise`` nu.
-"""
+"""DAG cos.bucket.v1.delete : détruit les ressources Terraform, puis le workspace."""
 from bp2i_airflow_library import add_project_to_path
 
 add_project_to_path()
 
+try:
+    from bp2i_airflow_library.version_compat import AIRFLOW_V_3_0_PLUS
+except ImportError:
+    AIRFLOW_V_3_0_PLUS = False
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import Context as AirflowContext  # noqa: F401
+    from airflow.sdk import TriggerRule, task, task_group  # noqa: F401
+else:
+    from airflow.decorators import task, task_group  # noqa: F401, AIR301
+    from airflow.utils.trigger_rule import TriggerRule  # noqa: F401, AIR301
+    from airflow.utils.context import Context as AirflowContext  # noqa: F401, AIR301
+
 import logging  # noqa: E402 - après add_project_to_path()
 from pathlib import Path  # noqa: E402 - après add_project_to_path()
 
+from bp2i_airflow_library.config import ENVIRONMENT  # noqa: E402 - après add_project_to_path()
+from bp2i_airflow_library.connectors.reader import ReaderConnector  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.dag import product_action, step  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_project_to_path()
     SASession,
@@ -21,6 +28,7 @@ from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_proje
     Vault,
     depends,
     payload_dependency,
+    reader_dependency,
     smart_schematics_backend_dependency,
     sqlalchemy_session_dependency,
     vault_dependency,
@@ -59,7 +67,9 @@ def _mark_failed(subscription_id: str, session: SASession) -> None:
 
 
 @product_action(
-    Path(__file__).stem,
+    action_id=Path(__file__).stem.replace(".v1.", ".v2.")
+    if AIRFLOW_V_3_0_PLUS and not ENVIRONMENT.endswith("prod")
+    else Path(__file__).stem,
     tags=["cos"],
     payload=BucketDeletePayload,
     config=ProductActionConfig(lock_subscription_on_failure=False),
@@ -69,6 +79,7 @@ def bucket_delete():
     def validate_request(
         session: SASession = depends(sqlalchemy_session_dependency),
         payload: BucketDeletePayload = depends(payload_dependency),
+        reader: ReaderConnector = depends(reader_dependency),
         vault: Vault = depends(vault_dependency),
     ) -> dict:
         """Checks everything the deletion needs and declines with all the errors at once.
@@ -116,7 +127,7 @@ def bucket_delete():
         # --- the bucket must be empty (only reachable through its endpoint) ----
         has_contents = False
         if bucket["virtual_server_endpoint"]:
-            access_token = get_iam_access_token(get_cos_api_key(bucket, vault))
+            access_token = get_iam_access_token(get_cos_api_key(bucket, vault, reader))
             has_contents = check_bucket_has_contents(access_token, bucket)
             if has_contents:
                 errors.append(f"The bucket {bucket['name']} is not empty")
@@ -134,13 +145,18 @@ def bucket_delete():
     def destroy_tf_resources(
         bucket: dict,
         tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
+        reader: ReaderConnector = depends(reader_dependency),
         payload: BucketDeletePayload = depends(payload_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
         vault: Vault = depends(vault_dependency),
     ) -> bool:
-        from cos_service.services.workspaceService import update_bucket_workspace, build_bucket_workspace_details
-        from cos_service.services.bucketService import update_bucket_on_destroy
+        from cos_service.services.bucketService import (
+            update_bucket_on_destroy,
+            update_bucket_status,
+            update_bucket_workspace_status,
+        )
         from cos_service.services.immutability_service import compute_bucket_immutability_for_update_bucket
+        from cos_service.services.workspaceService import build_bucket_workspace_details, update_bucket_workspace
 
         # Pose action=DESTROY et status=INPROGRESS sur le workspace.
         update_bucket_on_destroy(payload.subscription_id, session)
@@ -173,7 +189,11 @@ def bucket_delete():
             # Rafraîchit VCS, token GitLab et variables (dont les tokens Vault,
             # à durée de vie courte) : sans ça le provider ne s'authentifie
             # pas au destroy. Les valeurs métier, elles, ne servent à rien ici.
-            update_bucket_workspace(payload=payload, workspace_details=workspace_details, vault=vault, tf=tf)
+            update_bucket_status(payload.subscription_id, SubscriptionStatus.TERMINATING, session)
+            update_bucket_workspace_status(payload.subscription_id, Status.INPROGRESS, session)
+            update_bucket_workspace(
+                payload=payload, workspace_details=workspace_details, vault=vault, tf=tf, reader=reader
+            )
             tf.workspaces.get_by_id(workspace_id=workspace_id)  # lève avec code 404 si déjà supprimé
             tf.workspaces.delete_workspace_resources(
                 workspace_id,

@@ -61,6 +61,11 @@ def tf():
     return MagicMock(name="tf")
 
 
+def test_dag_keeps_its_v1_id_under_airflow_2(delete_dag):
+    # action_id ne bascule en ".v2." que sous Airflow 3 hors prod ; les doublures sont en Airflow 2.
+    assert delete_dag.module.bucket_delete.dag_name == "cos.bucket.v1.delete"
+
+
 def test_dag_declares_the_expected_steps_in_order(delete_dag):
     assert list(delete_dag.steps) == [
         "validate_request",
@@ -73,7 +78,7 @@ def test_dag_declares_the_expected_steps_in_order(delete_dag):
 
 class TestValidateRequest:
     def run(self, delete_dag, payload):
-        return delete_dag.steps["validate_request"](session="session", payload=payload, vault="vault")
+        return delete_dag.steps["validate_request"](session="session", payload=payload, reader="reader", vault="vault")
 
     def errors_of(self, delete_dag, payload) -> list[str]:
         with pytest.raises(DeclineDemandException) as excinfo:
@@ -93,7 +98,7 @@ class TestValidateRequest:
 
         assert result == bucket_row()
         empty_bucket.bucketService.get_bucket_by_sub_id.assert_called_once_with("session", "sub-1")
-        empty_bucket.vault_service.get_cos_api_key.assert_called_once_with(bucket_row(), "vault")
+        empty_bucket.vault_service.get_cos_api_key.assert_called_once_with(bucket_row(), "vault", "reader")
         empty_bucket.ibm_iam_service.get_iam_access_token.assert_called_once_with("api-key")
         empty_bucket.bucketService.check_bucket_has_contents.assert_called_once_with("tok", bucket_row())
         empty_bucket.bucketService.update_bucket_status.assert_called_once_with(
@@ -163,14 +168,20 @@ class TestValidateRequest:
 class TestDestroyTfResources:
     def run(self, delete_dag, payload, tf, bucket=None):
         return delete_dag.steps["destroy_tf_resources"](
-            bucket=bucket or bucket_row(), tf=tf, payload=payload, session="session", vault="vault"
+            bucket=bucket or bucket_row(), tf=tf, reader="reader", payload=payload, session="session", vault="vault"
         )
 
     def test_updates_the_workspace_then_destroys_its_resources(self, delete_dag, services, payload, tf):
         assert self.run(delete_dag, payload, tf) is True
 
         services.bucketService.update_bucket_on_destroy.assert_called_once_with("sub-1", "session")
-        services.bucketService.update_bucket_workspace_status.assert_not_called()  # déjà posé par update_bucket_on_destroy
+        # Statuts reposés juste avant le refresh du workspace (même séquence que l'update).
+        services.bucketService.update_bucket_status.assert_called_once_with(
+            "sub-1", SubscriptionStatus.TERMINATING, "session"
+        )
+        services.bucketService.update_bucket_workspace_status.assert_called_once_with(
+            "sub-1", Status.INPROGRESS, "session"
+        )
         details = services.workspaceService.build_bucket_workspace_details.call_args.kwargs
         assert details["workspace_id"] == "ws-1"
         assert details["realm"] == "realm-a"
@@ -179,7 +190,10 @@ class TestDestroyTfResources:
         assert details["immutability"]["object_versioning_enabled"] is True
         assert details["immutability"]["immutability_choice"] == "none"
         assert "object_lock_duration_years" in details["immutability"]
-        services.workspaceService.update_bucket_workspace.assert_called_once()
+        services.workspaceService.update_bucket_workspace.assert_called_once_with(
+            payload=payload, workspace_details=services.workspaceService.build_bucket_workspace_details.return_value,
+            vault="vault", tf=tf, reader="reader",
+        )
         tf.workspaces.get_by_id.assert_called_once_with(workspace_id="ws-1")
         call = tf.workspaces.delete_workspace_resources.call_args
         assert call.args == ("ws-1",)
@@ -203,7 +217,10 @@ class TestDestroyTfResources:
         tf.workspaces.get_by_id.side_effect = SchematicsError(404)
 
         assert self.run(delete_dag, payload, tf) is True
-        services.bucketService.update_bucket_status.assert_not_called()
+        tf.workspaces.delete_workspace_resources.assert_not_called()
+        # Pas de verrouillage : seul le passage à TERMINATING a été posé.
+        statuses = [c.args[1] for c in services.bucketService.update_bucket_status.call_args_list]
+        assert statuses == [SubscriptionStatus.TERMINATING]
 
     def test_other_error_locks_the_bucket_and_reraises(self, delete_dag, services, payload, tf):
         tf.workspaces.delete_workspace_resources.side_effect = SchematicsError(500)
@@ -211,7 +228,17 @@ class TestDestroyTfResources:
         with pytest.raises(SchematicsError):
             self.run(delete_dag, payload, tf)
 
-        services.bucketService.update_bucket_status.assert_called_once_with("sub-1", SubscriptionStatus.LOCKED, "session")
+        services.bucketService.update_bucket_status.assert_called_with("sub-1", SubscriptionStatus.LOCKED, "session")
+        services.bucketService.update_bucket_workspace_status.assert_called_with("sub-1", Status.FAILED, "session")
+
+    def test_a_failed_workspace_refresh_also_locks_the_bucket(self, delete_dag, services, payload, tf):
+        services.workspaceService.update_bucket_workspace.side_effect = RuntimeError("schematics down")
+
+        with pytest.raises(RuntimeError, match="schematics down"):
+            self.run(delete_dag, payload, tf)
+
+        tf.workspaces.delete_workspace_resources.assert_not_called()
+        services.bucketService.update_bucket_status.assert_called_with("sub-1", SubscriptionStatus.LOCKED, "session")
         services.bucketService.update_bucket_workspace_status.assert_called_with("sub-1", Status.FAILED, "session")
 
 
