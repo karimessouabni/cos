@@ -170,16 +170,31 @@ class TestLegacyFormat:
         assert (r.default, r.minimum, r.maximum) == (30, 10, 60)
         assert [r.in_days(k) for k in ("default", "minimum", "maximum")] == [30, 10, 60]
 
-    def test_legacy_keys_are_not_fields(self):
+    def test_legacy_keys_are_declared_fields_but_never_exported(self):
         r = BucketRetention(default=30, minimum=10, maximum=60)
 
-        assert "default" not in BucketRetention.model_fields
+        aliases = {f.alias for f in BucketRetention.model_fields.values()}
+        assert {"default", "minimum", "maximum"} <= aliases
+        assert (r.legacy_default, r.legacy_minimum, r.legacy_maximum) == (30, 10, 60)
         assert r.model_dump(exclude_none=True) == {
             "retention_enabled": True, "default_days": 30, "minimum_days": 10, "maximum_days": 60
         }
+        assert "default" not in r.model_dump(by_alias=True)
 
-    def test_legacy_values_are_type_checked_like_the_days_fields(self):
-        with pytest.raises(ValidationError, match="default_days"):
+    def test_legacy_keys_are_visible_and_deprecated_in_the_json_schema(self):
+        """Le contrat (documentation de l'orchestrateur) montre les champs historiques
+        sous leur nom, marqués deprecated, avec le champ de remplacement et la date."""
+        properties = BucketRetention.model_json_schema()["properties"]
+
+        for key in ("default", "minimum", "maximum"):
+            assert properties[key]["deprecated"] is True
+            assert f"{key}_days" in properties[key]["description"]
+            assert "2027-03-31" in properties[key]["description"]
+        assert "legacy_default" not in properties
+        assert "legacy_format" in properties  # champ interne, sans alias : documenté tel quel
+
+    def test_legacy_values_are_type_checked_under_their_own_name(self):
+        with pytest.raises(ValidationError, match="default"):
             BucketRetention(default="thirty")
 
     def test_non_dict_input_is_left_untouched(self):
