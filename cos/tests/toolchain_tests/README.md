@@ -131,7 +131,9 @@ par défaut, « Copy token » dans le menu utilisateur, puis Entrée dans le ter
 ```bash
 cd tests/toolchain_tests
 
-python toolchain_env.py --env int --run test                                   # tous les scénarios
+python toolchain_env.py --env int --run test                                   # tous les scénarios, un par un
+python toolchain_env.py --env int --run test --parallel                        # tous en même temps (un tofu par fichier)
+python toolchain_env.py --env int --run test --parallel 3                      # trois à la fois
 python toolchain_env.py --env int --run test -- -filter=tests/10_cos.tftest.hcl  # un seul
 python toolchain_env.py --env int --run test -- -verbose                       # plans et state à chaque run
 python toolchain_env.py --env int --run test --follow debug                    # tout le détail du provider en direct
@@ -144,6 +146,12 @@ eval "$(python toolchain_env.py --env int)" # exporte dans le shell courant
 
 Premier lancement après installation d'OpenTofu, ou après un changement de version du
 provider : ajouter `--reinit`.
+
+`--parallel` lance un processus `tofu test -filter=<fichier>` par scénario, car tofu lui-même
+les enchaîne un par un. C'est possible parce que les scénarios sont indépendants : l'instance
+COS est partagée et chaque scénario crée ses propres buckets. Chaque processus écrit dans son
+journal `logs/<horodatage>-<env>-<scénario>.log` ; le script affiche le verdict de chacun au
+fil de l'eau, puis un récapitulatif avec le chemin des journaux en échec. Demande tofu 1.7+.
 
 Options utiles : `--uid`, `--proxy-user` / `--proxy-password` (ou `$PROXY_USER` /
 `$PROXY_PASSWORD`) pour un lancement sans aucune saisie (CI), `--new-proxy-password`,
@@ -291,7 +299,7 @@ toolchain-tests:
   script:
     - python tests/toolchain_tests/toolchain_env.py --env int --skip-login --no-proxy
         --prefix ci-$CI_PIPELINE_ID --vault-token "$VAULT_TOKEN"
-        --run test -- -junit-xml=report.xml            # -junit-xml : OpenTofu 1.9+
+        --run test --parallel -- -junit-xml=report.xml   # -junit-xml : OpenTofu 1.9+
   artifacts: { reports: { junit: report.xml } }
 ```
 
