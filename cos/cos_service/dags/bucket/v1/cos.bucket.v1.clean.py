@@ -6,7 +6,8 @@ les buckets à rétention / object lock sont refusés (leurs objets ne peuvent p
 expirer), le sensor a un timeout explicite, le ``success`` est posé après le
 retrait de la règle, un 404 au retrait compte comme retiré, toute exception
 (pas seulement S3) passe le clean en ``failed``, ``in_progress`` n'est posé
-qu'une fois, échec factorisé dans ``_mark_failed``.
+qu'une fois, échec factorisé dans ``_mark_failed``, et le sensor attend la
+sauvegarde de la règle en base (qui n'était reliée à rien).
 """
 from bp2i_airflow_library import add_project_to_path
 
@@ -184,19 +185,30 @@ def bucket_clean() -> None:
         is_expiration_created: bool,
         bucket: dict,
         payload: BucketCleanPayload = depends(payload_dependency),
+        state_manager: StateManager = depends(state_manager_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
-    ) -> None:
+    ) -> bool:
+        """Trace la règle en base. Renvoie vrai : le sensor consomme ce résultat,
+        c'est ce qui en fait une étape amont (Airflow ne déduit l'ordre que des
+        valeurs consommées ; sans ça la sauvegarde échouait dans son coin et le
+        clean continuait)."""
         from cos_service.services.lifecyclePolicyRuleService import (
             complete_lifecycle_policy_rule_creation,
             disable_lifecycle_policy_rules_by_bucket_sub_id,
         )
 
-        if is_expiration_created:
+        if not is_expiration_created:
+            return True
+        try:
             disable_lifecycle_policy_rules_by_bucket_sub_id(bucket, payload.requestor, session)
             complete_lifecycle_policy_rule_creation(
                 bucket, CLEAN_RULE_ID, CLEAN_RULE_PREFIX, CLEAN_EXPIRATION_DAYS, CLEAN_EXPIRATION_DAYS,
                 payload.requestor, session,
             )
+        except Exception:
+            _mark_failed(bucket["subscription_id"], state_manager, session)
+            raise
+        return True
 
     @step.sensor(
         exponential_backoff=False,
@@ -208,10 +220,12 @@ def bucket_clean() -> None:
         bucket: dict,
         api_key: str,
         is_expiration_created: bool,
+        rule_saved: bool,
         state_manager: StateManager = depends(state_manager_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> PokeReturnValue:
-        """Sonde le bucket jusqu'à ce qu'il soit vide ; sans règle posée, terminé tout de suite."""
+        """Sonde le bucket jusqu'à ce qu'il soit vide ; sans règle posée, terminé tout de suite.
+        ``rule_saved`` n'est là que pour attendre la sauvegarde en base."""
         from cos_service.services.bucketService import check_bucket_has_contents
         from cos_service.services.ibm_iam_service import get_iam_access_token
 
@@ -273,9 +287,9 @@ def bucket_clean() -> None:
     api_key = get_cos_api_key(bucket=bucket)
     is_bucket_empty = is_bucket_empty(bucket=bucket, api_key=api_key)
     is_expiration_created = create_expiration_rule(api_key=api_key, bucket=bucket, is_bucket_empty=is_bucket_empty)
-    save_create_expiration_rule_in_db(is_expiration_created=is_expiration_created, bucket=bucket)
+    rule_saved = save_create_expiration_rule_in_db(is_expiration_created=is_expiration_created, bucket=bucket)
     check_clean_done = scheduler_clean_bucket(
-        bucket=bucket, api_key=api_key, is_expiration_created=is_expiration_created
+        bucket=bucket, api_key=api_key, is_expiration_created=is_expiration_created, rule_saved=rule_saved
     )
     is_expiration_deleted = delete_expiration_rule(
         bucket=bucket, api_key=api_key, is_expiration_created=is_expiration_created, check_clean_done=check_clean_done

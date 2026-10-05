@@ -64,6 +64,18 @@ def test_dag_identity(clean_dag):
     ]
 
 
+def test_the_sensor_waits_for_the_db_save(clean_dag):
+    """Airflow ne déduit l'ordre que des valeurs consommées : le sensor doit
+    consommer le résultat de la sauvegarde en base, sinon elle échoue dans son
+    coin et le clean continue (vu en recette)."""
+    import inspect
+
+    assert "rule_saved" in inspect.signature(clean_dag.steps["scheduler_clean_bucket"]).parameters
+    source = inspect.getsource(clean_dag.module)
+    assert "rule_saved = save_create_expiration_rule_in_db(" in source
+    assert "rule_saved=rule_saved" in source
+
+
 def test_only_the_scheduler_is_a_sensor_with_a_bounded_wait(clean_dag):
     # Reschedule toutes les 3 h, 7 jours au plus : le clean ne reste pas "in_progress" sans fin.
     assert clean_dag.steps["scheduler_clean_bucket"].sensor_options == {
@@ -197,13 +209,14 @@ class TestCreateExpirationRule:
 
 
 class TestSaveCreateExpirationRuleInDb:
-    def run(self, clean_dag, payload, created):
+    def run(self, clean_dag, payload, created, state_manager=None):
         return clean_dag.steps["save_create_expiration_rule_in_db"](
-            is_expiration_created=created, bucket=bucket_row(), payload=payload, session="session"
+            is_expiration_created=created, bucket=bucket_row(), payload=payload,
+            state_manager=state_manager, session="session",
         )
 
     def test_rule_created_is_recorded_after_disabling_the_previous_ones(self, clean_dag, services, payload):
-        assert self.run(clean_dag, payload, created=True) is None
+        assert self.run(clean_dag, payload, created=True) is True
 
         lifecycle = services.lifecyclePolicyRuleService
         lifecycle.disable_lifecycle_policy_rules_by_bucket_sub_id.assert_called_once_with(bucket_row(), "karim", "session")
@@ -214,22 +227,24 @@ class TestSaveCreateExpirationRuleInDb:
         )
 
     def test_nothing_recorded_without_a_rule(self, clean_dag, services, payload):
-        self.run(clean_dag, payload, created=False)
+        assert self.run(clean_dag, payload, created=False) is True
 
         services.lifecyclePolicyRuleService.disable_lifecycle_policy_rules_by_bucket_sub_id.assert_not_called()
         services.lifecyclePolicyRuleService.complete_lifecycle_policy_rule_creation.assert_not_called()
 
-    def test_db_failure_propagates(self, clean_dag, services, payload):
+    def test_db_failure_marks_the_clean_failed_and_reraises(self, clean_dag, services, payload, state_manager):
         services.lifecyclePolicyRuleService.complete_lifecycle_policy_rule_creation.side_effect = RuntimeError("db")
 
         with pytest.raises(RuntimeError, match="db"):
-            self.run(clean_dag, payload, created=True)
+            self.run(clean_dag, payload, created=True, state_manager=state_manager)
+
+        assert_failed(services, state_manager)
 
 
 class TestSchedulerCleanBucket:
     def run(self, clean_dag, state_manager, created):
         return clean_dag.steps["scheduler_clean_bucket"](
-            bucket=bucket_row(), api_key="api-key", is_expiration_created=created,
+            bucket=bucket_row(), api_key="api-key", is_expiration_created=created, rule_saved=True,
             state_manager=state_manager, session="session",
         )
 
