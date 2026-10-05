@@ -383,7 +383,7 @@ def compute_bucket_retention(payload_retention: BucketRetention, immutability: d
     seule la première ligne était visible. Le corps ci-dessous est complet.
     """
     unit = payload_retention.unit
-    default, minimum, maximum = payload_retention.default, payload_retention.minimum, payload_retention.maximum
+    default, minimum, maximum = (payload_retention.value(k) for k in ("default", "minimum", "maximum"))
 
     if None in (unit, default, minimum, maximum):
         logging.info("compute_bucket_retention1")

@@ -72,7 +72,7 @@ class TestDaysPayload:
         r = BucketRetention(retention_enabled=True, default_days=30, minimum_days=10, maximum_days=60)
 
         assert r.unit == DAYS
-        assert (r.default, r.minimum, r.maximum) == (30, 10, 60)
+        assert (r.value("default"), r.value("minimum"), r.value("maximum")) == (30, 10, 60)
         assert r.retention_enabled is True
 
     def test_in_days_is_identity(self):
@@ -84,7 +84,7 @@ class TestDaysPayload:
         r = BucketRetention(maximum_days=60)
 
         assert r.unit == DAYS
-        assert (r.default, r.minimum, r.maximum) == (None, None, 60)
+        assert (r.value("default"), r.value("minimum"), r.value("maximum")) == (None, None, 60)
         assert r.in_days("default") is None
 
     def test_max_allowed_in_days(self):
@@ -96,7 +96,7 @@ class TestYearsPayload:
         r = BucketRetention(retention_enabled=True, default_years=1, minimum_years=1, maximum_years=2)
 
         assert r.unit == YEARS
-        assert (r.default, r.minimum, r.maximum) == (1, 1, 2)
+        assert (r.value("default"), r.value("minimum"), r.value("maximum")) == (1, 1, 2)
 
     def test_in_days_converts_with_leap_years_from_today(self):
         r = BucketRetention(default_years=1, minimum_years=1, maximum_years=2)
@@ -117,7 +117,7 @@ class TestEmptyPayload:
 
         assert r.retention_enabled is False
         assert r.unit is None
-        assert (r.default, r.minimum, r.maximum) == (None, None, None)
+        assert (r.value("default"), r.value("minimum"), r.value("maximum")) == (None, None, None)
         assert r.max_allowed is None
         assert r.in_days("default") is None
         assert r.is_empty()
@@ -167,19 +167,22 @@ class TestLegacyFormat:
 
         assert r.unit == DAYS
         assert (r.default_days, r.minimum_days, r.maximum_days) == (30, 10, 60)
-        assert (r.default, r.minimum, r.maximum) == (30, 10, 60)
+        assert (r.value("default"), r.value("minimum"), r.value("maximum")) == (30, 10, 60)
         assert [r.in_days(k) for k in ("default", "minimum", "maximum")] == [30, 10, 60]
 
     def test_legacy_keys_are_declared_fields_but_never_exported(self):
         r = BucketRetention(default=30, minimum=10, maximum=60)
 
-        aliases = {f.alias for f in BucketRetention.model_fields.values()}
-        assert {"default", "minimum", "maximum"} <= aliases
-        assert (r.legacy_default, r.legacy_minimum, r.legacy_maximum) == (30, 10, 60)
+        # Vrais champs, sous leur vrai nom (pas d'alias) : le provider Terraform
+        # orchestrator lit les noms de champs du contrat.
+        assert {"default", "minimum", "maximum"} <= set(BucketRetention.model_fields)
+        assert (r.default, r.minimum, r.maximum) == (30, 10, 60)  # valeurs brutes envoyées
+        assert (r.value("default"), r.value("minimum"), r.value("maximum")) == (30, 10, 60)
         assert r.model_dump(exclude_none=True) == {
             "retention_enabled": True, "default_days": 30, "minimum_days": 10, "maximum_days": 60
         }
-        assert "default" not in r.model_dump(by_alias=True)
+        current = BucketRetention(default_days=30)
+        assert (current.default, current.value("default")) == (None, 30)
 
     def test_legacy_keys_are_visible_and_deprecated_in_the_json_schema(self):
         """Le contrat (documentation de l'orchestrateur) montre les champs historiques
@@ -190,7 +193,7 @@ class TestLegacyFormat:
             assert properties[key]["deprecated"] is True
             assert f"{key}_days" in properties[key]["description"]
             assert "2027-03-31" in properties[key]["description"]
-        assert "legacy_default" not in properties
+        assert "legacy_default" not in properties  # pas de préfixe legacy_ ni d'alias
         assert "legacy_format" in properties  # champ interne, sans alias : documenté tel quel
 
     def test_legacy_values_are_type_checked_under_their_own_name(self):
@@ -228,8 +231,8 @@ class TestLegacyFormat:
         r = BucketRetention(maximum=60)
 
         assert r.unit == DAYS
-        assert r.maximum == 60
-        assert r.default is None
+        assert r.value("maximum") == 60
+        assert r.value("default") is None
 
     def test_auto_enable_applies_to_the_legacy_format(self):
         assert BucketRetention(default=30, minimum=10, maximum=60).retention_enabled is True
@@ -251,7 +254,7 @@ class TestLegacyFormat:
         r = BucketRetention.model_validate({"default": None, "minimum": None, "maximum": None, "maximum_years": 5})
 
         assert r.unit == YEARS
-        assert r.maximum == 5
+        assert r.value("maximum") == 5
 
     def test_is_logged_as_a_warning(self, caplog):
         with caplog.at_level("WARNING", logger="cos_service.schemas.bucket_retention"):
@@ -301,7 +304,7 @@ class TestValidate:
         assert "maximum_days (1827 days) cannot be superior to 5 years (1826 days, leap years included)." in errors_of(exc)
 
     def test_days_at_the_ceiling_are_accepted(self):
-        assert BucketRetention(maximum_days=1826).maximum == 1826
+        assert BucketRetention(maximum_days=1826).value("maximum") == 1826
 
     def test_years_above_five(self):
         with pytest.raises(ValidationError) as exc:
@@ -310,7 +313,7 @@ class TestValidate:
         assert "default_years (6 years) cannot be superior to 5 years (5 years, leap years included)." in errors_of(exc)
 
     def test_years_at_the_ceiling_are_accepted(self):
-        assert BucketRetention(maximum_years=5).maximum == 5
+        assert BucketRetention(maximum_years=5).value("maximum") == 5
 
     def test_minimum_above_maximum(self):
         with pytest.raises(ValidationError) as exc:
@@ -333,11 +336,11 @@ class TestValidate:
     def test_equal_bounds_are_accepted(self):
         r = BucketRetention(default_days=30, minimum_days=30, maximum_days=30)
 
-        assert (r.default, r.minimum, r.maximum) == (30, 30, 30)
+        assert (r.value("default"), r.value("minimum"), r.value("maximum")) == (30, 30, 30)
 
     def test_partial_bounds_are_checked_pairwise_only(self):
-        assert BucketRetention(default_days=30).default == 30
-        assert BucketRetention(minimum_days=10, maximum_days=60).default is None
+        assert BucketRetention(default_days=30).value("default") == 30
+        assert BucketRetention(minimum_days=10, maximum_days=60).value("default") is None
 
     def test_errors_are_accumulated_in_one_message(self):
         with pytest.raises(ValidationError) as exc:
@@ -426,5 +429,5 @@ class TestAssignmentAfterValidation:
         assert r.unit == DAYS
         r.default_days = None
         assert r.unit == YEARS
-        assert r.default == 1
+        assert r.value("default") == 1
         assert r.in_days("default") == 365

@@ -56,11 +56,11 @@ def max_retention(unit: str) -> int:
 
 
 def _legacy_field(key: str):
-    """Champ du format historique : accepté sous son nom d'origine (alias),
-    affiché "deprecated" dans le schéma, jamais exporté."""
+    """Champ du format historique, sous son vrai nom (``default`` …, pas un
+    alias : le provider Terraform orchestrator lit les noms de champs du
+    contrat). Affiché "deprecated" dans le schéma, jamais exporté."""
     return Field(
         default=None,
-        alias=key,
         exclude=True,
         description=(
             f"Deprecated (implicit days): use {key}_{DAYS} or {key}_{YEARS}. "
@@ -78,11 +78,12 @@ class BucketRetention(BaseModel):
     minimum_years: int | None = None
     maximum_days: int | None = None
     maximum_years: int | None = None
-    # Format historique (déprécié) : visible dans le contrat sous ``default``,
-    # ``minimum``, ``maximum``, recopié vers *_days par _accept_legacy_format.
-    legacy_default: int | None = _legacy_field("default")
-    legacy_minimum: int | None = _legacy_field("minimum")
-    legacy_maximum: int | None = _legacy_field("maximum")
+    # Format historique (déprécié) : champs ``default``, ``minimum``, ``maximum``
+    # du contrat, recopiés vers *_days par _accept_legacy_format. Ce sont les
+    # valeurs brutes envoyées ; la lecture "dans l'unité saisie" est value().
+    default: int | None = _legacy_field("default")
+    minimum: int | None = _legacy_field("minimum")
+    maximum: int | None = _legacy_field("maximum")
     # Posé par _accept_legacy_format quand le client a envoyé l'ancien format.
     # Jamais exporté (state, Terraform) : sert à remonter une notice de dépréciation.
     legacy_format: bool = Field(default=False, exclude=True)
@@ -124,7 +125,7 @@ class BucketRetention(BaseModel):
     # champs suffixés. Le mélange des deux formats est refusé.
     @model_validator(mode="after")
     def _accept_legacy_format(self) -> "BucketRetention":
-        legacy = {k: v for k in _RETENTION_KEYS if (v := getattr(self, f"legacy_{k}")) is not None}
+        legacy = {k: v for k in _RETENTION_KEYS if (v := getattr(self, k)) is not None}
         if not legacy or self.legacy_format:  # rien de legacy, ou instance déjà convertie (revalidation)
             return self
         suffixed = [
@@ -173,7 +174,7 @@ class BucketRetention(BaseModel):
         if len(used) == 1:
             unit = used[0]
             limit = max_retention(unit)
-            mn, df, mx = self.minimum, self.default, self.maximum
+            mn, df, mx = self._value("minimum"), self._value("default"), self._value("maximum")
 
             for name, v in (("minimum", mn), ("default", df), ("maximum", mx)):
                 if v is not None and v > limit:
@@ -202,17 +203,10 @@ class BucketRetention(BaseModel):
         unit = self.unit
         return getattr(self, f"{key}_{unit}") if unit else None
 
-    @property
-    def default(self) -> int | None:
-        return self._value("default")
-
-    @property
-    def minimum(self) -> int | None:
-        return self._value("minimum")
-
-    @property
-    def maximum(self) -> int | None:
-        return self._value("maximum")
+    def value(self, key: str) -> int | None:
+        """Borne ``default`` / ``minimum`` / ``maximum`` dans l'unité saisie, None si absente.
+        (Les attributs ``default`` … sont les champs bruts du format historique.)"""
+        return self._value(key)
 
     @property
     def max_allowed(self) -> int | None:
@@ -229,9 +223,9 @@ class BucketRetention(BaseModel):
 
     def __iter__(self):
         yield "unit", self.unit
-        yield "default", self.default
-        yield "minimum", self.minimum
-        yield "maximum", self.maximum
+        yield "default", self._value("default")
+        yield "minimum", self._value("minimum")
+        yield "maximum", self._value("maximum")
 
     def is_empty(self) -> bool:
         return self.unit is None

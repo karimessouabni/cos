@@ -15,7 +15,7 @@ from cos_service.schemas.bucket_retention import BucketRetention
 from cos_service.schemas.immutability import Immutability
 from cos_service.schemas.status import Status
 from cos_service.schemas.subscription_status import SubscriptionStatus
-from tests.unit.dags.support import ACCOUNT_CRNS, BACKUP_VAULT, COS_INSTANCE, REALM, REALM_DICT, FakeModel, TF_OUTPUTS
+from tests.unit.dags.support import ACCOUNT_CRNS, BACKUP_VAULT, COS_INSTANCE, REALM_DICT, FakeModel, TF_OUTPUTS
 
 
 # --- helpers ------------------------------------------------------------------
