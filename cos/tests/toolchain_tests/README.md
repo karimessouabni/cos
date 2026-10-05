@@ -83,7 +83,7 @@ Chaque étape est sautée quand elle est déjà faite et encore valable.
 | 4 | **proxy** `http://<user>:<mdp>@ncproxy.fr.net.intra:8080` : user et mot de passe demandés **une fois**, testés sur `iam.cloud.ibm.com` (407 = identifiants refusés), puis mémorisés | le mot de passe mémorisé est encore accepté ; ou `https_proxy` déjà exporté dans le shell **et** il répond (sinon il est abandonné pour ncproxy) ; ou `--no-proxy` |
 | 5 | **token Vault** : `GET https://s02vl9956141:4430/v1/token/<uid>?namespace=AP85135` (service token, joint en direct, puis en IPv4 seul, puis via le proxy) ; `auth.client_token` est un token Vault de 30 jours | le token sauvegardé est encore accepté (`lookup-self`), ou `$VAULT_TOKEN` / `--vault-token` |
 | 6 | **API key IBM Cloud** : `GET <vault>/v1/ibm_<compte>/creds/<rôle>_buhub` avec `X-Vault-Token` et `X-Vault-Namespace: AP85135` | l'API key sauvegardée a encore un lease valide |
-| 7 | variables exportées : `IBM_CLOUD_API_KEY`, `ORCHESTRATOR_IBMCLOUD_API_KEY`, `http_proxy` / `https_proxy` / `no_proxy` (minuscules et majuscules : tofu lit les majuscules d'abord, curl l'inverse), `TF_VAR_prefix` (ton user) | jamais |
+| 7 | variables exportées (en mode `eval`, l'API key et le mot de passe du proxy ne sont jamais imprimés : le shell les lit lui-même dans le trousseau via `security` ; sans trousseau, `--run` / `--shell`, ou `--print-secrets`) : `IBM_CLOUD_API_KEY`, `ORCHESTRATOR_IBMCLOUD_API_KEY`, `http_proxy` / `https_proxy` / `no_proxy` (minuscules et majuscules : tofu lit les majuscules d'abord, curl l'inverse), `TF_VAR_prefix` (ton user) | jamais |
 | 8 | `tofu <commande> -var-file=envs/<env>.tfvars …` dans `terraform/`, journal dans `terraform/logs/` et lignes importantes en direct | seulement avec `--run` |
 
 Ce qui est mémorisé, et où :
@@ -141,7 +141,7 @@ python toolchain_env.py --env pprod --run test -- -filter=tests/10_cos.tftest.hc
 
 python toolchain_env.py                     # mode guidé : menus numérotés
 python toolchain_env.py --env int --shell   # sous-shell avec tout exporté, puis `tofu test` à la main
-eval "$(python toolchain_env.py --env int)" # exporte dans le shell courant
+eval "$(python toolchain_env.py --env int)" # exporte dans le shell courant (secrets lus dans le trousseau par le shell)
 ```
 
 Premier lancement après installation d'OpenTofu, ou après un changement de version du

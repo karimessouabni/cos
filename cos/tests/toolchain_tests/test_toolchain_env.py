@@ -8,6 +8,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import secrets as _secrets
 import sys
 import tempfile
 import threading
@@ -22,6 +23,16 @@ import toolchain_env as te  # noqa: E402
 os.environ["XDG_CACHE_HOME"] = tempfile.mkdtemp(prefix="cos-toolchain-tests-")
 # Jamais le vrai trousseau macOS : sans `security`, les secrets restent en mémoire du processus.
 mock.patch.object(te, "_keychain", side_effect=lambda *args: None).start()
+
+# Secrets de test générés à l'exécution : aucun mot de passe en dur dans le code.
+PW = "pw-" + _secrets.token_hex(4)
+PW2 = "pw2-" + _secrets.token_hex(4)
+PW3 = "pw3-" + _secrets.token_hex(4)
+PW4 = "pw4-" + _secrets.token_hex(4)
+PW_SPECIAL = "A" + _secrets.token_hex(2) + "@c!/d"  # caractères à encoder dans une URL
+PW_SPECIAL_ENCODED = te.urllib.parse.quote(PW_SPECIAL, safe="")
+PW_BANG = _secrets.token_hex(3) + "!"
+PW_BANG_ENCODED = te.urllib.parse.quote(PW_BANG, safe="")
 
 TOKEN_OK = "hvs.CAESIEKO1gxUBXCdPSqoxyv5kr8P0bG4Mc5lgJEOsaVtqeTq"
 TOKEN_BAD = "hvs.CAESIFXQc9s9BYB1K9iDoRwwugBc3iFctwrVl30RdM9Ml4au"
@@ -261,12 +272,12 @@ class ProxyTest(unittest.TestCase):
         _fresh_cache()
 
     def test_proxy_url_encodes_credentials(self):
-        self.assertEqual(te.proxy_url("ncproxy.fr.net.intra:8080", "h90871", "Ab@c!/d"),
-                         "http://h90871:Ab%40c%21%2Fd@ncproxy.fr.net.intra:8080")
+        self.assertEqual(te.proxy_url("ncproxy.fr.net.intra:8080", "h90871", PW_SPECIAL),
+                         f"http://h90871:{PW_SPECIAL_ENCODED}@ncproxy.fr.net.intra:8080")
         self.assertEqual(te.proxy_url("http://p:1/", "", ""), "http://p:1")
 
     def test_mask_url(self):
-        self.assertEqual(te.mask_url("http://h90871:Secret%21@ncproxy:8080"), "http://h90871:***@ncproxy:8080")
+        self.assertEqual(te.mask_url(f"http://h90871:{PW_BANG_ENCODED}@ncproxy:8080"), "http://h90871:***@ncproxy:8080")
         self.assertEqual(te.mask_url("http://ncproxy:8080"), "http://ncproxy:8080")
 
     def test_no_proxy(self):
@@ -277,19 +288,19 @@ class ProxyTest(unittest.TestCase):
         asked = []
         with mock.patch.object(sys.stdin, "isatty", return_value=True):
             proxy = te.resolve_proxy(args, ask=lambda q: (asked.append(q), "h90871")[1],
-                                     ask_secret=lambda q: "Pass!", environ={})
-        self.assertEqual(proxy["https_proxy"], f"http://h90871:Pass%21@{te.DEFAULT_PROXY}")
+                                     ask_secret=lambda q: PW_BANG, environ={})
+        self.assertEqual(proxy["https_proxy"], f"http://h90871:{PW_BANG_ENCODED}@{te.DEFAULT_PROXY}")
         self.assertEqual(proxy["http_proxy"], proxy["https_proxy"])
         self.assertEqual(proxy["no_proxy"], te.DEFAULT_NO_PROXY)
         self.assertEqual(te.load_setting("proxy_user"), "h90871")
-        self.assertNotIn("Pass!", json.dumps(te._read_state()))
+        self.assertNotIn(PW_BANG, json.dumps(te._read_state()))
         # deuxième lancement : le user est proposé par défaut, le mot de passe redemandé
         asked.clear()
         with mock.patch.object(sys.stdin, "isatty", return_value=True):
             proxy = te.resolve_proxy(te.parse_args([]), ask=lambda q: (asked.append(q), "")[1],
-                                     ask_secret=lambda q: "x", environ={})
+                                     ask_secret=lambda q: PW, environ={})
         self.assertIn("h90871", asked[0])
-        self.assertEqual(proxy["https_proxy"], f"http://h90871:x@{te.DEFAULT_PROXY}")
+        self.assertEqual(proxy["https_proxy"], f"http://h90871:{PW}@{te.DEFAULT_PROXY}")
 
     def test_password_remembered_after_check(self):
         with mock.patch.object(te, "_keychain", return_value=None), \
@@ -298,36 +309,36 @@ class ProxyTest(unittest.TestCase):
             os.environ.pop("HTTPS_PROXY", None)
             asked = []
             proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: "h90871",
-                                               ask_secret=lambda q: (asked.append(q), "pw1")[1], check=lambda pv: "")
-            self.assertEqual(proxy["https_proxy"], f"http://h90871:pw1@{te.DEFAULT_PROXY}")
+                                               ask_secret=lambda q: (asked.append(q), PW)[1], check=lambda pv: "")
+            self.assertEqual(proxy["https_proxy"], f"http://h90871:{PW}@{te.DEFAULT_PROXY}")
             self.assertEqual(len(asked), 1)
-            self.assertEqual(te.load_proxy_password("h90871"), "pw1")
+            self.assertEqual(te.load_proxy_password("h90871"), PW)
             # second lancement : rien n'est redemandé
             proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: self.fail("prompt"),
                                                ask_secret=lambda q: self.fail("prompt"), check=lambda pv: "")
-            self.assertEqual(proxy["https_proxy"], f"http://h90871:pw1@{te.DEFAULT_PROXY}")
+            self.assertEqual(proxy["https_proxy"], f"http://h90871:{PW}@{te.DEFAULT_PROXY}")
             # mot de passe mémorisé refusé : oublié, redemandé, re-mémorisé
             checks = iter(["identifiants refusés (HTTP 407)", ""])
             proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: "",
-                                               ask_secret=lambda q: "pw2", check=lambda pv: next(checks))
-            self.assertEqual(proxy["https_proxy"], f"http://h90871:pw2@{te.DEFAULT_PROXY}")
-            self.assertEqual(te.load_proxy_password("h90871"), "pw2")
+                                               ask_secret=lambda q: PW2, check=lambda pv: next(checks))
+            self.assertEqual(proxy["https_proxy"], f"http://h90871:{PW2}@{te.DEFAULT_PROXY}")
+            self.assertEqual(te.load_proxy_password("h90871"), PW2)
             # --new-proxy-password force la saisie ; --forget-proxy-password oublie
             proxy = te.resolve_and_check_proxy(te.parse_args(["--new-proxy-password"]), ask=lambda q: "",
-                                               ask_secret=lambda q: "pw3", check=lambda pv: "")
-            self.assertEqual(te.load_proxy_password("h90871"), "pw3")
+                                               ask_secret=lambda q: PW3, check=lambda pv: "")
+            self.assertEqual(te.load_proxy_password("h90871"), PW3)
             self.assertEqual(te.main(["--forget-proxy-password"]), 0)
             self.assertEqual(te.load_proxy_password("h90871"), "")
             # un mot de passe non vérifié (check sauté) n'est pas mémorisé
             te.resolve_and_check_proxy(te.parse_args(["--skip-proxy-check"]), ask=lambda q: "",
-                                       ask_secret=lambda q: "pw4", check=lambda pv: self.fail("check"))
+                                       ask_secret=lambda q: PW4, check=lambda pv: self.fail("check"))
             self.assertEqual(te.load_proxy_password("h90871"), "")
 
     def test_cli_credentials_without_prompt(self):
-        args = te.parse_args(["--proxy-user", "u", "--proxy-password", "p", "--proxy", "p:1"])
+        args = te.parse_args(["--proxy-user", "u", "--proxy-password", PW, "--proxy", "p:1"])
         proxy = te.resolve_proxy(args, ask=lambda q: self.fail("prompt"), ask_secret=lambda q: self.fail("prompt"),
                                  environ={"https_proxy": "http://ignored:1"})
-        self.assertEqual(proxy["https_proxy"], "http://u:p@p:1")
+        self.assertEqual(proxy["https_proxy"], f"http://u:{PW}@p:1")
 
     def test_existing_shell_proxy_reused(self):
         environ = {"https_proxy": "http://u:p@old:8080", "no_proxy": "a,b"}
@@ -370,9 +381,9 @@ class ProxyTest(unittest.TestCase):
         environ = {"https_proxy": "http://127.0.0.1:8079"}
         checks = {"http://127.0.0.1:8079": "Tunnel connection failed: 503 Service Unavailable"}
         with mock.patch.dict(os.environ, environ, clear=False), mock.patch.object(sys.stdin, "isatty", return_value=True):
-            proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: "h90871", ask_secret=lambda q: "pw",
+            proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: "h90871", ask_secret=lambda q: PW,
                                                check=lambda pv: checks.get(pv["https_proxy"], ""))
-        self.assertEqual(proxy["https_proxy"], f"http://h90871:pw@{te.DEFAULT_PROXY}")
+        self.assertEqual(proxy["https_proxy"], f"http://h90871:{PW}@{te.DEFAULT_PROXY}")
 
     def test_shell_proxy_kept_when_it_works(self):
         with mock.patch.dict(os.environ, {"https_proxy": "http://ok:1"}, clear=False):
@@ -381,13 +392,13 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(proxy["https_proxy"], "http://ok:1")
 
     def test_rejected_credentials_stop(self):
-        args = te.parse_args(["--proxy-user", "u", "--proxy-password", "p"])
+        args = te.parse_args(["--proxy-user", "u", "--proxy-password", PW])
         with mock.patch.dict(os.environ, {}, clear=False), self.assertRaises(te.CliExit) as ctx:
             os.environ.pop("https_proxy", None)
             os.environ.pop("HTTPS_PROXY", None)
             te.resolve_and_check_proxy(args, check=lambda pv: "identifiants refusés (HTTP 407)")
         self.assertIn("identifiants refusés", str(ctx.exception))
-        self.assertNotIn(":p@", str(ctx.exception))
+        self.assertNotIn(PW, str(ctx.exception))
 
     def test_apply_proxy_sets_process_env(self):
         with mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://x", "no_proxy": "old"}, clear=False):
@@ -654,10 +665,10 @@ class SecretStoreTest(unittest.TestCase):
         keychain = FakeKeychain()
         store = te.SecretStore(keychain=keychain)
         self.assertTrue(store.persistent)
-        self.assertTrue(store.save("proxy:h90871", "Pass!"))
-        self.assertEqual(keychain.items, {("proxy:h90871", te.KEYCHAIN_SERVICE): "Pass!"})
-        self.assertEqual(store.load("proxy:h90871"), "Pass!")
-        self.assertNotIn("Pass!", json.dumps(te._read_state()))
+        self.assertTrue(store.save("proxy:h90871", PW_BANG))
+        self.assertEqual(keychain.items, {("proxy:h90871", te.KEYCHAIN_SERVICE): PW_BANG})
+        self.assertEqual(store.load("proxy:h90871"), PW_BANG)
+        self.assertNotIn(PW_BANG, json.dumps(te._read_state()))
         store.forget_all()
         self.assertEqual(keychain.items, {})
         self.assertEqual(store.load("proxy:h90871"), "")
@@ -681,8 +692,8 @@ class SecretStoreTest(unittest.TestCase):
             self.assertEqual(te.load_cached_api_key("https://v", "p"), API_KEY)
             self.assertEqual(set(te._read_state()["api_key_leases"]), {"https://v/v1/p"})
             self.assertNotIn(API_KEY, json.dumps(te._read_state()))
-            te.save_proxy_password("h90871", "pw")
-            self.assertEqual(te.load_proxy_password("h90871"), "pw")
+            te.save_proxy_password("h90871", PW)
+            self.assertEqual(te.load_proxy_password("h90871"), PW)
             te.forget_all()
             self.assertEqual(keychain.items, {})
             self.assertFalse(os.path.exists(te.state_path()))
@@ -691,13 +702,13 @@ class SecretStoreTest(unittest.TestCase):
         os.makedirs(os.path.dirname(te.state_path()), exist_ok=True)
         with open(te.state_path(), "w", encoding="utf-8") as fh:
             json.dump({"settings": {"proxy_user": "h90871"}, "vault_tokens": {"https://v": TOKEN_OK},
-                       "api_keys": {"k": {"api_key": API_KEY}}, "proxy_passwords": {"h90871": "pw"}}, fh)
+                       "api_keys": {"k": {"api_key": API_KEY}}, "proxy_passwords": {"h90871": PW}}, fh)
         with mock.patch.object(te, "_log") as log:
             state = te._read_state()
         self.assertEqual(state, {"settings": {"proxy_user": "h90871"}})
         with open(te.state_path(), encoding="utf-8") as fh:
             on_disk = fh.read()
-        for secret in (TOKEN_OK, API_KEY, "pw"):
+        for secret in (TOKEN_OK, API_KEY, PW):
             self.assertNotIn(secret, on_disk)
         self.assertIn("purgés", log.call_args.args[0])
         self.assertIsNone(te.load_cached_token("https://v"))
@@ -854,13 +865,48 @@ class MainTest(VaultServerTest):
             code = te.main(argv)
         return code, out.getvalue(), run, tests_dir
 
-    def test_exports(self):
-        code, out, run, tests_dir = self._run_main()
+    def test_exports_reference_the_keychain_never_the_secret(self):
+        keychain = FakeKeychain()
+        with mock.patch.object(te, "_keychain", keychain):
+            code, out, run, tests_dir = self._run_main()
         self.assertEqual(code, 0)
-        self.assertIn(f"export IBM_CLOUD_API_KEY={API_KEY}\n", out)
-        self.assertIn(f"export ORCHESTRATOR_IBMCLOUD_API_KEY={API_KEY}\n", out)
+        self.assertNotIn(API_KEY, out)
+        self.assertIn('export IBM_CLOUD_API_KEY="$(security find-generic-password -a api-key:', out)
+        self.assertIn('export ORCHESTRATOR_IBMCLOUD_API_KEY="$(security', out)
         run.assert_called_once_with(["init"], tests_dir)  # init sur stderr, stdout = exports seuls
         self.assertTrue(all(line.startswith("export ") for line in out.splitlines()))
+
+    def test_exports_without_keychain_refuse_unless_print_secrets(self):
+        with mock.patch.object(te, "_keychain", lambda *a: None):
+            code, out, _, _ = self._run_main()
+            self.assertEqual(code, te.EXIT_USAGE)
+            self.assertEqual(out, "")
+            code, out, _, _ = self._run_main("--print-secrets")
+        self.assertEqual(code, 0)
+        self.assertIn(f"export IBM_CLOUD_API_KEY={API_KEY}\n", out)
+
+    def test_export_lines_with_parts(self):
+        v = {"IBM_CLOUD_API_KEY": "K", "https_proxy": f"http://h90871:{PW_BANG_ENCODED}@ncproxy:8080", "no_proxy": "a,b"}
+
+        class Store:
+            def in_keychain(self, name):
+                return True
+        parts = te.secret_export_parts(v, "api-key:https://v/v1/p", "h90871", False, Store())
+        lines = te.export_lines(v, parts)
+        self.assertNotIn(PW_BANG, lines)
+        self.assertNotIn(PW_BANG_ENCODED, lines)
+        self.assertIn('export IBM_CLOUD_API_KEY="$(security find-generic-password -a api-key:https://v/v1/p -s cos-toolchain -w)"\n', lines)
+        self.assertRegex(lines, r'export https_proxy=http://h90871:"\$\(security find-generic-password -a proxy:h90871 -s cos-toolchain -w \| python3 .*\)"@ncproxy:8080\n')
+        self.assertIn("export no_proxy=a,b\n", lines)
+        # proxy repris du shell : re-référencé, jamais recopié
+        parts = te.secret_export_parts(v, "", "", True, Store())
+        self.assertIn('export https_proxy="$https_proxy"\n', te.export_lines(v, parts))
+
+        class Empty:
+            def in_keychain(self, name):
+                return False
+        self.assertEqual(te.secret_export_parts(v, "api-key:x", "h90871", False, Empty()), {})
+        self.assertEqual(te.mask_secrets(v)["https_proxy"], "http://h90871:***@ncproxy:8080")
 
     def test_json_and_options(self):
         code, out, _, _ = self._run_main("--json", "--tf-log", "--skip-init")
@@ -872,7 +918,7 @@ class MainTest(VaultServerTest):
     def test_proxy_exported_and_used_for_vault(self):
         tests_dir = tempfile.mkdtemp(prefix="tfdir-")
         argv = ["--env", "int", "--vault-url", self.url, "--skip-login", "--skip-init", "--dir", tests_dir,
-                "--vault-token", TOKEN_OK, "--proxy", "127.0.0.1:9", "--proxy-user", "u", "--proxy-password", "p!",
+                "--vault-token", TOKEN_OK, "--proxy", "127.0.0.1:9", "--proxy-user", "u", "--proxy-password", PW_BANG,
                 "--no-proxy-hosts", "127.0.0.1", "--skip-proxy-check", "--json"]
         import io
         out = io.StringIO()
@@ -880,8 +926,9 @@ class MainTest(VaultServerTest):
             code = te.main(argv)
         self.assertEqual(code, 0)  # no_proxy=127.0.0.1 : le faux Vault est joint sans passer par le proxy
         variables = json.loads(out.getvalue())
-        self.assertEqual(variables["https_proxy"], "http://u:p%21@127.0.0.1:9")
-        self.assertEqual(variables["HTTP_PROXY"], "http://u:p%21@127.0.0.1:9")
+        self.assertEqual(variables["https_proxy"], "http://u:***@127.0.0.1:9")  # --json masque les secrets
+        self.assertEqual(variables["HTTP_PROXY"], "http://u:***@127.0.0.1:9")
+        self.assertNotIn(PW_BANG_ENCODED, out.getvalue())
         self.assertEqual(variables["no_proxy"], "127.0.0.1,s02vl9956141")  # + hôte du service token
 
     def test_run_plan(self):

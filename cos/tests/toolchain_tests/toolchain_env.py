@@ -822,11 +822,22 @@ def save_setting(name: str, value: str) -> None:
     _write_state(state)
 
 
+def _security_quote(arg: str) -> str:
+    """Argument pour le mode interactif de `security` (double quotes, \\ et \" échappés)."""
+    return '"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def _keychain(*args: str) -> subprocess.CompletedProcess | None:
-    """`security` (trousseau macOS) ; None si indisponible."""
+    """`security` (trousseau macOS) ; None si indisponible. Une commande qui
+    porte un secret (-w) est envoyée sur l'entrée standard de `security -i`,
+    jamais en argument : les arguments d'un processus sont visibles de tous
+    (ps, logs d'audit)."""
     if sys.platform != "darwin" or not shutil.which("security"):
         return None
     try:
+        if "-w" in args[1:] and args[0] == "add-generic-password":
+            line = " ".join(_security_quote(a) for a in args) + "\n"
+            return subprocess.run(["security", "-i"], input=line, capture_output=True, text=True, timeout=15)
         return subprocess.run(["security", *args], capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -849,6 +860,11 @@ class SecretStore:
     def persistent(self) -> bool:
         """Vrai si les secrets survivent au processus (trousseau disponible)."""
         return self._keychain("help") is not None
+
+    def in_keychain(self, name: str) -> bool:
+        """Vrai si `name` est lisible dans le trousseau (donc depuis un shell, via `security`)."""
+        result = self._keychain("find-generic-password", "-a", name, "-s", KEYCHAIN_SERVICE, "-w")
+        return result is not None and result.returncode == 0
 
     def load(self, name: str) -> str:
         result = self._keychain("find-generic-password", "-a", name, "-s", KEYCHAIN_SERVICE, "-w")
@@ -1512,8 +1528,72 @@ def build_env_vars(api_key: str, tf_log: str | None = None,
     return variables
 
 
-def export_lines(variables: dict[str, str]) -> str:
-    return "".join(f"export {name}={shlex.quote(value)}\n" for name, value in variables.items())
+class ShellRef(str):
+    """Morceau d'une valeur exportée à insérer tel quel dans le shell (non quoté) :
+    une substitution `$(...)` ou une variable `$x`, à la place d'un secret."""
+
+
+URL_ENCODE_FILTER = ("python3 -c 'import sys,urllib.parse;"
+                     "print(urllib.parse.quote(sys.stdin.read().rstrip(chr(10)),safe=\"\"))'")
+
+
+def keychain_ref(name: str, url_encode: bool = False) -> ShellRef:
+    """Lecture d'un secret du trousseau par le shell, au moment de l'eval ;
+    url_encode pour un secret inséré dans une URL (mot de passe du proxy)."""
+    read = f"security find-generic-password -a {shlex.quote(name)} -s {shlex.quote(KEYCHAIN_SERVICE)} -w"
+    return ShellRef(f"$({read} | {URL_ENCODE_FILTER})" if url_encode else f"$({read})")
+
+
+def _export_value(parts: Sequence[str]) -> str:
+    return "".join(f'"{part}"' if isinstance(part, ShellRef) else shlex.quote(part) for part in parts) or "''"
+
+
+def export_lines(variables: dict[str, str], parts: dict[str, Sequence[str]] | None = None) -> str:
+    """Lignes `export NAME=valeur`. Pour les noms présents dans `parts`, la valeur
+    est composée des morceaux donnés (les ShellRef restent des expressions shell)."""
+    parts = parts or {}
+    return "".join(f"export {name}={_export_value(parts.get(name) or [value])}\n" for name, value in variables.items())
+
+
+SECRET_VARIABLES = (*API_KEY_VARS, *PROXY_ENV_VARS[:2], *(v.upper() for v in PROXY_ENV_VARS[:2]))
+
+
+def secret_export_parts(variables: dict[str, str], api_key_secret: str, proxy_user: str,
+                        proxy_from_shell: bool, store: "SecretStore | None" = None) -> dict[str, Sequence[str]]:
+    """Comment exporter chaque variable secrète SANS écrire le secret : l'API key
+    et le mot de passe du proxy sont lus dans le trousseau par le shell au
+    moment de l'eval ; un proxy repris du shell est re-référencé tel quel.
+    Les variables secrètes absentes du résultat n'ont pas de forme sûre."""
+    store = store or SECRETS
+    parts: dict[str, Sequence[str]] = {}
+    if api_key_secret and store.in_keychain(api_key_secret):
+        for name in API_KEY_VARS:
+            if name in variables:
+                parts[name] = [keychain_ref(api_key_secret)]
+    for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+        url = variables.get(name)
+        if not url or not _MASK_RE.search(url):
+            continue  # pas d'identifiants dans l'URL : rien de secret
+        if proxy_from_shell:
+            parts[name] = [ShellRef("$" + name.lower())]
+        elif proxy_user and store.in_keychain(f"proxy:{proxy_user}"):
+            scheme, host = url.split("://", 1)[0], url.rsplit("@", 1)[-1]
+            parts[name] = [f"{scheme}://{urllib.parse.quote(proxy_user, safe='')}:",
+                           keychain_ref(f"proxy:{proxy_user}", url_encode=True), f"@{host}"]
+    return parts
+
+
+def mask_secrets(variables: dict[str, str]) -> dict[str, str]:
+    """Copie des variables avec les secrets masqués (sortie --json)."""
+    masked = {}
+    for name, value in variables.items():
+        if name in API_KEY_VARS:
+            masked[name] = _mask(value)
+        elif name.lower() in PROXY_ENV_VARS[:2]:
+            masked[name] = mask_url(value)
+        else:
+            masked[name] = value
+    return masked
 
 
 def _mask(value: str) -> str:
@@ -1605,6 +1685,7 @@ def resolve_api_key(args: argparse.Namespace, client: VaultClient,
     if not args.new_key and not args.new_token:
         cached = load_cached_api_key(args.vault_url, args.secret_path)
         if cached:
+            args.api_key_secret = f"api-key:{_api_key_cache_key(args.vault_url, args.secret_path)}"
             _log(f"API key sauvegardée réutilisée ({_mask(cached)}, {state_path()}).")
             return cached
     token = resolve_vault_token(args, client, acquire)
@@ -1623,6 +1704,7 @@ def resolve_api_key(args: argparse.Namespace, client: VaultClient,
     _log(f"API key lue dans Vault ({_mask(api_key)}"
          + ("" if lease is None else f", lease {_duration(lease)}") + ").")
     save_cached_api_key(args.vault_url, args.secret_path, api_key, lease)
+    args.api_key_secret = f"api-key:{_api_key_cache_key(args.vault_url, args.secret_path)}"
     return api_key
 
 
@@ -1715,7 +1797,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     output.add_argument("--shell", action="store_true",
                         help="ouvrir un sous-shell avec les variables exportées")
     output.add_argument("--json", action="store_true", dest="as_json",
-                        help="imprimer les variables en JSON au lieu de lignes `export`")
+                        help="imprimer les variables en JSON au lieu de lignes `export` (secrets masqués)")
+    output.add_argument("--print-secrets", action="store_true",
+                        help="imprimer les secrets en clair dans les `export` / le JSON (par défaut : "
+                             "références au trousseau, lues par le shell à l'eval)")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
 
     args = parser.parse_args(argv)
@@ -1942,10 +2027,22 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"Sous-shell {shell} dans {args.dir} avec " + ", ".join(variables)
              + " exportées (exit pour revenir).")
         return subprocess.call([shell], cwd=args.dir, env=env)
+    # Sortie sur stdout (eval / --json) : jamais un secret en clair, sauf
+    # --print-secrets. Les secrets sont référencés depuis le trousseau, que le
+    # shell lit lui-même au moment de l'eval ; --run et --shell n'ont pas ce
+    # problème (variables passées en mémoire au processus).
     if args.as_json:
-        print(json.dumps(variables, indent=2))
+        print(json.dumps(variables if args.print_secrets else mask_secrets(variables), indent=2))
     else:
-        sys.stdout.write(export_lines(variables))
+        parts = {} if args.print_secrets else secret_export_parts(
+            variables, getattr(args, "api_key_secret", ""),
+            (getattr(args, "proxy_credentials", None) or ("", ""))[0], args.proxy_origin == "shell")
+        unsafe = [n for n in variables if n in SECRET_VARIABLES and n not in parts]
+        if unsafe and not args.print_secrets:
+            _log(f"Pas de trousseau pour {', '.join(unsafe)} : rien n'est imprimé en clair. Utiliser --run "
+                 "ou --shell (secrets passés en mémoire), ou --print-secrets en connaissance de cause.")
+            return EXIT_USAGE
+        sys.stdout.write(export_lines(variables, parts))
         _log("Variables prêtes : " + ", ".join(variables)
              + f"\nDans le shell courant : eval \"$(python {os.path.basename(__file__)} --env {args.env})\""
              + f"\nPuis : terraform -chdir={shlex.quote(args.dir)} plan"
