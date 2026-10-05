@@ -190,8 +190,11 @@ class TestSaveCreateExpirationRuleInDb:
 
         lifecycle = services.lifecyclePolicyRuleService
         lifecycle.disable_lifecycle_policy_rules_by_bucket_sub_id.assert_called_once_with(bucket_row(), "karim", "session")
-        args = lifecycle.complete_lifecycle_policy_rule_creation.call_args.args
-        assert args[:4] == (bucket_row(), "clean_bucket", "", 1)  # règle "clean_bucket", tout le bucket, 1 jour
+        # Règle "clean_bucket" sur tout le bucket (préfixe vide) : objets courants et
+        # versions non courantes expirent après 1 jour.
+        lifecycle.complete_lifecycle_policy_rule_creation.assert_called_once_with(
+            bucket_row(), "clean_bucket", "", 1, 1, "karim", "session"
+        )
 
     def test_nothing_recorded_without_a_rule(self, clean_dag, services, payload_with_requestor):
         self.run(clean_dag, payload_with_requestor, created=False)

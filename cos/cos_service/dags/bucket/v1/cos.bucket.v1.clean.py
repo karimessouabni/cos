@@ -1,8 +1,4 @@
-"""DAG cos.bucket.v1.clean : vide un bucket par une règle d'expiration, puis la retire.
-
-Reprise du fichier d'entreprise (lignes 21 à 274 d'après les captures) ; les
-lignes 1 à 20 suivent l'en-tête des autres DAGs.
-"""
+"""DAG cos.bucket.v1.clean : vide un bucket par une règle d'expiration, puis la retire."""
 from bp2i_airflow_library import add_project_to_path
 
 add_project_to_path()
@@ -164,8 +160,6 @@ def bucket_clean() -> None:
         try:
             if is_expiration_created:
                 disable_lifecycle_policy_rules_by_bucket_sub_id(bucket, payload.requestor, session)
-                # [À VÉRIFIER] la fin de l'appel est coupée sur la capture (après
-                # expiration_days=1) : non_current_version_expiration_days, requestor, session ?
                 complete_lifecycle_policy_rule_creation(bucket, "clean_bucket", "", 1, 1, payload.requestor, session)
         except Exception as e:
             raise e
