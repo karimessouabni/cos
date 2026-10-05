@@ -1,4 +1,4 @@
-"""Tests des étapes du DAG ``cos.bucket.v1.clean`` (fichier d'entreprise)."""
+"""Tests des étapes du DAG ``cos.bucket.v1.clean``."""
 import pytest
 
 from airflow.sensors.base import PokeReturnValue
@@ -13,10 +13,19 @@ def bucket_row(**overrides) -> dict:
         "name": "bucket-a",
         "clean_status": Status.SUCCESS.value,
         "virtual_server_endpoint": "https://vpe/bucket-a",
+        "retention_enabled": False,
+        "object_lock_duration_days": None,
+        "object_lock_duration_years": None,
         "cos": {"crn": "crn:cos"},
     }
     row.update(overrides)
     return row
+
+
+class S3Error(Exception):
+    def __init__(self, code):
+        super().__init__(f"s3 {code}")
+        self.code = code
 
 
 @pytest.fixture
@@ -26,7 +35,18 @@ def clean_dag(load_dag):
 
 @pytest.fixture
 def payload(clean_dag):
-    return clean_dag.module.BucketCleanPayload(subscription_id="sub-1")
+    return clean_dag.module.BucketCleanPayload(subscription_id="sub-1", requestor="karim")
+
+
+@pytest.fixture
+def s3(services):
+    services.ibm_iam_service.get_iam_access_token.return_value = "tok"
+    return services
+
+
+def assert_failed(services, state_manager):
+    services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", Status.FAILED, "session")
+    state_manager.push_state.assert_called_once_with({"clean_status": Status.FAILED.value})
 
 
 def test_dag_identity(clean_dag):
@@ -44,10 +64,10 @@ def test_dag_identity(clean_dag):
     ]
 
 
-def test_only_the_scheduler_is_a_sensor(clean_dag):
-    # Reschedule toutes les 3 h : le worker n'est pas occupé entre deux sondages.
+def test_only_the_scheduler_is_a_sensor_with_a_bounded_wait(clean_dag):
+    # Reschedule toutes les 3 h, 7 jours au plus : le clean ne reste pas "in_progress" sans fin.
     assert clean_dag.steps["scheduler_clean_bucket"].sensor_options == {
-        "exponential_backoff": False, "poke_interval": 10800, "mode": "reschedule",
+        "exponential_backoff": False, "poke_interval": 3 * 3600, "timeout": 7 * 24 * 3600, "mode": "reschedule",
     }
     assert all(clean_dag.steps[name].sensor_options is None for name in clean_dag.steps if name != "scheduler_clean_bucket")
 
@@ -56,7 +76,7 @@ class TestValidateBucket:
     def run(self, clean_dag, payload, state_manager):
         return clean_dag.steps["validate_bucket"](session="session", state_manager=state_manager, payload=payload)
 
-    def test_marks_the_clean_in_progress_and_returns_the_bucket(self, clean_dag, services, payload, state_manager):
+    def test_marks_the_clean_in_progress_once_and_returns_the_bucket(self, clean_dag, services, payload, state_manager):
         services.bucketService.get_bucket_by_sub_id.return_value = bucket_row()
 
         assert self.run(clean_dag, payload, state_manager) == bucket_row()
@@ -69,7 +89,7 @@ class TestValidateBucket:
     def test_missing_or_unfinished_bucket_is_declined(self, clean_dag, services, payload, state_manager, row):
         services.bucketService.get_bucket_by_sub_id.return_value = row
 
-        with pytest.raises(DeclineDemandException, match="doesn't exist or not fully created"):
+        with pytest.raises(DeclineDemandException, match="doesn't exist or not fully created for the sub id sub-1"):
             self.run(clean_dag, payload, state_manager)
 
         services.bucketService.update_bucket_clean_status.assert_not_called()
@@ -83,6 +103,19 @@ class TestValidateBucket:
 
         services.bucketService.update_bucket_clean_status.assert_not_called()
 
+    @pytest.mark.parametrize("locked", [
+        {"retention_enabled": True},
+        {"object_lock_duration_days": 30},
+        {"object_lock_duration_years": 1},
+    ])
+    def test_locked_objects_cannot_expire_so_the_clean_is_declined(self, clean_dag, services, payload, state_manager, locked):
+        services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(**locked)
+
+        with pytest.raises(DeclineDemandException, match="retention or object lock"):
+            self.run(clean_dag, payload, state_manager)
+
+        services.bucketService.update_bucket_clean_status.assert_not_called()
+
 
 class TestGetCosApiKey:
     def run(self, clean_dag, state_manager):
@@ -90,13 +123,13 @@ class TestGetCosApiKey:
             bucket=bucket_row(), session="session", state_manager=state_manager, reader="reader", vault="vault"
         )
 
-    def test_reads_the_key_through_vault(self, clean_dag, services, state_manager):
+    def test_reads_the_key_through_vault_without_touching_the_status(self, clean_dag, services, state_manager):
         services.vault_service.get_cos_api_key.return_value = "api-key"
 
         assert self.run(clean_dag, state_manager) == "api-key"
 
         services.vault_service.get_cos_api_key.assert_called_once_with(bucket_row(), "vault", "reader")
-        services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", Status.INPROGRESS, "session")
+        services.bucketService.update_bucket_clean_status.assert_not_called()
         state_manager.push_state.assert_not_called()
 
     def test_vault_failure_marks_the_clean_failed_and_reraises(self, clean_dag, services, state_manager):
@@ -105,8 +138,7 @@ class TestGetCosApiKey:
         with pytest.raises(RuntimeError, match="vault down"):
             self.run(clean_dag, state_manager)
 
-        services.bucketService.update_bucket_clean_status.assert_called_with("sub-1", Status.FAILED, "session")
-        state_manager.push_state.assert_called_once_with({"clean_status": Status.FAILED.value})
+        assert_failed(services, state_manager)
 
 
 class TestIsBucketEmpty:
@@ -114,11 +146,6 @@ class TestIsBucketEmpty:
         return clean_dag.steps["is_bucket_empty"](
             bucket=bucket_row(), api_key="api-key", state_manager=state_manager, session="session"
         )
-
-    @pytest.fixture
-    def s3(self, services):
-        services.ibm_iam_service.get_iam_access_token.return_value = "tok"
-        return services
 
     @pytest.mark.parametrize("has_contents, expected", [(False, True), (True, False)])
     def test_answers_from_the_bucket_listing(self, clean_dag, s3, state_manager, has_contents, expected):
@@ -128,8 +155,7 @@ class TestIsBucketEmpty:
 
         s3.ibm_iam_service.get_iam_access_token.assert_called_once_with("api-key")
         s3.bucketService.check_bucket_has_contents.assert_called_once_with("tok", bucket_row())
-        s3.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", Status.INPROGRESS, "session")
-        state_manager.push_state.assert_not_called()
+        s3.bucketService.update_bucket_clean_status.assert_not_called()
 
     def test_listing_failure_marks_the_clean_failed_and_reraises(self, clean_dag, s3, state_manager):
         s3.bucketService.check_bucket_has_contents.side_effect = RuntimeError("s3 down")
@@ -137,13 +163,7 @@ class TestIsBucketEmpty:
         with pytest.raises(RuntimeError, match="s3 down"):
             self.run(clean_dag, state_manager)
 
-        s3.bucketService.update_bucket_clean_status.assert_called_with("sub-1", Status.FAILED, "session")
-        state_manager.push_state.assert_called_once_with({"clean_status": Status.FAILED.value})
-
-
-@pytest.fixture
-def payload_with_requestor(clean_dag):
-    return clean_dag.module.BucketCleanPayload(subscription_id="sub-1", requestor="karim")
+        assert_failed(s3, state_manager)
 
 
 class TestCreateExpirationRule:
@@ -153,40 +173,37 @@ class TestCreateExpirationRule:
             state_manager=state_manager, session="session",
         )
 
-    def test_non_empty_bucket_gets_the_rule(self, clean_dag, services, state_manager):
-        services.ibm_iam_service.get_iam_access_token.return_value = "tok"
-        services.bucketService.create_expiration_rule.return_value = True
+    def test_non_empty_bucket_gets_the_rule(self, clean_dag, s3, state_manager):
+        s3.bucketService.create_expiration_rule.return_value = True
 
         assert self.run(clean_dag, state_manager, is_bucket_empty=False) is True
 
-        services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", Status.INPROGRESS, "session")
-        services.bucketService.create_expiration_rule.assert_called_once_with("tok", bucket_row())
-        state_manager.push_state.assert_not_called()
+        s3.bucketService.create_expiration_rule.assert_called_once_with("tok", bucket_row())
+        s3.bucketService.update_bucket_clean_status.assert_not_called()
 
-    def test_empty_bucket_needs_no_rule(self, clean_dag, services, state_manager):
+    def test_empty_bucket_needs_no_rule(self, clean_dag, s3, state_manager):
         assert self.run(clean_dag, state_manager, is_bucket_empty=True) is False
 
-        services.bucketService.create_expiration_rule.assert_not_called()
-        services.ibm_iam_service.get_iam_access_token.assert_not_called()
+        s3.bucketService.create_expiration_rule.assert_not_called()
+        s3.ibm_iam_service.get_iam_access_token.assert_not_called()
 
-    def test_failure_marks_the_clean_failed_and_reraises(self, clean_dag, services, state_manager):
-        services.bucketService.create_expiration_rule.side_effect = RuntimeError("s3 down")
+    def test_failure_marks_the_clean_failed_and_reraises(self, clean_dag, s3, state_manager):
+        s3.bucketService.create_expiration_rule.side_effect = RuntimeError("s3 down")
 
         with pytest.raises(RuntimeError, match="s3 down"):
             self.run(clean_dag, state_manager, is_bucket_empty=False)
 
-        services.bucketService.update_bucket_clean_status.assert_called_with("sub-1", Status.FAILED, "session")
-        state_manager.push_state.assert_called_once_with({"clean_status": Status.FAILED.value})
+        assert_failed(s3, state_manager)
 
 
 class TestSaveCreateExpirationRuleInDb:
-    def run(self, clean_dag, payload_with_requestor, created):
+    def run(self, clean_dag, payload, created):
         return clean_dag.steps["save_create_expiration_rule_in_db"](
-            is_expiration_created=created, bucket=bucket_row(), payload=payload_with_requestor, session="session"
+            is_expiration_created=created, bucket=bucket_row(), payload=payload, session="session"
         )
 
-    def test_rule_created_is_recorded_after_disabling_the_previous_ones(self, clean_dag, services, payload_with_requestor):
-        assert self.run(clean_dag, payload_with_requestor, created=True) is None
+    def test_rule_created_is_recorded_after_disabling_the_previous_ones(self, clean_dag, services, payload):
+        assert self.run(clean_dag, payload, created=True) is None
 
         lifecycle = services.lifecyclePolicyRuleService
         lifecycle.disable_lifecycle_policy_rules_by_bucket_sub_id.assert_called_once_with(bucket_row(), "karim", "session")
@@ -196,17 +213,17 @@ class TestSaveCreateExpirationRuleInDb:
             bucket_row(), "clean_bucket", "", 1, 1, "karim", "session"
         )
 
-    def test_nothing_recorded_without_a_rule(self, clean_dag, services, payload_with_requestor):
-        self.run(clean_dag, payload_with_requestor, created=False)
+    def test_nothing_recorded_without_a_rule(self, clean_dag, services, payload):
+        self.run(clean_dag, payload, created=False)
 
         services.lifecyclePolicyRuleService.disable_lifecycle_policy_rules_by_bucket_sub_id.assert_not_called()
         services.lifecyclePolicyRuleService.complete_lifecycle_policy_rule_creation.assert_not_called()
 
-    def test_db_failure_reraises(self, clean_dag, services, payload_with_requestor):
+    def test_db_failure_propagates(self, clean_dag, services, payload):
         services.lifecyclePolicyRuleService.complete_lifecycle_policy_rule_creation.side_effect = RuntimeError("db")
 
         with pytest.raises(RuntimeError, match="db"):
-            self.run(clean_dag, payload_with_requestor, created=True)
+            self.run(clean_dag, payload, created=True)
 
 
 class TestSchedulerCleanBucket:
@@ -217,112 +234,114 @@ class TestSchedulerCleanBucket:
         )
 
     @pytest.mark.parametrize("has_contents, is_done", [(True, False), (False, True)])
-    def test_pokes_until_the_bucket_is_empty(self, clean_dag, services, state_manager, has_contents, is_done):
-        services.ibm_iam_service.get_iam_access_token.return_value = "tok"
-        services.bucketService.check_bucket_has_contents.return_value = has_contents
+    def test_pokes_until_the_bucket_is_empty(self, clean_dag, s3, state_manager, has_contents, is_done):
+        s3.bucketService.check_bucket_has_contents.return_value = has_contents
 
         result = self.run(clean_dag, state_manager, created=True)
 
         assert isinstance(result, PokeReturnValue)
         assert (result.is_done, result.xcom_value) == (is_done, {"content": "clean"})
-        services.bucketService.check_bucket_has_contents.assert_called_once_with("tok", bucket_row())
-        services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", Status.INPROGRESS, "session")
+        s3.bucketService.check_bucket_has_contents.assert_called_once_with("tok", bucket_row())
+        s3.bucketService.update_bucket_clean_status.assert_not_called()
 
-    def test_without_a_rule_the_sensor_is_done_at_once(self, clean_dag, services, state_manager):
+    def test_without_a_rule_the_sensor_is_done_at_once(self, clean_dag, s3, state_manager):
         result = self.run(clean_dag, state_manager, created=False)
 
         assert (result.is_done, result.xcom_value) == (True, {"content": "clean"})
-        services.bucketService.check_bucket_has_contents.assert_not_called()
-        services.bucketService.update_bucket_clean_status.assert_not_called()
+        s3.bucketService.check_bucket_has_contents.assert_not_called()
 
-    def test_listing_failure_marks_the_clean_failed_and_reraises(self, clean_dag, services, state_manager):
-        services.bucketService.check_bucket_has_contents.side_effect = RuntimeError("s3 down")
+    def test_listing_failure_marks_the_clean_failed_and_reraises(self, clean_dag, s3, state_manager):
+        s3.bucketService.check_bucket_has_contents.side_effect = RuntimeError("s3 down")
 
         with pytest.raises(RuntimeError, match="s3 down"):
             self.run(clean_dag, state_manager, created=True)
 
-        services.bucketService.update_bucket_clean_status.assert_called_with("sub-1", Status.FAILED, "session")
-        state_manager.push_state.assert_called_once_with({"clean_status": Status.FAILED.value})
-
-
-class S3Error(Exception):
-    def __init__(self, code):
-        super().__init__(f"s3 {code}")
-        self.code = code
+        assert_failed(s3, state_manager)
 
 
 class TestDeleteExpirationRule:
-    def run(self, clean_dag, state_manager, check_clean_done):
+    DONE = PokeReturnValue(is_done=True, xcom_value={"content": "clean"})
+
+    def run(self, clean_dag, state_manager, created, check_clean_done=DONE):
         return clean_dag.steps["delete_expiration_rule"](
-            bucket=bucket_row(), api_key="api-key", check_clean_done=check_clean_done,
+            bucket=bucket_row(), api_key="api-key", is_expiration_created=created, check_clean_done=check_clean_done,
             state_manager=state_manager, session="session",
         )
 
-    def test_rule_removed_once_the_bucket_is_clean(self, clean_dag, services, state_manager):
-        services.ibm_iam_service.get_iam_access_token.return_value = "tok"
-
-        assert self.run(clean_dag, state_manager, check_clean_done=PokeReturnValue(is_done=True)) is True
-
+    def assert_success(self, services, state_manager):
         services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", Status.SUCCESS, "session")
         state_manager.push_state.assert_called_once_with({"clean_status": Status.SUCCESS.value})
-        services.bucketService.delete_lifecycle_policy.assert_called_once_with("tok", bucket_row())
 
-    def test_nothing_to_remove_without_a_sensor_result(self, clean_dag, services, state_manager):
-        assert self.run(clean_dag, state_manager, check_clean_done=None) is False
+    def test_rule_removed_then_the_clean_is_a_success(self, clean_dag, s3, state_manager):
+        assert self.run(clean_dag, state_manager, created=True) is True
 
-        services.bucketService.delete_lifecycle_policy.assert_not_called()
-        services.bucketService.update_bucket_clean_status.assert_not_called()
+        s3.bucketService.delete_lifecycle_policy.assert_called_once_with("tok", bucket_row())
+        self.assert_success(s3, state_manager)
+        # Le success n'est posé qu'après le retrait de la règle.
+        assert s3.bucketService.method_calls.index(("delete_lifecycle_policy", ("tok", bucket_row()), {})) \
+            < s3.bucketService.method_calls.index(("update_bucket_clean_status", ("sub-1", Status.SUCCESS, "session"), {}))
 
-    def test_missing_policy_is_tolerated(self, clean_dag, services, state_manager):
-        """404 au delete : la règle a déjà disparu, l'étape n'échoue pas (et ne renvoie rien)."""
-        services.bucketService.delete_lifecycle_policy.side_effect = S3Error(404)
+    def test_bucket_already_empty_keeps_its_lifecycle_configuration(self, clean_dag, s3, state_manager):
+        """Sans règle posée, rien n'est retiré : les règles du client restent en place
+        (l'original supprimait toute la configuration de cycle de vie dans ce cas)."""
+        assert self.run(clean_dag, state_manager, created=False) is False
 
-        assert self.run(clean_dag, state_manager, check_clean_done=PokeReturnValue(is_done=True)) is None
+        s3.bucketService.delete_lifecycle_policy.assert_not_called()
+        s3.ibm_iam_service.get_iam_access_token.assert_not_called()
+        self.assert_success(s3, state_manager)
 
-        # Le SUCCESS a été posé avant l'appel, il reste.
-        services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", Status.SUCCESS, "session")
+    @pytest.mark.parametrize("check_clean_done", [DONE, {"content": "clean"}, None])
+    def test_the_sensor_result_only_orders_the_steps(self, clean_dag, s3, state_manager, check_clean_done):
+        assert self.run(clean_dag, state_manager, created=True, check_clean_done=check_clean_done) is True
 
-    def test_other_s3_error_marks_the_clean_failed_and_reraises(self, clean_dag, services, state_manager):
-        services.bucketService.delete_lifecycle_policy.side_effect = S3Error(500)
+        s3.bucketService.delete_lifecycle_policy.assert_called_once()
+
+    def test_missing_policy_counts_as_removed(self, clean_dag, s3, state_manager):
+        s3.bucketService.delete_lifecycle_policy.side_effect = S3Error(404)
+
+        assert self.run(clean_dag, state_manager, created=True) is True
+
+        self.assert_success(s3, state_manager)
+
+    def test_other_s3_error_marks_the_clean_failed_and_reraises(self, clean_dag, s3, state_manager):
+        s3.bucketService.delete_lifecycle_policy.side_effect = S3Error(500)
 
         with pytest.raises(S3Error):
-            self.run(clean_dag, state_manager, check_clean_done=PokeReturnValue(is_done=True))
+            self.run(clean_dag, state_manager, created=True)
 
-        services.bucketService.update_bucket_clean_status.assert_called_with("sub-1", Status.FAILED, "session")
-        state_manager.push_state.assert_called_with({"clean_status": Status.FAILED.value})
+        assert_failed(s3, state_manager)
 
-    def test_error_without_code_is_masked_by_an_attribute_error(self, clean_dag, services, state_manager):
-        """Point ouvert : ``str(e.code)`` suppose une erreur S3. Une autre exception
-        (IAM, réseau) lève AttributeError à la place, et le statut FAILED n'est pas posé."""
-        services.ibm_iam_service.get_iam_access_token.side_effect = RuntimeError("iam down")
+    def test_error_without_code_is_a_failure_too(self, clean_dag, s3, state_manager):
+        """L'original lisait ``e.code`` : une panne IAM levait AttributeError et le clean
+        restait "in_progress"."""
+        s3.ibm_iam_service.get_iam_access_token.side_effect = RuntimeError("iam down")
 
-        with pytest.raises(AttributeError):
-            self.run(clean_dag, state_manager, check_clean_done=PokeReturnValue(is_done=True))
+        with pytest.raises(RuntimeError, match="iam down"):
+            self.run(clean_dag, state_manager, created=True)
 
-        services.bucketService.update_bucket_clean_status.assert_not_called()
+        assert_failed(s3, state_manager)
 
 
 class TestSaveDeleteExpirationRuleInDb:
-    def run(self, clean_dag, payload_with_requestor, deleted):
+    def run(self, clean_dag, payload, deleted):
         return clean_dag.steps["save_delete_expiration_rule_in_db"](
-            is_expiration_deleted=deleted, bucket=bucket_row(), payload=payload_with_requestor, session="session"
+            is_expiration_deleted=deleted, bucket=bucket_row(), payload=payload, session="session"
         )
 
-    def test_rules_disabled_once_the_policy_is_gone(self, clean_dag, services, payload_with_requestor):
-        self.run(clean_dag, payload_with_requestor, deleted=True)
+    def test_rules_disabled_once_the_policy_is_gone(self, clean_dag, services, payload):
+        self.run(clean_dag, payload, deleted=True)
 
         services.lifecyclePolicyRuleService.disable_lifecycle_policy_rules_by_bucket_sub_id.assert_called_once_with(
             bucket_row(), "karim", "session"
         )
 
-    @pytest.mark.parametrize("deleted", [False, None])
-    def test_nothing_disabled_otherwise(self, clean_dag, services, payload_with_requestor, deleted):
-        self.run(clean_dag, payload_with_requestor, deleted=deleted)
+    def test_nothing_disabled_without_a_removed_rule(self, clean_dag, services, payload):
+        self.run(clean_dag, payload, deleted=False)
 
         services.lifecyclePolicyRuleService.disable_lifecycle_policy_rules_by_bucket_sub_id.assert_not_called()
 
-    def test_db_failure_reraises(self, clean_dag, services, payload_with_requestor):
+    def test_db_failure_propagates(self, clean_dag, services, payload):
         services.lifecyclePolicyRuleService.disable_lifecycle_policy_rules_by_bucket_sub_id.side_effect = RuntimeError("db")
 
         with pytest.raises(RuntimeError, match="db"):
-            self.run(clean_dag, payload_with_requestor, deleted=True)
+            self.run(clean_dag, payload, deleted=True)
