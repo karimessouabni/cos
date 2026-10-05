@@ -19,8 +19,8 @@ run "create_bucket" {
     error_message = "storage_class attendue : standard."
   }
   assert {
-    condition     = orchestrator_subscription_cosbucket_v1.bucket["basic"].payload.cos_instance == orchestrator_subscription_cos_v1.cos.name
-    error_message = "Le bucket n'est pas rattaché à l'instance COS du scénario."
+    condition     = orchestrator_subscription_cosbucket_v1.bucket["basic"].payload.cos_instance == output.cos_name
+    error_message = "Le bucket n'est pas rattaché à l'instance COS attendue (var.cos_instance, ou celle du scénario)."
   }
 }
 

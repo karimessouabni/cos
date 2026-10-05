@@ -4,14 +4,24 @@
 # tier, prefix) vient de envs/<env>.tfvars. Les assertions lisent
 # directement les attributs des ressources.
 
-# --- Instance COS : toujours présente, une par fichier de test ---------------
+# --- Instance COS -------------------------------------------------------------
+# Réutilisée (var.cos_instance, dans envs/<env>.tfvars) : créer une instance
+# COS et la détruire à chaque fichier de test coûte plusieurs minutes et ne
+# teste rien de plus que le scénario 10_cos. Créée seulement si cos_instance
+# est vide (10_cos le force).
 resource "orchestrator_subscription_cos_v1" "cos" {
+  count = var.cos_instance == "" ? 1 : 0
+
   environment = var.environment
   description = "${var.prefix} ${var.scenario} cos"
   apcode      = var.apcode
   realm       = var.realm
   tier        = var.tier
   payload     = {}
+}
+
+locals {
+  cos_name = var.cos_instance != "" ? var.cos_instance : one(orchestrator_subscription_cos_v1.cos[*].name)
 }
 
 # --- Backup vault : seulement si un bucket demande une sauvegarde
@@ -29,7 +39,7 @@ resource "orchestrator_subscription_cosbackup_vault_v1" "vault" {
   apcode      = var.apcode
   realm       = var.realm
   payload = {
-    cos_instance = orchestrator_subscription_cos_v1.cos.name
+    cos_instance = local.cos_name
   }
 }
 
@@ -42,7 +52,7 @@ locals {
     for key, b in var.buckets : key => merge(
       {
         storage_class = b.storage_class
-        cos_instance  = orchestrator_subscription_cos_v1.cos.name
+        cos_instance  = local.cos_name
       },
       { for k, v in {
         enable_versioning          = b.enable_versioning
@@ -78,6 +88,7 @@ resource "orchestrator_subscription_cosbucket_v1" "bucket" {
   # référence (backup_vault_sub_id), donc seulement avec backup_retention_days.
 }
 
-output "cos_name" { value = orchestrator_subscription_cos_v1.cos.name }
+output "cos_name" { value = local.cos_name }
+output "cos_created" { value = var.cos_instance == "" }
 output "vault_id" { value = one(orchestrator_subscription_cosbackup_vault_v1.vault[*].id) }
 output "bucket_names" { value = { for k, b in orchestrator_subscription_cosbucket_v1.bucket : k => b.name } }

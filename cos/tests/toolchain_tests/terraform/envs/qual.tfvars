@@ -1,5 +1,6 @@
 environment      = "qual"
 realm            = "rl002i000138" # à vérifier
+cos_instance     = ""             # à renseigner : instance COS existante à réutiliser (vide = créée par chaque scénario)
 provider_version = "2.3.0"        # à vérifier
 apcode           = "AP85135"
 tier             = "P"

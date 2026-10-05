@@ -31,6 +31,12 @@ variable "tier" {
   default = "P"
 }
 
+variable "cos_instance" {
+  description = "Nom d'une instance COS existante réutilisée par tous les scénarios ; vide = créée (et détruite) par le scénario."
+  type        = string
+  default     = ""
+}
+
 variable "prefix" {
   description = "Préfixe des descriptions : identifie le lanceur (user, pipeline) dans l'orchestrateur."
   type        = string

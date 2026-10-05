@@ -191,7 +191,9 @@ Le principe est celui du `test.tf` d'avant : un `apply`, on regarde, on modifie,
 `apply`, puis un `destroy`. La différence : un fichier décrit cette séquence, tofu la déroule
 seul et vérifie des conditions à chaque étape.
 
-- `terraform/main.tf` est une configuration normale : une instance COS, un bucket par clé de
+- `terraform/main.tf` est une configuration normale : une instance COS (celle de
+  `cos_instance` dans le tfvars, réutilisée par tous les scénarios ; créée et détruite
+  seulement par `10_cos`), un bucket par clé de
   la map `buckets`, et un backup vault seulement si un bucket demande une sauvegarde
   (`backup_retention_days`) ou si `with_vault = true`. Les scénarios rétention et object lock
   n'ont donc pas de vault. Le payload d'un bucket est construit
@@ -242,7 +244,7 @@ Déroulé d'un `tofu test` :
 
 | Fichier | Couvre | Runs |
 |---|---|---|
-| `10_cos.tftest.hcl` | instance COS | create → destroy |
+| `10_cos.tftest.hcl` | instance COS | create → destroy (seul scénario qui en crée une ; les autres réutilisent `cos_instance` du tfvars) |
 | `20_bucket_basic.tftest.hcl` | bucket standard | create → update versioning → update custom permissions → destroy |
 | `21_bucket_storage_classes.tftest.hcl` | vault, cold, smart | create ×3 en un run → destroy |
 | `30_bucket_retention.tftest.hcl` | rétention jours, années et format historique `default` / `minimum` / `maximum` (ADR 0001) | create ×3 → update des bornes en jours → destroy |
