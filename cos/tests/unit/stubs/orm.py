@@ -65,6 +65,7 @@ Cos = _model("Cos", "subscription_id", "context", "workspace")
 Workspace = _model("Workspace", "bucket_subscription_id", "workspace_id")
 BackupVault = _model("BackupVault", "subscription_id", "name")
 BackupVaultRestore = _model("BackupVaultRestore", "id", "subscription_id", "status")
+Context = _model("Context", "id", "realm", "app_code")
 
 
 class Action(str, Enum):

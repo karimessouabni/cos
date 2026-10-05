@@ -107,6 +107,7 @@ for _model_name, _model_cls in (
     ("Workspace", orm_stubs.Workspace),
     ("BackupVault", orm_stubs.BackupVault),
     ("BackupVaultRestore", orm_stubs.BackupVaultRestore),
+    ("Context", orm_stubs.Context),
 ):
     _install_forced(
         f"cos_service.models.{_model_name}",

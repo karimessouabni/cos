@@ -315,3 +315,13 @@ class TestUpdates:
 
         (statement,) = executed(session)
         assert statement.values_ == {"action": Action.DESTROY.value, "status": Status.INPROGRESS.value}
+
+
+def test_every_model_named_by_a_relationship_is_loaded_with_the_service():
+    """Cos.context = relationship("Context") : le registre SQLAlchemy doit connaître
+    Context avant la première requête, même quand seul bucketService est importé
+    (DAG clean). Sans cet import, le mapper levait InvalidRequestError en production."""
+    import sys
+
+    assert "cos_service.models.Context" in sys.modules
+    assert svc.Context is sys.modules["cos_service.models.Context"].Context

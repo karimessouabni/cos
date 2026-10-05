@@ -26,6 +26,11 @@ from bp2i_airflow_library.dependencies import SASession
 from cos_service.models.Bucket import Bucket
 from cos_service.models.Cos import Cos
 from cos_service.models.Workspace import Workspace
+# Cos.context est une relationship("Context") par nom : SQLAlchemy ne la résout
+# qu'à la première requête, et seulement si la classe Context est chargée dans
+# le registre. Un DAG qui n'importe que bucketService (clean) plantait sinon :
+# "expression 'Context' failed to locate a name".
+from cos_service.models.Context import Context  # noqa: F401
 from cos_service.schemas.action import Action
 from cos_service.schemas.status import Status
 from cos_service.schemas.subscription_status import SubscriptionStatus
