@@ -107,6 +107,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -203,6 +204,11 @@ terraform {
 # c'est le seul moyen de voir ce qui se passe.
 LOGS_DIR = "logs"
 LOGS_KEPT = 20  # journaux gardés par dossier, les plus anciens sont supprimés
+# --parallel : un processus `tofu test -filter=<fichier>` par scénario. tofu
+# enchaîne les fichiers un par un ; les scénarios étant indépendants (instance
+# COS partagée, buckets distincts), on les lance en parallèle. Les journaux
+# sont gardés plus longtemps : un lancement en produit un par scénario.
+PARALLEL_LOGS_KEPT = 60
 TF_LOG_LEVELS = ("trace", "debug", "info", "warn", "error")
 DEFAULT_JOURNAL_LEVEL = "debug"
 DEFAULT_FOLLOW_LEVEL = "info"
@@ -1082,6 +1088,93 @@ def follow_journal(path: str, level: str, stop: threading.Event,
         show(pending)
 
 
+def scenario_files(cwd: str, command: Sequence[str]) -> list[str]:
+    """Fichiers de scénario d'un `test` : ceux des -filter= de la commande,
+    sinon tous les tests/*.tftest.hcl de <cwd>."""
+    filters = [a[len("-filter="):] for a in command if a.startswith("-filter=")]
+    if filters:
+        return filters
+    tests_dir = os.path.join(cwd, "tests")
+    try:
+        names = sorted(f for f in os.listdir(tests_dir) if f.endswith(".tftest.hcl"))
+    except OSError:
+        return []
+    return [os.path.join("tests", name) for name in names]
+
+
+def _run_scenario(command: Sequence[str], cwd: str, env: dict[str, str], log_path: str) -> int:
+    """Un `tofu test` dont toute la sortie va dans log_path."""
+    if not shutil.which(TERRAFORM_BIN):
+        raise CliExit(EXIT_TERRAFORM_FAILED, f"{TERRAFORM_BIN} introuvable dans le PATH : installer OpenTofu "
+                                             "(brew install opentofu, voir README.md)")
+    command = [TERRAFORM_BIN, *command]
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write("$ " + " ".join(shlex.quote(a) for a in command) + "\n")
+        fh.flush()
+        try:
+            return subprocess.call(command, cwd=cwd, env=env, stdout=fh, stderr=subprocess.STDOUT)
+        except OSError as exc:
+            fh.write(f"{exc}\n")
+            return EXIT_TERRAFORM_FAILED
+
+
+def _scenario_summary(log_path: str) -> str:
+    """Dernière ligne « Success! … » / « Failure! … » de tofu, sinon la dernière ligne."""
+    try:
+        lines = [line.rstrip() for line in open(log_path, encoding="utf-8", errors="replace") if line.strip()]
+    except OSError:
+        return ""
+    verdicts = [line for line in lines if line.lstrip().startswith(("Success!", "Failure!"))]
+    return (verdicts or lines or [""])[-1].strip()
+
+
+def run_tests_parallel(command: Sequence[str], cwd: str, env: dict[str, str], workers: int, env_name: str,
+                       tf_log: str | None = None, runner: Callable[..., int] | None = None,
+                       now: float | None = None) -> int:
+    """Lance `tofu test` une fois par fichier de scénario, `workers` à la fois,
+    chaque sortie dans <cwd>/logs/<horodatage>-<env>-<scénario>.log, et
+    résume. Code de sortie : 0 si tout passe, sinon celui du premier échec."""
+    runner = runner or _run_scenario
+    files = scenario_files(cwd, command)
+    if not files:
+        raise CliExit(EXIT_USAGE, f"aucun fichier de scénario dans {os.path.join(cwd, 'tests')}")
+    base = [a for a in command if not a.startswith("-filter=")]
+    if "-no-color" not in base:
+        base.append("-no-color")
+    workers = max(1, min(workers, len(files)))
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+    directory = os.path.join(cwd, LOGS_DIR)
+    os.makedirs(directory, exist_ok=True)
+    _log(f"{len(files)} scénario(s), {workers} en parallèle ; journaux dans {directory}/{stamp}-{env_name}-*.log")
+
+    def one(path: str) -> tuple[str, int, float, str]:
+        name = re.sub(r"\.tftest\.hcl$", "", os.path.basename(path))
+        log_path = os.path.join(directory, f"{stamp}-{env_name}-{re.sub(r'[^A-Za-z0-9]+', '_', name)}.log")
+        os.close(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))
+        scenario_env = dict(env)
+        if tf_log:
+            scenario_env.update(TF_LOG=tf_log, TF_LOG_PATH=log_path)
+        _log(f"  ▶ {name}")
+        started = time.monotonic()
+        code = runner([*base, f"-filter={path}"], cwd, scenario_env, log_path)
+        elapsed = time.monotonic() - started
+        _log(f"  {'✔' if code == 0 else '✘'} {name} ({_duration(elapsed)}) : {_scenario_summary(log_path) or f'code {code}'}")
+        return name, code, elapsed, log_path
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(one, files))
+
+    for name in sorted(f for f in os.listdir(directory) if f.endswith(".log"))[:-PARALLEL_LOGS_KEPT]:
+        try:
+            os.remove(os.path.join(directory, name))
+        except OSError:
+            pass
+    failed = [r for r in results if r[1] != 0]
+    _log(f"\n{len(results) - len(failed)} scénario(s) OK, {len(failed)} en échec"
+         + (" :\n" + "\n".join(f"  ✘ {n} -> {p}" for n, _, _, p in failed) if failed else "."))
+    return failed[0][1] if failed else EXIT_OK
+
+
 def run_with_journal(command: Sequence[str], cwd: str, env: dict[str, str], tf_log: str | None, follow: str,
                      env_name: str, run: Callable[..., int] | None = None) -> int:
     """Lance tofu avec son journal dans un fichier de <cwd>/logs/ et, sauf
@@ -1591,6 +1684,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                 f"({', '.join(TF_LOG_LEVELS)}, {FOLLOW_OFF} ; défaut: {DEFAULT_FOLLOW_LEVEL})")
     terraform.add_argument("--no-log-file", action="store_true",
                            help="avec --run : pas de journal ; TF_LOG (--tf-log) sort alors sur le terminal")
+    terraform.add_argument("--parallel", nargs="?", const=0, default=1, type=int, metavar="N",
+                           help="avec --run test : un processus tofu par fichier de scénario, N à la fois "
+                                "(sans N : tous en même temps) ; chaque scénario a son journal dans logs/")
 
     proxy = parser.add_argument_group("proxy (utilisé pour les appels Vault et exporté pour terraform)")
     proxy.add_argument("--proxy", metavar="HOST:PORT", default=None,
@@ -1829,6 +1925,12 @@ def main(argv: list[str] | None = None) -> int:
                     raise CliExit(EXIT_TERRAFORM_FAILED, f"{TERRAFORM_BIN} {'.'.join(map(str, version))} : "
                                                          "`tofu test` demande OpenTofu 1.6 au minimum.")
                 command = adapt_test_filter(command, args.dir, version)
+                if args.parallel != 1:
+                    if version is not None and version < (1, 7):
+                        raise CliExit(EXIT_TERRAFORM_FAILED, f"--parallel demande {TERRAFORM_BIN} >= 1.7 "
+                                                             "(vrai -filter) ; en 1.6, lancer sans --parallel.")
+                    workers = args.parallel if args.parallel > 0 else len(scenario_files(args.dir, command))
+                    return run_tests_parallel(command, args.dir, env, workers, args.env, args.tf_log)
             if args.no_log_file:
                 return run_terraform(command, args.dir, env, to_stderr=False)
             return run_with_journal(command, args.dir, env, args.tf_log, args.follow, args.env)

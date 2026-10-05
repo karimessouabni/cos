@@ -905,6 +905,38 @@ class MainTest(VaultServerTest):
         self.assertEqual(run.call_args.args[2]["TF_LOG"], "trace")  # comme avant : sur le terminal
         self.assertFalse(os.path.exists(os.path.join(tests_dir, "logs")))
 
+    def test_run_tests_parallel(self):
+        root = tempfile.mkdtemp(prefix="tfroot-")
+        os.makedirs(os.path.join(root, "tests"))
+        for name in ("10_a", "20_b", "30_c"):
+            open(os.path.join(root, "tests", f"{name}.tftest.hcl"), "w").write("")
+        seen = []
+
+        def fake_runner(command, cwd, env, log_path):
+            seen.append((command[-1], env.get("TF_LOG")))
+            ok = "20_b" not in command[-1]
+            open(log_path, "a").write("plan...\n" + ("Success! 3 passed, 0 failed.\n" if ok else "Failure! 1 passed, 1 failed.\n"))
+            return 0 if ok else 1
+
+        code = te.run_tests_parallel(["test", "-var-file=envs/int.tfvars"], root, {"X": "1"}, workers=0,
+                                     env_name="int", tf_log="debug", runner=fake_runner, now=0)
+        self.assertEqual(code, 1)
+        self.assertEqual(sorted(seen), [("-filter=tests/10_a.tftest.hcl", "debug"), ("-filter=tests/20_b.tftest.hcl", "debug"),
+                                        ("-filter=tests/30_c.tftest.hcl", "debug")])
+        logs = sorted(os.listdir(os.path.join(root, "logs")))
+        self.assertEqual(len(logs), 3)
+        self.assertTrue(all("-int-" in n and n.endswith(".log") for n in logs))
+        # un seul fichier demandé : un seul processus, et -no-color ajouté
+        seen.clear()
+        code = te.run_tests_parallel(["test", "-filter=tests/30_c.tftest.hcl"], root, {}, workers=4,
+                                     env_name="int", runner=fake_runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(te.scenario_files(root, ["test"]), ["tests/10_a.tftest.hcl", "tests/20_b.tftest.hcl", "tests/30_c.tftest.hcl"])
+        self.assertEqual(te.parse_args(["--parallel"]).parallel, 0)
+        self.assertEqual(te.parse_args(["--parallel", "3"]).parallel, 3)
+        self.assertEqual(te.parse_args([]).parallel, 1)
+
     def test_run_test_in_terraform_root(self):
         root = tempfile.mkdtemp(prefix="tfroot-")
         os.makedirs(os.path.join(root, "envs"))
