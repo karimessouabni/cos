@@ -399,6 +399,7 @@ Journal complet : .../terraform/logs/20261002-140200-int-test.log
 | `flag provided but not defined: -filter` | tofu 1.6 | le script émule ; ou passer en 1.7+ |
 | `tofu 1.5.x : tofu test demande OpenTofu 1.6 au minimum` | binaire trop ancien | installer OpenTofu ≥ 1.6 puis `--reinit` |
 | `tofu introuvable dans le PATH` | OpenTofu non installé | section 2 |
+| le log `TF_LOG=debug` montre `"retention": {"retention_enabled": true}` alors que le run donne `minimum_days`, `default_days`… | le **provider** filtre `payload.retention` sur le schéma qu'il connaît (celui du contrat `BucketRetention` publié par le service) ; une version du provider ou du service qui ne connaît pas les champs `*_days` / `*_years` les supprime sans erreur, et le DAG ne reçoit que le flag | `tofu providers schema -json \| jq '.provider_schemas[].resource_schemas.orchestrator_subscription_cosbucket_v1'` et chercher `retention` : si les attributs sont figés sans `*_days`, il faut un provider (ou un déploiement du service INT) qui expose le nouveau contrat ; ce n'est pas un problème de `main.tf` |
 
 Commandes de contrôle manuelles :
 
