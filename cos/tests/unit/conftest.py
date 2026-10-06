@@ -170,6 +170,7 @@ SERVICE_MODULES = (
     "bucketService",
     "ibm_iam_service",
     "lifecyclePolicyRuleService",
+    "quarantine_service",
     "restore_service",
     "schematics_service",
     "vault_service",

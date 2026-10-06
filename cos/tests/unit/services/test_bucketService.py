@@ -325,3 +325,42 @@ def test_every_model_named_by_a_relationship_is_loaded_with_the_service():
 
     assert "cos_service.models.Context" in sys.modules
     assert svc.Context is sys.modules["cos_service.models.Context"].Context
+
+
+# --- clean : programmation et transitions atomiques -----------------------------------
+
+class TestCleanScheduling:
+    def test_schedule_sets_status_and_both_dates(self, session):
+        from datetime import datetime, timezone
+
+        from cos_service.schemas.clean_status import CleanStatus
+
+        requested = datetime(2026, 10, 6, 10, 0, tzinfo=timezone.utc)
+        planned = datetime(2026, 10, 13, 10, 0, tzinfo=timezone.utc)
+
+        svc.schedule_bucket_clean("sub-1", requested, planned, session)
+
+        statement = executed(session)[0]
+        assert statement.table is Bucket
+        assert statement.values_ == {
+            "clean_status": CleanStatus.SCHEDULED.value,
+            "clean_requested_at": requested,
+            "clean_execute_at": planned,
+        }
+        assert statement.where_ == ("==", "subscription_id", "sub-1")
+        session.commit.assert_called_once()
+
+    @pytest.mark.parametrize("rowcount, expected", [(1, True), (0, False)])
+    def test_transition_is_conditional_on_the_current_status(self, session, rowcount, expected):
+        """Une seule mise à jour conditionnelle : c'est elle qui départage l'exécution
+        du clean et son annulation quand elles arrivent en même temps."""
+        from cos_service.schemas.clean_status import CleanStatus
+
+        session.execute.return_value.rowcount = rowcount
+
+        assert svc.transition_bucket_clean("sub-1", CleanStatus.SCHEDULED, CleanStatus.INPROGRESS, session) is expected
+
+        statement = executed(session)[0]
+        assert statement.values_ == {"clean_status": CleanStatus.INPROGRESS.value}
+        assert statement.wheres == [("==", "subscription_id", "sub-1"), ("==", "clean_status", "scheduled")]
+        session.commit.assert_called_once()

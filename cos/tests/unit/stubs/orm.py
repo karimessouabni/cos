@@ -60,6 +60,7 @@ def _model(name: str, *columns: str) -> type:
 Bucket = _model(
     "Bucket", "subscription_id", "name", "has_expiration_rule", "expiration_rule_created_at",
     "cos", "workspace", "backup_vault",
+    "clean_status", "clean_requested_at", "clean_execute_at",
 )
 Cos = _model("Cos", "subscription_id", "context", "workspace")
 Workspace = _model("Workspace", "bucket_subscription_id", "workspace_id")
@@ -91,13 +92,15 @@ class FakeUpdate:
         self.table = table
         self.values_ = {}
         self.where_ = None
+        self.wheres = []
 
     def values(self, **kwargs):
         self.values_.update(kwargs)
         return self
 
     def where(self, condition):
-        self.where_ = condition
+        self.where_ = condition  # dernière condition (compatibilité des tests existants)
+        self.wheres.append(condition)
         return self
 
 

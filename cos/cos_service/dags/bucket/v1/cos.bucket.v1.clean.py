@@ -1,13 +1,26 @@
-"""DAG cos.bucket.v1.clean : vide un bucket par une règle d'expiration, puis la retire.
+"""DAG cos.bucket.v1.clean : vide un bucket par une règle d'expiration, après une
+période de grâce pendant laquelle il est en quarantaine.
 
-Corrections par rapport au fichier d'entreprise : la règle n'est retirée que si
-elle a été posée (un bucket déjà vide garde sa configuration de cycle de vie),
-les buckets à rétention / object lock sont refusés (leurs objets ne peuvent pas
-expirer), le sensor a un timeout explicite, le ``success`` est posé après le
-retrait de la règle, un 404 au retrait compte comme retiré, toute exception
-(pas seulement S3) passe le clean en ``failed``, ``in_progress`` n'est posé
-qu'une fois, échec factorisé dans ``_mark_failed``, et le sensor attend la
-sauvegarde de la règle en base (qui n'était reliée à rien).
+Déroulé (docs/adr/0003-periode-de-grace-du-clean.md) :
+
+1. validation, puis ``clean_status = scheduled`` avec la date d'exécution ;
+2. quarantaine : règle CBR posée par le Terraform du workspace du bucket, les
+   clients (URL publique) reçoivent 403, l'orchestrateur garde l'accès ;
+3. attente différée jusqu'à la date (``DateTimeSensorAsync``, aucun worker occupé) ;
+4. décision atomique en base : ``scheduled -> in_progress``. Si le clean a été
+   annulé entre-temps (``cos.bucket.v1.cancel_clean``), la demande est déclinée
+   et rien n'est supprimé ;
+5. vidage : règle d'expiration à 1 jour, sensor jusqu'au vide, retrait de la règle ;
+6. levée de la quarantaine, ``clean_status = success``.
+
+Aucune configuration destructrice n'est posée avant l'étape 5 : une annulation
+pendant la grâce ne laisse rien derrière elle.
+
+Corrections par rapport au fichier d'entreprise d'origine : la règle n'est
+retirée que si elle a été posée, les buckets à rétention / object lock sont
+refusés avec un message actionnable, le sensor a un timeout explicite, un 404
+au retrait compte comme retiré, toute exception passe le clean en ``failed``,
+le sensor attend la sauvegarde de la règle en base.
 """
 from bp2i_airflow_library import add_project_to_path
 
@@ -19,19 +32,23 @@ except ImportError:
     AIRFLOW_V_3_0_PLUS = False
 
 import logging  # noqa: E402 - après add_project_to_path()
+from datetime import datetime, timedelta, timezone  # noqa: E402 - après add_project_to_path()
 from pathlib import Path  # noqa: E402 - après add_project_to_path()
 
 from airflow.sensors.base import PokeReturnValue  # noqa: E402 - après add_project_to_path()
+from airflow.sensors.date_time import DateTimeSensorAsync  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.config import ENVIRONMENT  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.connectors.reader import ReaderConnector  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.dag import product_action, step  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_project_to_path()
     SASession,
+    SchematicsBackend,
     StateManager,
     Vault,
     depends,
     payload_dependency,
     reader_dependency,
+    smart_schematics_backend_dependency,
     sqlalchemy_session_dependency,
     state_manager_dependency,
     vault_dependency,
@@ -39,9 +56,15 @@ from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_proje
 from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.schemas import ProductActionConfig, ProductActionPayload  # noqa: E402 - après add_project_to_path()
 
-from cos_service.schemas.status import Status  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.clean_status import CleanStatus  # noqa: E402 - après add_project_to_path()
 
 logger = logging.getLogger(__name__)
+
+# Période de grâce avant toute suppression. Réglable (Airflow Variable
+# cos_clean_grace_days, sinon $COS_CLEAN_GRACE_DAYS) pour les tests toolchain
+# en INT, qui ne peuvent pas attendre sept jours.
+GRACE_PERIOD_SETTING = "cos_clean_grace_days"
+DEFAULT_GRACE_PERIOD_DAYS = 7
 
 # Règle d'expiration posée pour vider le bucket : tout le bucket (préfixe vide),
 # objets courants et versions non courantes expirés après 1 jour.
@@ -61,11 +84,17 @@ class BucketCleanPayload(ProductActionPayload):
     pass
 
 
+def grace_period() -> timedelta:
+    from cos_service.services.schematics_service import setting
+
+    return timedelta(days=int(setting(GRACE_PERIOD_SETTING, str(DEFAULT_GRACE_PERIOD_DAYS))))
+
+
 def _mark_failed(subscription_id: str, state_manager: StateManager, session: SASession) -> None:
     from cos_service.services.bucketService import update_bucket_clean_status
 
-    update_bucket_clean_status(subscription_id, Status.FAILED, session)
-    state_manager.push_state({"clean_status": Status.FAILED.value})
+    update_bucket_clean_status(subscription_id, CleanStatus.FAILED, session)
+    state_manager.push_state({"clean_status": CleanStatus.FAILED.value})
 
 
 def _is_not_found(exc: Exception) -> bool:
@@ -94,15 +123,10 @@ def bucket_clean() -> None:
     @step
     def validate_bucket(
         session: SASession = depends(sqlalchemy_session_dependency),
-        state_manager: StateManager = depends(state_manager_dependency),
         payload: BucketCleanPayload = depends(payload_dependency),
     ) -> dict:
-        """Refuse ce qui ne peut pas être nettoyé, puis pose ``clean_status = in_progress``
-        (une seule fois : les étapes suivantes ne le reposent pas)."""
-        from cos_service.services.bucketService import (
-            get_bucket_by_sub_id,
-            update_bucket_clean_status,
-        )
+        """Refuse ce qui ne peut pas être nettoyé. Ne change rien en base."""
+        from cos_service.services.bucketService import get_bucket_by_sub_id
 
         bucket = get_bucket_by_sub_id(session, payload.subscription_id)
 
@@ -110,22 +134,102 @@ def bucket_clean() -> None:
             raise DeclineDemandException(
                 f"the bucket doesn't exist or not fully created for the sub id {payload.subscription_id}"
             )
-        if bucket["clean_status"] == Status.INPROGRESS.value:
-            raise DeclineDemandException("the clean action is already in progress...")
+        if bucket["clean_status"] in [s.value for s in CleanStatus.busy()]:
+            raise DeclineDemandException(
+                f"a clean of the bucket {bucket['name']} is already {bucket['clean_status']}"
+                + (f" (execution planned at {bucket['clean_execute_at']}, cancel it first)"
+                   if bucket.get("clean_execute_at") else "")
+            )
         if _is_locked(bucket):
             raise DeclineDemandException(
-                f"the bucket {bucket['name']} has a retention or object lock: "
-                "locked objects cannot expire, it cannot be cleaned"
+                f"the bucket {bucket['name']} has a retention policy or an object lock: locked objects "
+                "cannot be deleted before their retention ends, so the bucket cannot be cleaned. "
+                "Delete the unlocked objects yourself, or request the clean again once every "
+                "retention has expired."
             )
-
-        update_bucket_clean_status(payload.subscription_id, Status.INPROGRESS, session)
-        state_manager.push_state({"clean_status": Status.INPROGRESS.value})
+        if bucket.get("workspace") is None or bucket["workspace"].get("workspace_id") is None:
+            raise DeclineDemandException(
+                f"the bucket {bucket['name']} has no Terraform workspace: the quarantine cannot be set"
+            )
 
         return dict(bucket)
 
     @step
+    def schedule_clean(
+        bucket: dict,
+        state_manager: StateManager = depends(state_manager_dependency),
+        session: SASession = depends(sqlalchemy_session_dependency),
+    ) -> str:
+        """``clean_status = scheduled`` avec la date d'exécution ; la renvoie (ISO 8601, UTC)
+        pour le sensor. Le client la voit dans le state."""
+        from cos_service.services.bucketService import schedule_bucket_clean
+
+        requested_at = datetime.now(timezone.utc)
+        execute_at = requested_at + grace_period()
+        schedule_bucket_clean(bucket["subscription_id"], requested_at, execute_at, session)
+        state_manager.push_state({
+            "clean_status": CleanStatus.SCHEDULED.value,
+            "clean_requested_at": requested_at.isoformat(),
+            "clean_execute_at": execute_at.isoformat(),
+        })
+        logger.info("clean of bucket %s scheduled at %s", bucket["name"], execute_at.isoformat())
+        return execute_at.isoformat()
+
+    @step
+    def quarantine_bucket(
+        bucket: dict,
+        execute_at: str,
+        payload: BucketCleanPayload = depends(payload_dependency),
+        tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
+        vault: Vault = depends(vault_dependency),
+        reader: ReaderConnector = depends(reader_dependency),
+        state_manager: StateManager = depends(state_manager_dependency),
+        session: SASession = depends(sqlalchemy_session_dependency),
+    ) -> bool:
+        """Pose la règle CBR via le workspace du bucket. ``execute_at`` ordonne l'étape
+        après la programmation. Vrai une fois la quarantaine en place."""
+        from cos_service.services.quarantine_service import set_bucket_quarantine
+
+        try:
+            set_bucket_quarantine(
+                bucket=bucket, enabled=True, payload=payload,
+                description=state_manager.get_subscription().description,
+                tf=tf, vault=vault, reader=reader, session=session,
+            )
+        except Exception:
+            _mark_failed(bucket["subscription_id"], state_manager, session)
+            raise
+        state_manager.push_state({"quarantine": True})
+        return True
+
+    @step
+    def claim_clean(
+        bucket: dict,
+        quarantined: bool,
+        state_manager: StateManager = depends(state_manager_dependency),
+        session: SASession = depends(sqlalchemy_session_dependency),
+    ) -> bool:
+        """Fin de la grâce : ``scheduled -> in_progress`` en une mise à jour
+        conditionnelle. Si elle ne passe pas, le clean a été annulé entre-temps :
+        la demande est déclinée, rien n'est supprimé (la quarantaine a été levée
+        par l'annulation)."""
+        from cos_service.services.bucketService import get_bucket_by_sub_id, transition_bucket_clean
+
+        if not transition_bucket_clean(
+            bucket["subscription_id"], CleanStatus.SCHEDULED, CleanStatus.INPROGRESS, session
+        ):
+            current = get_bucket_by_sub_id(session, bucket["subscription_id"]) or {}
+            raise DeclineDemandException(
+                f"the clean of the bucket {bucket['name']} was cancelled during the grace period "
+                f"(status: {current.get('clean_status')}), nothing was deleted"
+            )
+        state_manager.push_state({"clean_status": CleanStatus.INPROGRESS.value})
+        return True
+
+    @step
     def get_cos_api_key(
         bucket: dict,
+        claimed: bool,
         session: SASession = depends(sqlalchemy_session_dependency),
         state_manager: StateManager = depends(state_manager_dependency),
         reader: ReaderConnector = depends(reader_dependency),
@@ -192,10 +296,9 @@ def bucket_clean() -> None:
 
         Le sensor consomme ce résultat (et non le drapeau d'origine) : c'est ce
         qui fait de la sauvegarde une étape amont, Airflow ne déduisant l'ordre
-        que des valeurs consommées (sans ça elle échouait dans son coin et le
-        clean continuait). Un mot-clé supplémentaire sur le sensor est refusé
-        par la bibliothèque ("unexpected keyword"), d'où le passage par le
-        drapeau existant."""
+        que des valeurs consommées. Un mot-clé supplémentaire sur un
+        ``step.sensor`` est refusé par la bibliothèque ("unexpected keyword"),
+        d'où le passage par le drapeau existant."""
         from cos_service.services.lifecyclePolicyRuleService import (
             complete_lifecycle_policy_rule_creation,
             disable_lifecycle_policy_rules_by_bucket_sub_id,
@@ -212,7 +315,7 @@ def bucket_clean() -> None:
         except Exception:
             _mark_failed(bucket["subscription_id"], state_manager, session)
             raise
-        return True
+        return is_expiration_created
 
     @step.sensor(
         exponential_backoff=False,
@@ -251,43 +354,87 @@ def bucket_clean() -> None:
         state_manager: StateManager = depends(state_manager_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> bool:
-        """Retire la règle une fois le bucket vide et pose ``clean_status = success``.
-
-        Seulement si une règle a été posée : ``check_clean_done`` (résultat du
-        sensor) est toujours vrai et ne sert qu'à ordonner les étapes. Un bucket
-        déjà vide garde ainsi sa configuration de cycle de vie. Vrai si la règle
-        est partie (ou avait déjà disparu : 404).
-        """
-        from cos_service.services.bucketService import delete_lifecycle_policy, update_bucket_clean_status
+        """Retire la règle une fois le bucket vide, seulement si elle a été posée :
+        un bucket déjà vide garde sa configuration de cycle de vie. ``check_clean_done``
+        (résultat du sensor) est toujours vrai et ne sert qu'à ordonner les étapes.
+        Vrai si la règle est partie (ou avait déjà disparu : 404)."""
+        from cos_service.services.bucketService import delete_lifecycle_policy
         from cos_service.services.ibm_iam_service import get_iam_access_token
 
-        if is_expiration_created:
-            try:
-                access_token = get_iam_access_token(api_key)
-                delete_lifecycle_policy(access_token, bucket)
-            except Exception as exc:
-                if not _is_not_found(exc):
-                    _mark_failed(bucket["subscription_id"], state_manager, session)
-                    raise
-                logger.info("lifecycle policy of %s already gone (404)", bucket["name"])
-        update_bucket_clean_status(bucket["subscription_id"], Status.SUCCESS, session)
-        state_manager.push_state({"clean_status": Status.SUCCESS.value})
-        return is_expiration_created
+        if not is_expiration_created:
+            return False
+        try:
+            access_token = get_iam_access_token(api_key)
+            delete_lifecycle_policy(access_token, bucket)
+        except Exception as exc:
+            if not _is_not_found(exc):
+                _mark_failed(bucket["subscription_id"], state_manager, session)
+                raise
+            logger.info("lifecycle policy of %s already gone (404)", bucket["name"])
+        return True
 
     @step
     def save_delete_expiration_rule_in_db(
         is_expiration_deleted: bool,
         bucket: dict,
         payload: BucketCleanPayload = depends(payload_dependency),
+        state_manager: StateManager = depends(state_manager_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
-    ) -> None:
+    ) -> bool:
         from cos_service.services.lifecyclePolicyRuleService import disable_lifecycle_policy_rules_by_bucket_sub_id
 
-        if is_expiration_deleted:
+        if not is_expiration_deleted:
+            return True
+        try:
             disable_lifecycle_policy_rules_by_bucket_sub_id(bucket, payload.requestor, session)
+        except Exception:
+            _mark_failed(bucket["subscription_id"], state_manager, session)
+            raise
+        return True
+
+    @step
+    def lift_quarantine(
+        bucket: dict,
+        rules_saved: bool,
+        payload: BucketCleanPayload = depends(payload_dependency),
+        tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
+        vault: Vault = depends(vault_dependency),
+        reader: ReaderConnector = depends(reader_dependency),
+        state_manager: StateManager = depends(state_manager_dependency),
+        session: SASession = depends(sqlalchemy_session_dependency),
+    ) -> bool:
+        """Lève la quarantaine puis ``clean_status = success``. En cas d'échec le
+        bucket reste en quarantaine et ``failed`` : ``cancel_clean`` la lève."""
+        from cos_service.services.bucketService import update_bucket_clean_status
+        from cos_service.services.quarantine_service import set_bucket_quarantine
+
+        try:
+            set_bucket_quarantine(
+                bucket=bucket, enabled=False, payload=payload,
+                description=state_manager.get_subscription().description,
+                tf=tf, vault=vault, reader=reader, session=session,
+            )
+        except Exception:
+            _mark_failed(bucket["subscription_id"], state_manager, session)
+            raise
+        update_bucket_clean_status(bucket["subscription_id"], CleanStatus.SUCCESS, session)
+        state_manager.push_state({"clean_status": CleanStatus.SUCCESS.value, "quarantine": False})
+        return True
 
     bucket = validate_bucket()
-    api_key = get_cos_api_key(bucket=bucket)
+    execute_at = schedule_clean(bucket=bucket)
+    quarantined = quarantine_bucket(bucket=bucket, execute_at=execute_at)
+
+    wait = DateTimeSensorAsync(
+        task_id="wait_for_grace_period",
+        target_time="{{ ti.xcom_pull(task_ids='%s') }}" % execute_at.operator.task_id,
+    )
+    quarantined >> wait
+
+    claimed = claim_clean(bucket=bucket, quarantined=quarantined)
+    wait >> claimed
+
+    api_key = get_cos_api_key(bucket=bucket, claimed=claimed)
     is_bucket_empty = is_bucket_empty(bucket=bucket, api_key=api_key)
     is_expiration_created = create_expiration_rule(api_key=api_key, bucket=bucket, is_bucket_empty=is_bucket_empty)
     # Le sensor consomme le drapeau renvoyé par la sauvegarde en base, pas celui
@@ -297,7 +444,8 @@ def bucket_clean() -> None:
     is_expiration_deleted = delete_expiration_rule(
         bucket=bucket, api_key=api_key, is_expiration_created=is_expiration_created, check_clean_done=check_clean_done
     )
-    save_delete_expiration_rule_in_db(is_expiration_deleted=is_expiration_deleted, bucket=bucket)
+    rules_saved = save_delete_expiration_rule_in_db(is_expiration_deleted=is_expiration_deleted, bucket=bucket)
+    lift_quarantine(bucket=bucket, rules_saved=rules_saved)
 
 
 bucket_clean()

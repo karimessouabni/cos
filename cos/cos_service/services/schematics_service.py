@@ -68,7 +68,7 @@ class EnvSettings(NamedTuple):
     tf_log: str
 
 
-def _setting(name: str, default: str) -> str:
+def setting(name: str, default: str) -> str:
     """Valeur d'un réglage : Airflow Variable, sinon variable d'environnement, sinon défaut."""
     fallback = os.environ.get(name.upper(), default)
     try:
@@ -97,7 +97,7 @@ def settings_for(orchestrator_env, product_branch: str | None = None) -> EnvSett
             f"Unknown orchestrator environment '{key}', expected one of {sorted(DEFAULT_BRANCHES)}"
         )
     expected = DEFAULT_BRANCHES[key]
-    branch = product_branch or _setting(BRANCH_SETTING, expected)
+    branch = product_branch or setting(BRANCH_SETTING, expected)
     if key != OrchestratorEnvironment.INT.value and branch != expected:
         raise ValueError(
             f"Environment '{key}' only runs Terraform from branch '{expected}', got '{branch}'"
@@ -105,7 +105,7 @@ def settings_for(orchestrator_env, product_branch: str | None = None) -> EnvSett
     return EnvSettings(
         tags=[ENV_TAGS[key], "agent:ga", "version:1.0"],
         branch=branch,
-        tf_log=_setting(TF_LOG_SETTING, DEFAULT_TF_LOG[key]),
+        tf_log=setting(TF_LOG_SETTING, DEFAULT_TF_LOG[key]),
     )
 
 
@@ -201,3 +201,6 @@ def run_workspace(tf: SchematicsBackend, workspace_id: str) -> dict:
     if not outputs or not outputs[0].output_values:
         raise RuntimeError(f"workspace {workspace_id} produced no Terraform outputs after apply")
     return dict(outputs[0].output_values[0])
+
+
+_setting = setting  # ancien nom, gardé pour les tests et les appels existants

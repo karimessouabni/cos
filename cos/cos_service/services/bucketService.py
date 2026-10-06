@@ -32,6 +32,7 @@ from cos_service.models.Workspace import Workspace
 # "expression 'Context' failed to locate a name".
 from cos_service.models.Context import Context  # noqa: F401
 from cos_service.schemas.action import Action
+from cos_service.schemas.clean_status import CleanStatus
 from cos_service.schemas.status import Status
 from cos_service.schemas.subscription_status import SubscriptionStatus
 from cos_service.services.schematics_service import TF_VERSION_LABEL
@@ -315,13 +316,48 @@ def update_bucket_status(subscription_id: str, subscription_status: Subscription
     )
 
 
-def update_bucket_clean_status(subscription_id: str, clean_status: Status, session: SASession) -> None:
+def update_bucket_clean_status(subscription_id: str, clean_status: Status | CleanStatus, session: SASession) -> None:
     _execute(
         session,
         update(Bucket)
         .values(clean_status=clean_status.value)
         .where(Bucket.subscription_id == subscription_id),
     )
+
+
+def schedule_bucket_clean(
+    subscription_id: str, requested_at: datetime, execute_at: datetime, session: SASession
+) -> None:
+    """Programme le clean : ``scheduled`` avec ses deux dates (période de grâce)."""
+    _execute(
+        session,
+        update(Bucket)
+        .values(
+            clean_status=CleanStatus.SCHEDULED.value,
+            clean_requested_at=requested_at,
+            clean_execute_at=execute_at,
+        )
+        .where(Bucket.subscription_id == subscription_id),
+    )
+
+
+def transition_bucket_clean(
+    subscription_id: str, from_status: CleanStatus, to_status: CleanStatus, session: SASession
+) -> bool:
+    """Passe ``clean_status`` de ``from_status`` à ``to_status`` en une seule
+    mise à jour conditionnelle. Vrai si la ligne a changé.
+
+    C'est ce qui départage l'exécution du clean et son annulation quand elles
+    arrivent en même temps : la base ne laisse passer que la première.
+    """
+    result = session.execute(
+        update(Bucket)
+        .values(clean_status=to_status.value)
+        .where(Bucket.subscription_id == subscription_id)
+        .where(Bucket.clean_status == from_status.value)
+    )
+    session.commit()
+    return result.rowcount == 1
 
 
 def update_bucket_workspace_status(subscription_id: str, status: Status, session: SASession) -> None:

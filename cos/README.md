@@ -122,7 +122,8 @@ Ce qu'il faut savoir :
 | Mettre à jour | `cos.bucket.v1.update` | Change la protection, le versioning, le backup ou les permissions, planifiable à une date |
 | Supprimer | `cos.bucket.v1.delete` | Détruit les ressources Terraform, puis le workspace, puis marque `TERMINATED` |
 | Restaurer | `cos.bucket.v1.restore` | Restaure le contenu depuis un backup vault, à un point dans le temps choisi |
-| Nettoyer | `cos.bucket.v1.clean`, `force_clean` | Vide un bucket via une règle d'expiration S3 |
+| Nettoyer | `cos.bucket.v1.clean`, `force_clean` | Programme le vidage à J+7, met le bucket en quarantaine (règle CBR), puis le vide via une règle d'expiration S3 |
+| Annuler un nettoyage | `cos.bucket.v1.cancel_clean` | Pendant la période de grâce : lève la quarantaine, rien n'a été supprimé |
 | Règles de cycle de vie | `create/update/delete_lifecycle_policy_rule` | Gère les règles d'expiration du bucket |
 | Recovery ranges | `refresh_restore_ranges` | Rafraîchit les fenêtres de restauration disponibles |
 
@@ -423,7 +424,7 @@ Voir `tests/toolchain_tests/README.md`.
 ```
 cos_service/
 ├── dags/
-│   ├── bucket/v1/          cos.bucket.v1.{create,update,delete,restore,clean,…}.py
+│   ├── bucket/v1/          cos.bucket.v1.{create,update,delete,restore,clean,cancel_clean,…}.py
 │   ├── cos/                instances COS
 │   ├── backup_vault/       coffres de sauvegarde
 │   └── bucket_migration/   migration entre instances
@@ -486,6 +487,7 @@ complet avec la vraie librairie. Tout est décrit dans [`tests/unit/README.md`](
 | [`tests/unit/README.md`](tests/unit/README.md) | Harnais de test unitaire, doublures, fixtures |
 | [`docs/adr/0001-retention-unites-jours-annees.md`](docs/adr/0001-retention-unites-jours-annees.md) | Rétention jours/années sans rupture du contrat v1 |
 | [`docs/adr/0002-branche-terraform-suit-la-demande.md`](docs/adr/0002-branche-terraform-suit-la-demande.md) | Schematics clone la branche sur laquelle le DAG tourne |
+| [`docs/adr/0003-periode-de-grace-du-clean.md`](docs/adr/0003-periode-de-grace-du-clean.md) | Clean à J+7, annulable, bucket en quarantaine CBR pendant la grâce |
 | `STRUCTURE.md` | Arborescence du projet d'origine |
 
 ## 15. Glossaire
