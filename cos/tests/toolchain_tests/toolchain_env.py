@@ -1216,13 +1216,16 @@ def run_tests_parallel(command: Sequence[str], cwd: str, env: dict[str, str], wo
         log_path = os.path.join(directory, f"{stamp}-{env_name}-{re.sub(r'[^A-Za-z0-9]+', '_', name)}.log")
         os.close(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))
         scenario_env = dict(env)
-        if tf_log:
-            scenario_env.update(TF_LOG=tf_log, TF_LOG_PATH=log_path)
+        expected = expected_failures.get(os.path.basename(path))
+        # Fichier de refus attendu : au moins le niveau error du provider dans le
+        # journal, c'est là que le motif du DAG (status reason) est cité en entier.
+        level = tf_log or ("error" if expected else None)
+        if level:
+            scenario_env.update(TF_LOG=level, TF_LOG_PATH=log_path)
         _log(f"  ▶ {name}")
         started = time.monotonic()
         code = runner([*base, f"-filter={path}"], cwd, scenario_env, log_path)
         elapsed = time.monotonic() - started
-        expected = expected_failures.get(os.path.basename(path))
         if expected:  # fichier de refus attendu : c'est le motif qui compte, pas le code de tofu
             code, summary = judge_scenario(log_path, expected)
         else:
