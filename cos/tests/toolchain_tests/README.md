@@ -259,6 +259,7 @@ Déroulé d'un `tofu test` :
 | `60_refused_retention_over_five_years` | **refus** : 1900 jours > 5 ans | un run, doit être refusé |
 | `61_refused_object_lock_without_versioning` | **refus** : object lock sans versioning | idem |
 | `62_refused_retention_with_versioning` | **refus** : rétention + versioning | idem |
+| `63_refused_bucket_inputs` | **tous les refus de validation d'un bucket** en un seul run (rétention : unités, bornes, plafond, format historique, choix d'immutabilité ; object lock ; backup sans vault ; instance COS, classe de stockage et choix inconnus) | un run, une clé de `buckets` par cas, chaque cas doit être refusé avec son motif |
 
 Les assertions restent minimales : la souscription a un `name`, et un update garde le même
 `name` (une mise à jour qui recrée la souscription est un échec). Le reste est vérifié par le
@@ -300,6 +301,38 @@ tofu par fichier et, pour ces fichiers, rend son propre verdict : run en `fail` 
 présent = ✔ « refus attendu, motif conforme ». Un run qui passe est une régression (le DAG
 accepte ce qu'il doit refuser). Pour ajouter un cas : un fichier `6x_refused_<cas>.tftest.hcl`
 et une entrée dans le manifeste.
+
+#### Tous les refus d'un bucket en un seul fichier (`63_refused_bucket_inputs`)
+
+Les buckets d'un run sont indépendants : tofu les applique tous et rapporte **un diagnostic
+par bucket refusé**, chacun citant l'adresse `bucket["<clé>"]` et le motif du DAG. Le fichier
+`63_refused_bucket_inputs.tftest.hcl` met donc tous les cas invalides dans un seul run, sur
+l'instance COS existante du tfvars, une clé de `buckets` par cas ; dans le manifeste, son
+entrée porte `cases` (clé → `message` + `regex`) au lieu d'un seul `regex`. Le juge attribue
+chaque diagnostic à sa clé et rend un verdict par cas :
+
+```bash
+python toolchain_env.py --env int --run test -- -filter=tests/63_refused_bucket_inputs.tftest.hcl
+```
+
+```
+  ✘ 63_refused_bucket_inputs (2 min) : 2 cas sur 30 NON conformes (28 refus avec le motif attendu)
+    ✔ retention_mixed_units : « Retention must be set either in days or in years, not a mix of both »
+    ✔ retention_zero : « minimum_days must be superior to 0 »
+    ✘ object_lock_zero : ACCEPTÉ (aucune erreur sur ce cas) alors que le DAG doit refuser : « … »
+    ✘ unknown_storage_class : refusé, mais sans le motif attendu « … »
+    …
+```
+
+Un cas **accepté** (pas de diagnostic sur sa clé) est une régression ; le bucket créé est
+détruit en fin de fichier par tofu. Un cas refusé **sans le motif attendu** signale un message
+qui a changé côté DAG (ou, pour `unknown_storage_class` / `unknown_immutability_choice`, un
+refus du provider lui-même plutôt que du schéma du payload) : adapter `regex` dans le manifeste.
+Les cas qui demandent un backup vault (« specifications are not fully set », backup sans
+versioning, rétention + backup) ne sont pas dans ce fichier : il ne crée que des buckets.
+Pour ajouter un cas : une clé dans le run et la même clé dans `cases`.
+
+Les fichiers `60`, `61` et `62` restent utilisables seuls ; leurs trois cas sont repris dans `63`.
 
 ### Environnement persistant et restauration (`terraform/persistent`, `terraform/restore`)
 

@@ -61,6 +61,9 @@ variable "buckets" {
   description = "Buckets à créer sur l'instance COS : clé = nom logique, valeur = options du payload."
   type = map(object({
     storage_class              = optional(string, "standard")
+    # instance COS de ce bucket seulement (défaut : cos_instance du tfvars ou
+    # celle créée par le scénario) : sert aux cas de refus (instance inconnue).
+    cos_instance               = optional(string)
     enable_versioning          = optional(bool)
     enable_custom_permissions  = optional(bool)
     immutability_choice        = optional(string)

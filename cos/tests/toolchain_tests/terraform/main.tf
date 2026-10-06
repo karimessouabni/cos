@@ -51,7 +51,7 @@ locals {
     for key, b in var.buckets : key => merge(
       {
         storage_class = b.storage_class
-        cos_instance  = local.cos_name
+        cos_instance  = coalesce(b.cos_instance, local.cos_name)
       },
       { for k, v in {
         enable_versioning          = b.enable_versioning

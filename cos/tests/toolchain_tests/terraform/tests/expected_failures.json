@@ -16,5 +16,131 @@
     "prelude": [],
     "message": "Retention and versioning are not compatible",
     "regex": "Retention and versioning are not compatible"
+  },
+  "63_refused_bucket_inputs.tftest.hcl": {
+    "run": "refused",
+    "prelude": [],
+    "cases": {
+      "retention_mixed_units": {
+        "message": "Retention must be set either in days or in years, not a mix of both",
+        "regex": "not a mix of both"
+      },
+      "retention_zero": {
+        "message": "minimum_days must be superior to 0",
+        "regex": "minimum_days must be superior to 0"
+      },
+      "retention_negative": {
+        "message": "default_days must be superior to 0",
+        "regex": "default_days must be superior to 0"
+      },
+      "retention_days_over_limit": {
+        "message": "default_days (1900 days) cannot be superior to 5 years",
+        "regex": "default_days \\(1900 days\\) cannot be superior to 5 years"
+      },
+      "retention_years_over_limit": {
+        "message": "default_years (6 years) cannot be superior to 5 years",
+        "regex": "default_years \\(6 years\\) cannot be superior to 5 years"
+      },
+      "retention_legacy_over_limit": {
+        "message": "default_days (1900 days) cannot be superior to 5 years (format historique recopié en jours)",
+        "regex": "default_days \\(1900 days\\) cannot be superior to 5 years"
+      },
+      "retention_min_over_max": {
+        "message": "Retention minimum cannot be superior to maximum",
+        "regex": "Retention minimum cannot be superior to maximum"
+      },
+      "retention_default_under_min": {
+        "message": "Retention default cannot be inferior to minimum",
+        "regex": "Retention default cannot be inferior to minimum"
+      },
+      "retention_default_over_max": {
+        "message": "Retention default cannot be superior to maximum",
+        "regex": "Retention default cannot be superior to maximum"
+      },
+      "retention_legacy_and_suffixed": {
+        "message": "Retention must use either the legacy fields or the unit-suffixed fields, not both",
+        "regex": "Retention must use either the legacy fields"
+      },
+      "retention_incomplete": {
+        "message": "Retention configuration is not valid. You must set default, minimum and maximum",
+        "regex": "Retention configuration is not valid"
+      },
+      "retention_with_versioning": {
+        "message": "Retention and versioning are not compatible",
+        "regex": "Retention and versioning are not compatible"
+      },
+      "retention_with_object_lock": {
+        "message": "Retention and object Lock are not compatible",
+        "regex": "Retention and object Lock are not compatible"
+      },
+      "retention_choice_without_values": {
+        "message": "Retention must not be empty.",
+        "regex": "Retention must not be empty\\."
+      },
+      "retention_choice_disabled": {
+        "message": "Retention must not be empty. (retention_enabled = false)",
+        "regex": "Retention must not be empty\\."
+      },
+      "retention_daily_without_values": {
+        "message": "Retention must not be empty for choice retention_daily",
+        "regex": "Retention must not be empty for choice retention_daily"
+      },
+      "retention_daily_in_years": {
+        "message": "Retention must be set in days (default_days, minimum_days, maximum_days) for choice retention_daily",
+        "regex": "Retention must be set in days \\(default_days, minimum_days, maximum_days\\) for choice retention_daily"
+      },
+      "retention_yearly_in_days": {
+        "message": "Retention must be set in years (default_years, minimum_years, maximum_years) for choice retention_yearly",
+        "regex": "Retention must be set in years \\(default_years, minimum_years, maximum_years\\) for choice retention_yearly"
+      },
+      "object_lock_without_versioning": {
+        "message": "Versioning should be enabled to enable object-lock",
+        "regex": "Versioning should be enabled to enable object-lock"
+      },
+      "object_lock_both_units": {
+        "message": "Object lock retention must be set either in days (object_lock_duration_days) or in years (object_lock_duration_years), not both",
+        "regex": "Object lock retention must be set either in days \\(object_lock_duration_days\\) or in years \\(object_lock_duration_years\\), not both"
+      },
+      "object_lock_zero": {
+        "message": "Object lock retention (0 days) cannot be inferior or equal to ZERO",
+        "regex": "Object lock retention \\(0 days\\) cannot be inferior or equal to ZERO"
+      },
+      "object_lock_days_over_limit": {
+        "message": "Object lock retention (1900 days) cannot be superior to 5 years",
+        "regex": "Object lock retention \\(1900 days\\) cannot be superior to 5 years"
+      },
+      "object_lock_years_over_limit": {
+        "message": "Object lock retention (6 years) cannot be superior to 5 years",
+        "regex": "Object lock retention \\(6 years\\) cannot be superior to 5 years"
+      },
+      "object_lock_choice_without_value": {
+        "message": "Object Lock Duration Days or Years must be not empty",
+        "regex": "Object Lock Duration Days or Years must be not empty"
+      },
+      "object_lock_daily_in_years": {
+        "message": "Object lock retention must be set in days (object_lock_duration_days) for choice object_lock_daily",
+        "regex": "Object lock retention must be set in days \\(object_lock_duration_days\\) for choice object_lock_daily"
+      },
+      "object_lock_yearly_in_days": {
+        "message": "Object lock retention must be set in years (object_lock_duration_years) for choice object_lock_yearly",
+        "regex": "Object lock retention must be set in years \\(object_lock_duration_years\\) for choice object_lock_yearly"
+      },
+      "backup_without_vault": {
+        "message": "The Backup Vault name is required to enable bucket backup",
+        "regex": "The Backup Vault name is required to enable bucket backup"
+      },
+      "unknown_cos_instance": {
+        "message": "the cos instance co000i000000 doesn't exist",
+        "regex": "the cos instance co000i000000 doesn't exist"
+      },
+      "unknown_storage_class": {
+        "message": "storage_class refusé par le schéma du payload (valeurs : standard, vault, cold, smart)",
+        "regex": "storage_class"
+      },
+      "unknown_immutability_choice": {
+        "message": "immutability_choice refusé par le schéma du payload (valeur hors énumération)",
+        "regex": "immutability_choice"
+      }
+    }
   }
 }

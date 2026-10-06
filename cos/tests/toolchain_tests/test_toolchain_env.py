@@ -1015,6 +1015,67 @@ class MainTest(VaultServerTest):
         self.assertIn("absent de la sortie", summary)
         self.assertEqual(te.judge_scenario(log + ".missing", expected)[0], te.EXIT_TERRAFORM_FAILED)
 
+    def test_judge_cases(self):
+        cases = {
+            "zero": {"message": "x must be > 0", "regex": re.escape("x must be > 0")},
+            "mix": {"message": "not a mix", "regex": "not a mix"},
+            "ok": {"message": "should fail", "regex": "should fail"},
+        }
+        expected = {"run": "refused", "prelude": [], "cases": cases}
+        log = os.path.join(tempfile.mkdtemp(prefix="judge-"), "s.log")
+
+        def diag(key, reason):
+            return (f'Error: Cannot create subscription "sub-{key}"\n\n'
+                    f'  with orchestrator_subscription_cosbucket_v1.bucket["{key}"],\n'
+                    f'  on main.tf line 77, in resource "orchestrator_subscription_cosbucket_v1" "bucket":\n\n'
+                    f'Demand create status is "CANCELLED" but should be "SUCCESS", status reason "{reason}"\n\n')
+
+        def verdict(text):
+            open(log, "w").write(text)
+            return te.judge_scenario(log, expected)
+
+        # Tous les cas refusés avec leur motif : OK, une ligne par cas.
+        text = 'run "refused"... fail\n' + diag("zero", "x must be > 0") + diag("mix", "not a mix") + diag("ok", "should fail")
+        code, summary = verdict(text)
+        self.assertEqual(code, 0)
+        self.assertIn("3 cas refusés avec le motif attendu", summary)
+        self.assertEqual(summary.count("✔"), 3)
+
+        # Un cas sans diagnostic (accepté), un refusé avec un autre motif.
+        text = 'run "refused"... fail\n' + diag("zero", "x must be > 0") + diag("mix", "something else")
+        code, summary = verdict(text)
+        self.assertEqual(code, te.EXIT_TERRAFORM_FAILED)
+        self.assertIn("2 cas sur 3 NON conformes", summary)
+        self.assertIn("✔ zero", summary)
+        self.assertIn("✘ mix : refusé, mais sans le motif attendu", summary)
+        self.assertIn("✘ ok : ACCEPTÉ", summary)
+
+        # Le motif d'un cas ne compte pas pour un autre (attribution par adresse).
+        text = 'run "refused"... fail\n' + diag("zero", "not a mix") + diag("mix", "x must be > 0") + diag("ok", "should fail")
+        code, summary = verdict(text)
+        self.assertEqual(code, te.EXIT_TERRAFORM_FAILED)
+        self.assertIn("✘ zero", summary)
+        self.assertIn("✘ mix", summary)
+
+        # Tout accepté : le run passe, chaque cas est une régression.
+        code, summary = verdict('run "refused"... pass\n')
+        self.assertEqual(code, te.EXIT_TERRAFORM_FAILED)
+        self.assertEqual(summary.count("ACCEPTÉ"), 3)
+
+        # Sortie sans adresse de ressource : motifs cherchés dans tout le journal.
+        code, summary = verdict('run "refused"... fail\nError: x must be > 0 | not a mix\n')
+        self.assertEqual(code, te.EXIT_TERRAFORM_FAILED)
+        self.assertIn("✔ zero : motif présent (non attribuable)", summary)
+        self.assertIn("✘ ok : motif absent", summary)
+
+        # Bordure « │ » de la sortie colorée acceptée.
+        text = 'run "refused"... fail\n' + diag("zero", "x must be > 0").replace("\n", "\n│ ").replace("Error:", "│ Error:", 1)
+        self.assertIn("✔ zero", verdict(text)[1])
+        blocks = te.error_blocks_by_bucket(diag("a", "r1") + diag("b", "r2"))
+        self.assertEqual(sorted(blocks), ["a", "b"])
+        self.assertIn("r2", blocks["b"][0])
+        self.assertNotIn("r1", blocks["b"][0])
+
     def test_run_tests_parallel_judges_expected_failures(self):
         root = tempfile.mkdtemp(prefix="tfroot-")
         os.makedirs(os.path.join(root, "tests"))
