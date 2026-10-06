@@ -237,14 +237,14 @@ class ParseArgsTest(unittest.TestCase):
     def test_env_defaults(self):
         args = te.parse_args(["--env", "prod"])
         self.assertEqual(args.vault_url, te.VAULTS["group"])
-        self.assertEqual(args.secret_path, te.ENVIRONMENTS["prod"].secret_path)
+        self.assertEqual(args.kv_path, te.ENVIRONMENTS["prod"].kv_path)
         self.assertIn("namespace=AP85135", args.ui_url)
         self.assertTrue(args.dir.endswith(os.sep + te.TERRAFORM_ROOT_DIR))  # root terraform test
 
     def test_overrides_and_run(self):
         args = te.parse_args(["--vault", "staging", "--secret-path", "/a/b/", "--run", "apply", "--", "-auto-approve"])
         self.assertEqual(args.vault_url, te.VAULTS["staging"])
-        self.assertEqual(args.secret_path, "a/b")
+        self.assertEqual(args.kv_path, "a/b")
         self.assertEqual(args.run, ["apply", "-auto-approve"])
 
     def test_run_without_args_is_an_error(self):

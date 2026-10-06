@@ -22,7 +22,7 @@ main avant un `terraform plan` est enchaîné par le script.
                                      (le client_token renvoyé est un token Vault,
                                      valable 30 jours), sinon Chrome / Edge sur
                                      l'UI Vault en secours
-5. API key IBM Cloud                 GET <vault>/v1/<secret_path> avec le token
+5. API key IBM Cloud                 GET <vault>/v1/<kv_path> avec le token
                                      (X-Vault-Namespace: AP85135) ; la clé est
                                      gardée tant que son lease est valide
 6. variables d'environnement         IBM_CLOUD_API_KEY, ORCHESTRATOR_IBMCLOUD_API_KEY,
@@ -142,7 +142,7 @@ TOKEN_SERVICE_PATH = "/v1/token/"
 @dataclass(frozen=True)
 class Environment:
     vault: str  # clé de VAULTS
-    secret_path: str  # chemin lu dans Vault : ibm_<account>/creds/<role>
+    kv_path: str  # chemin KV lu dans Vault : ibm_<account>/creds/<role> (pas une valeur sensible)
     tests_dir: str = ""  # sous-dossier de tests (défaut : <env>/new_version si présent, sinon <env>)
 
 
@@ -382,7 +382,7 @@ class VaultClient:
         except (TypeError, ValueError):
             return None
 
-    def read_secret(self, token: str, path: str) -> tuple[dict[str, Any], int | None]:
+    def read_kv(self, token: str, path: str) -> tuple[dict[str, Any], int | None]:
         """(data, lease_duration en secondes ou None) du secret lu à `path`."""
         body = self._request(token, path)
         data = body.get("data") or {}
@@ -923,14 +923,14 @@ def forget_cached_token(vault_url: str) -> None:
     SECRETS.forget(_token_name(vault_url))
 
 
-def _api_key_cache_key(vault_url: str, secret_path: str) -> str:
-    return f"{vault_url.rstrip('/')}/v1/{secret_path.strip('/')}"
+def _api_key_cache_key(vault_url: str, kv_path: str) -> str:
+    return f"{vault_url.rstrip('/')}/v1/{kv_path.strip('/')}"
 
 
-def load_cached_api_key(vault_url: str, secret_path: str, now: float | None = None) -> str | None:
+def load_cached_api_key(vault_url: str, kv_path: str, now: float | None = None) -> str | None:
     """API key sauvegardée pour ce secret si son lease est encore valide. Le
     lease (non sensible) est dans state.json, la clé dans le trousseau."""
-    key = _api_key_cache_key(vault_url, secret_path)
+    key = _api_key_cache_key(vault_url, kv_path)
     entry = (_read_state().get("api_key_leases") or {}).get(key)
     if not isinstance(entry, dict):
         return None
@@ -940,8 +940,8 @@ def load_cached_api_key(vault_url: str, secret_path: str, now: float | None = No
     return SECRETS.load(f"api-key:{key}") or None
 
 
-def save_cached_api_key(vault_url: str, secret_path: str, api_key: str, lease: int | None) -> None:
-    key = _api_key_cache_key(vault_url, secret_path)
+def save_cached_api_key(vault_url: str, kv_path: str, api_key: str, lease: int | None) -> None:
+    key = _api_key_cache_key(vault_url, kv_path)
     state = _read_state()
     state.setdefault("api_key_leases", {})[key] = {
         "expires_at": None if lease is None else time.time() + lease,
@@ -1614,7 +1614,7 @@ def export_lines(variables: dict[str, str], parts: dict[str, Sequence[str]] | No
 SECRET_VARIABLES = (*API_KEY_VARS, *PROXY_ENV_VARS[:2], *(v.upper() for v in PROXY_ENV_VARS[:2]))
 
 
-def secret_export_parts(variables: dict[str, str], api_key_secret: str, proxy_user: str,
+def secret_export_parts(variables: dict[str, str], api_key_ref: str, proxy_user: str,
                         proxy_from_shell: bool, store: "SecretStore | None" = None) -> dict[str, Sequence[str]]:
     """Comment exporter chaque variable secrète SANS écrire le secret : l'API key
     et le mot de passe du proxy sont lus dans le trousseau par le shell au
@@ -1622,10 +1622,10 @@ def secret_export_parts(variables: dict[str, str], api_key_secret: str, proxy_us
     Les variables secrètes absentes du résultat n'ont pas de forme sûre."""
     store = store or SECRETS
     parts: dict[str, Sequence[str]] = {}
-    if api_key_secret and store.in_keychain(api_key_secret):
+    if api_key_ref and store.in_keychain(api_key_ref):
         for name in API_KEY_VARS:
             if name in variables:
-                parts[name] = [keychain_ref(api_key_secret)]
+                parts[name] = [keychain_ref(api_key_ref)]
     for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         url = variables.get(name)
         if not url or not _MASK_RE.search(url):
@@ -1739,28 +1739,28 @@ def resolve_api_key(args: argparse.Namespace, client: VaultClient,
     """API key IBM Cloud : celle sauvegardée si son lease est encore valide,
     sinon lue dans Vault avec un token valide (puis sauvegardée)."""
     if not args.new_key and not args.new_token:
-        cached = load_cached_api_key(args.vault_url, args.secret_path)
+        cached = load_cached_api_key(args.vault_url, args.kv_path)
         if cached:
-            args.api_key_secret = f"api-key:{_api_key_cache_key(args.vault_url, args.secret_path)}"
+            args.api_key_ref = f"api-key:{_api_key_cache_key(args.vault_url, args.kv_path)}"
             _log(f"API key sauvegardée réutilisée ({_mask(cached)}, {state_path()}).")
             return cached
     token = resolve_vault_token(args, client, acquire)
     try:
-        data, lease = client.read_secret(token, args.secret_path)
+        data, lease = client.read_kv(token, args.kv_path)
     except VaultError as exc:
         if exc.status_code in (401, 403) and not args.vault_token_from_cli:
             # token sauvegardé accepté par lookup-self mais sans droit sur le
             # secret : on ne le garde pas, l'utilisateur doit se reconnecter.
             forget_cached_token(args.vault_url)
-        raise CliExit(EXIT_VAULT_FAILED, f"lecture de {args.secret_path} refusée : {exc}") from exc
+        raise CliExit(EXIT_VAULT_FAILED, f"lecture de {args.kv_path} refusée : {exc}") from exc
     api_key = extract_api_key(data)
     if not api_key:
-        raise CliExit(EXIT_VAULT_FAILED, f"pas d'api_key dans la réponse de {args.secret_path} "
+        raise CliExit(EXIT_VAULT_FAILED, f"pas d'api_key dans la réponse de {args.kv_path} "
                                          f"(champs: {', '.join(sorted(data)) or 'aucun'})")
     _log(f"API key lue dans Vault ({_mask(api_key)}"
          + ("" if lease is None else f", lease {_duration(lease)}") + ").")
-    save_cached_api_key(args.vault_url, args.secret_path, api_key, lease)
-    args.api_key_secret = f"api-key:{_api_key_cache_key(args.vault_url, args.secret_path)}"
+    save_cached_api_key(args.vault_url, args.kv_path, api_key, lease)
+    args.api_key_ref = f"api-key:{_api_key_cache_key(args.vault_url, args.kv_path)}"
     return api_key
 
 
@@ -1782,7 +1782,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     vault = parser.add_argument_group("vault")
     vault.add_argument("--vault", choices=list(VAULTS), help="instance Vault (défaut: celle de --env)")
     vault.add_argument("--vault-url", help="URL de Vault (défaut: celle de --vault)")
-    vault.add_argument("--secret-path", help="chemin du secret IBM (défaut: celui de --env)")
+    vault.add_argument("--secret-path", dest="kv_path", help="chemin KV de la clé IBM dans Vault (défaut: celui de --env)")
     vault.add_argument("--namespace", default=os.environ.get(NAMESPACE_ENV) or DEFAULT_NAMESPACE,
                        help=f"X-Vault-Namespace (défaut: ${NAMESPACE_ENV}, sinon {DEFAULT_NAMESPACE})")
     vault.add_argument("--vault-token", default=os.environ.get(VAULT_TOKEN_ENV),
@@ -1866,8 +1866,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     environment = ENVIRONMENTS[args.env]
     args.vault = args.vault or environment.vault
     args.vault_url = (args.vault_url or VAULTS[args.vault]).rstrip("/")
-    args.secret_path = (args.secret_path or environment.secret_path).strip("/")
-    if not args.secret_path:
+    args.kv_path = (args.kv_path or environment.kv_path).strip("/")
+    if not args.kv_path:
         parser.error(f"chemin du secret non renseigné pour {args.env} : "
                      "le compléter dans ENVIRONMENTS en tête du script, ou passer --secret-path")
     args.ui_url = args.vault_url + VAULT_UI_PATH + "?" + urllib.parse.urlencode({"namespace": args.namespace})
@@ -1918,7 +1918,7 @@ def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
     (None si l'utilisateur quitte)."""
     _log("Préparation de l'environnement Terraform des tests toolchain : mode guidé (Ctrl+C pour quitter).")
     env = _choose("Environnement ?", [
-        (f"{name} (Vault {e.vault} : {VAULTS[e.vault]}, secret {e.secret_path})", name)
+        (f"{name} (Vault {e.vault} : {VAULTS[e.vault]}, clé IBM sous {e.kv_path})", name)
         for name, e in ENVIRONMENTS.items()
     ], ask, default=list(ENVIRONMENTS).index(DEFAULT_ENV) + 1)
     argv = [] if env == DEFAULT_ENV else ["--env", env]
@@ -1973,7 +1973,7 @@ def prepare(args: argparse.Namespace, acquire: Callable[[str], str] | None = Non
     if not os.path.isdir(args.dir):
         raise CliExit(EXIT_USAGE, f"dossier de tests introuvable : {args.dir} (--dir)")
     _log(f"Environnement : {args.env}  dossier : {args.dir}")
-    _log(f"Vault : {args.vault_url} (namespace {args.namespace})  secret : {args.secret_path}")
+    _log(f"Vault : {args.vault_url} (namespace {args.namespace})  clé IBM sous : {args.kv_path}")
     if not args.skip_login:
         ensure_terraform_login(args.terraform_host, args.dir, run)
     previous = tfvars_value(os.path.join(args.dir, VERSIONS_TF), "version")
@@ -2099,7 +2099,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(variables if args.print_secrets else mask_secrets(variables), indent=2))
     else:
         parts = {} if args.print_secrets else secret_export_parts(
-            variables, getattr(args, "api_key_secret", ""),
+            variables, getattr(args, "api_key_ref", ""),
             (getattr(args, "proxy_credentials", None) or ("", ""))[0], args.proxy_origin == "shell")
         unsafe = [n for n in variables if n in SECRET_VARIABLES and n not in parts]
         if unsafe and not args.print_secrets:
