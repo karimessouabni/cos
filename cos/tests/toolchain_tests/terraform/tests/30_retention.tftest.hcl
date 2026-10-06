@@ -29,10 +29,6 @@ run "create" {
   }
 
   assert {
-    condition     = output.bucket_status["days"] == null || output.bucket_status["days"] != "DECLINED"
-    error_message = "days (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["days"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["days"].name != ""
     error_message = "days (create) : souscription sans name."
   }
@@ -51,10 +47,6 @@ run "create" {
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["days"].payload.retention.maximum_days == 3
     error_message = "days (create) : payload.retention.maximum_days attendu 3, relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["days"].payload.retention, null))}."
-  }
-  assert {
-    condition     = output.bucket_status["years"] == null || output.bucket_status["years"] != "DECLINED"
-    error_message = "years (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["years"]}"
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["years"].name != ""
@@ -77,10 +69,6 @@ run "create" {
     error_message = "years (create) : payload.retention.maximum_years attendu 5, relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["years"].payload.retention, null))}."
   }
   assert {
-    condition     = output.bucket_status["legacy"] == null || output.bucket_status["legacy"] != "DECLINED"
-    error_message = "legacy (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["legacy"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["legacy"].name != ""
     error_message = "legacy (create) : souscription sans name."
   }
@@ -99,10 +87,6 @@ run "create" {
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["legacy"].payload.retention.maximum == 3
     error_message = "legacy (create) : payload.retention.maximum attendu 3, relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["legacy"].payload.retention, null))}."
-  }
-  assert {
-    condition     = output.bucket_status["daily_choice"] == null || output.bucket_status["daily_choice"] != "DECLINED"
-    error_message = "daily_choice (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["daily_choice"]}"
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["daily_choice"].name != ""
@@ -129,10 +113,6 @@ run "create" {
     error_message = "daily_choice (create) : payload.retention.maximum_days attendu 3, relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["daily_choice"].payload.retention, null))}."
   }
   assert {
-    condition     = output.bucket_status["yearly_choice"] == null || output.bucket_status["yearly_choice"] != "DECLINED"
-    error_message = "yearly_choice (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["yearly_choice"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["yearly_choice"].name != ""
     error_message = "yearly_choice (create) : souscription sans name."
   }
@@ -155,10 +135,6 @@ run "create" {
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["yearly_choice"].payload.retention.maximum_years == 3
     error_message = "yearly_choice (create) : payload.retention.maximum_years attendu 3, relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["yearly_choice"].payload.retention, null))}."
-  }
-  assert {
-    condition     = output.bucket_status["disabled_flag"] == null || output.bucket_status["disabled_flag"] != "DECLINED"
-    error_message = "disabled_flag (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["disabled_flag"]}"
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["disabled_flag"].name != ""
@@ -201,10 +177,6 @@ run "update_days_bounds" {
   }
 
   assert {
-    condition     = output.bucket_status["days"] == null || output.bucket_status["days"] != "DECLINED"
-    error_message = "days (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["days"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["days"].name != ""
     error_message = "days (update) : souscription sans name."
   }
@@ -246,10 +218,6 @@ run "update_years_to_days" {
   }
 
   assert {
-    condition     = output.bucket_status["years"] == null || output.bucket_status["years"] != "DECLINED"
-    error_message = "years (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["years"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["years"].name != ""
     error_message = "years (update) : souscription sans name."
   }
@@ -289,10 +257,6 @@ run "update_legacy_bounds" {
     }
   }
 
-  assert {
-    condition     = output.bucket_status["legacy"] == null || output.bucket_status["legacy"] != "DECLINED"
-    error_message = "legacy (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["legacy"]}"
-  }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["legacy"].name != ""
     error_message = "legacy (update) : souscription sans name."
@@ -334,10 +298,6 @@ run "update_partial_default" {
     }
   }
 
-  assert {
-    condition     = output.bucket_status["days"] == null || output.bucket_status["days"] != "DECLINED"
-    error_message = "days (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["days"]}"
-  }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["days"].name != ""
     error_message = "days (update) : souscription sans name."

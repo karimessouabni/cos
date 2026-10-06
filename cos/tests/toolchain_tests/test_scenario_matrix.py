@@ -8,6 +8,7 @@
 * les regex générées reconnaissent bien les messages de l'oracle.
 """
 import ast
+import json
 import os
 import re
 import sys
@@ -137,10 +138,30 @@ def test_storage_classes_match_dag_enum():
 
 
 def test_regexes_match_their_messages(declined_messages):
+    """La regex du manifeste reconnaît le message, y compris tel que le provider
+    l'affiche (décompte de jours d'une autre année, points de suspension échappés)."""
     for message in declined_messages:
         first = message.split(" | ")[0]
-        pattern = generate_tests.hcl_regex(first).replace("\\\\", "\\")
+        pattern = generate_tests.failure_regex(first)
         assert re.search(pattern, first), f"regex générée ne reconnaît pas : {first!r}"
+        shown = re.sub(r"\(182[5-7] days", "(1827 days", first).replace("…", "\\u2026")
+        output = ('Error: Cannot create subscription: status reason \\"1 validation error for '
+                  'BucketCreatePayload\\nretention\\n  Value error, ' + shown + '\\"')
+        assert re.search(pattern, output), first
+
+
+def test_manifest_lists_every_refusal(planned):
+    files = generate_tests.rendered_files()
+    manifest = json.loads(files[generate_tests.MANIFEST])
+    refusals = sum(1 for plan in planned.values() for _, _, steps in plan
+                   for s in steps if s.outcome is not None and s.outcome.declined)
+    assert len(manifest) == refusals
+    for name, entry in manifest.items():
+        assert name in files, name
+        assert f'run "{entry["run"]}"' in files[name]
+        for prelude in entry["prelude"]:
+            assert f'run "{prelude}"' in files[name]
+        assert "bucket_status" not in files[name]
 
 
 def test_run_names_are_unique_per_scenario():

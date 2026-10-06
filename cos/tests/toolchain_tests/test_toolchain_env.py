@@ -8,6 +8,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import re
 import secrets as _secrets
 import sys
 import tempfile
@@ -983,6 +984,50 @@ class MainTest(VaultServerTest):
         self.assertEqual(te.parse_args(["--parallel"]).parallel, 0)
         self.assertEqual(te.parse_args(["--parallel", "3"]).parallel, 3)
         self.assertEqual(te.parse_args([]).parallel, 1)
+
+    def test_judge_scenario(self):
+        expected = {"run": "zero_days", "prelude": ["create_base"], "message": "x must be > 0",
+                    "regex": re.escape("x must be > 0")}
+        log = os.path.join(tempfile.mkdtemp(prefix="judge-"), "s.log")
+
+        def verdict(text):
+            open(log, "w").write(text)
+            return te.judge_scenario(log, expected)
+
+        code, summary = verdict('run "create_base"... pass\nrun "zero_days"... fail\n'
+                                'Error: Cannot create subscription: status reason "x must be > 0"\n')
+        self.assertEqual(code, 0)
+        self.assertIn("refus attendu, motif conforme", summary)
+        code, summary = verdict('run "create_base"... pass\nrun "zero_days"... fail\nError: something else\n')
+        self.assertEqual(code, te.EXIT_TERRAFORM_FAILED)
+        self.assertIn("sans le motif attendu", summary)
+        code, summary = verdict('run "create_base"... pass\nrun "zero_days"... pass\n')
+        self.assertIn("ACCEPTÉ alors que le DAG doit refuser", summary)
+        code, summary = verdict('run "create_base"... fail\nrun "zero_days"... skip\n')
+        self.assertIn("préalable en échec (create_base)", summary)
+        expected["prelude"] = []
+        code, summary = verdict("rien\n")
+        self.assertIn("absent de la sortie", summary)
+        self.assertEqual(te.judge_scenario(log + ".missing", expected)[0], te.EXIT_TERRAFORM_FAILED)
+
+    def test_run_tests_parallel_judges_expected_failures(self):
+        root = tempfile.mkdtemp(prefix="tfroot-")
+        os.makedirs(os.path.join(root, "tests"))
+        for name in ("20_ok", "35_rules__zero"):
+            open(os.path.join(root, "tests", f"{name}.tftest.hcl"), "w").write("")
+        with open(os.path.join(root, "tests", te.EXPECTED_FAILURES), "w") as fh:
+            json.dump({"35_rules__zero.tftest.hcl": {"run": "zero", "prelude": [], "message": "m",
+                                                     "regex": "status reason .m."}}, fh)
+
+        def fake_runner(command, cwd, env, log_path):
+            if "35_rules" in command[-1]:
+                open(log_path, "a").write('run "zero"... fail\nError: status reason "m"\nFailure! 0 passed, 1 failed.\n')
+                return 1  # tofu voit un échec, le juge un refus conforme
+            open(log_path, "a").write("Success! 1 passed, 0 failed.\n")
+            return 0
+
+        self.assertEqual(te.run_tests_parallel(["test"], root, {}, workers=1, env_name="int", runner=fake_runner), 0)
+        self.assertEqual(te.load_expected_failures(tempfile.mkdtemp()), {})
 
     def test_run_test_in_terraform_root(self):
         root = tempfile.mkdtemp(prefix="tfroot-")

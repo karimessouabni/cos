@@ -102,15 +102,3 @@ output "cos_created" { value = var.cos_instance == "" }
 output "vault_id" { value = one(orchestrator_subscription_cosbackup_vault_v1.vault[*].id) }
 output "bucket_names" { value = { for k, b in orchestrator_subscription_cosbucket_v1.bucket : k => b.name } }
 output "vault_name" { value = one(orchestrator_subscription_cosbackup_vault_v1.vault[*].name) }
-
-# Issue de la demande vue par le provider : status (ACTIVE, DECLINED, ...) et
-# motif. Les scénarios d'échec (60_*) assertent dessus : une demande refusée
-# par le DAG doit se voir ici, avec le message du DAG. Les noms d'attributs
-# sont ceux de la console orchestrator ; try() tolère un provider qui les
-# nomme autrement (les assertions diront alors "null").
-output "bucket_status" {
-  value = { for k, b in orchestrator_subscription_cosbucket_v1.bucket : k => try(b.status, b.state.status, null) }
-}
-output "bucket_status_reason" {
-  value = { for k, b in orchestrator_subscription_cosbucket_v1.bucket : k => try(b.status_reason, b.state.status_reason, "") }
-}

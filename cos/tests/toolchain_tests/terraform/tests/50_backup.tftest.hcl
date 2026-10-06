@@ -22,10 +22,6 @@ run "create" {
   }
 
   assert {
-    condition     = output.bucket_status["saved"] == null || output.bucket_status["saved"] != "DECLINED"
-    error_message = "saved (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["saved"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["saved"].name != ""
     error_message = "saved (create) : souscription sans name."
   }
@@ -44,10 +40,6 @@ run "create" {
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["saved"].payload.backup.backup_retention_days == 7
     error_message = "saved (create) : payload.backup.backup_retention_days attendu 7, relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["saved"].payload.backup, null))}."
-  }
-  assert {
-    condition     = output.bucket_status["disabled_flag"] == null || output.bucket_status["disabled_flag"] != "DECLINED"
-    error_message = "disabled_flag (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["disabled_flag"]}"
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["disabled_flag"].name != ""
@@ -77,10 +69,6 @@ run "update_backup_retention" {
     }
   }
 
-  assert {
-    condition     = output.bucket_status["saved"] == null || output.bucket_status["saved"] != "DECLINED"
-    error_message = "saved (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["saved"]}"
-  }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["saved"].name != ""
     error_message = "saved (update) : souscription sans name."
@@ -118,10 +106,6 @@ run "disable_backup" {
   }
 
   assert {
-    condition     = output.bucket_status["saved"] == null || output.bucket_status["saved"] != "DECLINED"
-    error_message = "saved (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["saved"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["saved"].name != ""
     error_message = "saved (update) : souscription sans name."
   }
@@ -153,10 +137,6 @@ run "enable_backup_again" {
     }
   }
 
-  assert {
-    condition     = output.bucket_status["saved"] == null || output.bucket_status["saved"] != "DECLINED"
-    error_message = "saved (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["saved"]}"
-  }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["saved"].name != ""
     error_message = "saved (update) : souscription sans name."

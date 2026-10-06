@@ -24,20 +24,12 @@ run "create_plain_buckets" {
   }
 
   assert {
-    condition     = output.bucket_status["to_retention"] == null || output.bucket_status["to_retention"] != "DECLINED"
-    error_message = "to_retention (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["to_retention"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["to_retention"].name != ""
     error_message = "to_retention (create) : souscription sans name."
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["to_retention"].payload.storage_class == "standard"
     error_message = "to_retention (create) : payload.storage_class attendu \"standard\", relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["to_retention"].payload.storage_class, null))}."
-  }
-  assert {
-    condition     = output.bucket_status["to_object_lock"] == null || output.bucket_status["to_object_lock"] != "DECLINED"
-    error_message = "to_object_lock (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["to_object_lock"]}"
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["to_object_lock"].name != ""
@@ -50,10 +42,6 @@ run "create_plain_buckets" {
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["to_object_lock"].payload.storage_class == "standard"
     error_message = "to_object_lock (create) : payload.storage_class attendu \"standard\", relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["to_object_lock"].payload.storage_class, null))}."
-  }
-  assert {
-    condition     = output.bucket_status["to_backup"] == null || output.bucket_status["to_backup"] != "DECLINED"
-    error_message = "to_backup (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["to_backup"]}"
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["to_backup"].name != ""
@@ -80,10 +68,6 @@ run "add_retention" {
     }
   }
 
-  assert {
-    condition     = output.bucket_status["to_retention"] == null || output.bucket_status["to_retention"] != "DECLINED"
-    error_message = "to_retention (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["to_retention"]}"
-  }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["to_retention"].name != ""
     error_message = "to_retention (update) : souscription sans name."
@@ -122,10 +106,6 @@ run "add_object_lock" {
   }
 
   assert {
-    condition     = output.bucket_status["to_object_lock"] == null || output.bucket_status["to_object_lock"] != "DECLINED"
-    error_message = "to_object_lock (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["to_object_lock"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["to_object_lock"].name != ""
     error_message = "to_object_lock (update) : souscription sans name."
   }
@@ -162,10 +142,6 @@ run "add_backup" {
     }
   }
 
-  assert {
-    condition     = output.bucket_status["to_backup"] == null || output.bucket_status["to_backup"] != "DECLINED"
-    error_message = "to_backup (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["to_backup"]}"
-  }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["to_backup"].name != ""
     error_message = "to_backup (update) : souscription sans name."

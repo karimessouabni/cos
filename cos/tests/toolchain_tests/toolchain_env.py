@@ -1134,6 +1134,53 @@ def _run_scenario(command: Sequence[str], cwd: str, env: dict[str, str], log_pat
             return EXIT_TERRAFORM_FAILED
 
 
+EXPECTED_FAILURES = "expected_failures.json"  # tests/ : écrit par generate_tests.py
+
+
+def load_expected_failures(cwd: str) -> dict[str, dict]:
+    """Manifeste des fichiers de refus attendu ({nom de fichier: {run, regex, prelude, message...}}),
+    vide s'il n'existe pas (dossier sans scénarios générés)."""
+    path = os.path.join(cwd, "tests", EXPECTED_FAILURES)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except OSError:
+        return {}
+    except ValueError as exc:
+        raise CliExit(EXIT_USAGE, f"{path} illisible : {exc} (régénérer avec generate_tests.py)")
+
+
+_RUN_VERDICT = re.compile(r'run "([^"]+)"\.\.\. (pass|fail|skip|error)')
+
+
+def judge_scenario(log_path: str, expected: dict) -> tuple[int, str]:
+    """Verdict d'un fichier de refus attendu : (code, résumé).
+
+    Le provider orchestrator fait échouer l'apply d'une demande refusée en
+    citant le motif du DAG ; tofu marque le run « fail ». Succès si les runs
+    préalables passent, si le run attendu échoue, et si la sortie porte le
+    motif attendu. Un run attendu en refus qui passe est une régression : le
+    DAG accepte ce qu'il doit refuser."""
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return EXIT_TERRAFORM_FAILED, "journal illisible"
+    verdicts = dict(_RUN_VERDICT.findall(text))
+    run = expected["run"]
+    failed_prelude = [name for name in expected.get("prelude", []) if verdicts.get(name) != "pass"]
+    if failed_prelude:
+        return EXIT_TERRAFORM_FAILED, f"préalable en échec ({', '.join(failed_prelude)}), le refus n'a pas été testé"
+    verdict = verdicts.get(run)
+    if verdict is None:
+        return EXIT_TERRAFORM_FAILED, f"run « {run} » absent de la sortie"
+    if verdict == "pass":
+        return EXIT_TERRAFORM_FAILED, f"ACCEPTÉ alors que le DAG doit refuser : « {expected['message']} »"
+    if re.search(expected["regex"], text, re.DOTALL):
+        return EXIT_OK, f"refus attendu, motif conforme : « {expected['message']} »"
+    return EXIT_TERRAFORM_FAILED, f"refusé, mais sans le motif attendu « {expected['message']} » (voir le journal)"
+
+
 def _scenario_summary(log_path: str) -> str:
     """Dernière ligne « Success! … » / « Failure! … » de tofu, sinon la dernière ligne."""
     try:
@@ -1154,6 +1201,7 @@ def run_tests_parallel(command: Sequence[str], cwd: str, env: dict[str, str], wo
     files = scenario_files(cwd, command)
     if not files:
         raise CliExit(EXIT_USAGE, f"aucun fichier de scénario dans {os.path.join(cwd, 'tests')}")
+    expected_failures = load_expected_failures(cwd)
     base = [a for a in command if not a.startswith("-filter=")]
     if "-no-color" not in base:
         base.append("-no-color")
@@ -1174,7 +1222,12 @@ def run_tests_parallel(command: Sequence[str], cwd: str, env: dict[str, str], wo
         started = time.monotonic()
         code = runner([*base, f"-filter={path}"], cwd, scenario_env, log_path)
         elapsed = time.monotonic() - started
-        _log(f"  {'✔' if code == 0 else '✘'} {name} ({_duration(elapsed)}) : {_scenario_summary(log_path) or f'code {code}'}")
+        expected = expected_failures.get(os.path.basename(path))
+        if expected:  # fichier de refus attendu : c'est le motif qui compte, pas le code de tofu
+            code, summary = judge_scenario(log_path, expected)
+        else:
+            summary = _scenario_summary(log_path) or f"code {code}"
+        _log(f"  {'✔' if code == 0 else '✘'} {name} ({_duration(elapsed)}) : {summary}")
         return name, code, elapsed, log_path
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -2010,12 +2063,20 @@ def main(argv: list[str] | None = None) -> int:
                     raise CliExit(EXIT_TERRAFORM_FAILED, f"{TERRAFORM_BIN} {'.'.join(map(str, version))} : "
                                                          "`tofu test` demande OpenTofu 1.6 au minimum.")
                 command = adapt_test_filter(command, args.dir, version)
-                if args.parallel != 1:
+                judged = bool(load_expected_failures(args.dir))
+                if args.parallel != 1 or judged:
                     if version is not None and version < (1, 7):
-                        raise CliExit(EXIT_TERRAFORM_FAILED, f"--parallel demande {TERRAFORM_BIN} >= 1.7 "
-                                                             "(vrai -filter) ; en 1.6, lancer sans --parallel.")
-                    workers = args.parallel if args.parallel > 0 else len(scenario_files(args.dir, command))
-                    return run_tests_parallel(command, args.dir, env, workers, args.env, args.tf_log)
+                        if judged and args.parallel == 1:
+                            _log(f"Attention : {TERRAFORM_BIN} < 1.7, les fichiers de refus attendu "
+                                 f"(tests/{EXPECTED_FAILURES}) ne seront pas jugés : ils apparaîtront en échec.")
+                        else:
+                            raise CliExit(EXIT_TERRAFORM_FAILED, f"--parallel demande {TERRAFORM_BIN} >= 1.7 "
+                                                                 "(vrai -filter) ; en 1.6, lancer sans --parallel.")
+                    else:
+                        # Un processus tofu par fichier (séquentiel sans --parallel) : chaque
+                        # fichier de refus attendu est jugé sur sa propre sortie.
+                        workers = args.parallel if args.parallel > 0 else len(scenario_files(args.dir, command))
+                        return run_tests_parallel(command, args.dir, env, max(1, workers), args.env, args.tf_log)
             if args.no_log_file:
                 return run_terraform(command, args.dir, env, to_stderr=False)
             return run_with_journal(command, args.dir, env, args.tf_log, args.follow, args.env)

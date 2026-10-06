@@ -23,20 +23,12 @@ run "create" {
   }
 
   assert {
-    condition     = output.bucket_status["basic"] == null || output.bucket_status["basic"] != "DECLINED"
-    error_message = "basic (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["basic"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["basic"].name != ""
     error_message = "basic (create) : souscription sans name."
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["basic"].payload.storage_class == "standard"
     error_message = "basic (create) : payload.storage_class attendu \"standard\", relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["basic"].payload.storage_class, null))}."
-  }
-  assert {
-    condition     = output.bucket_status["permissions"] == null || output.bucket_status["permissions"] != "DECLINED"
-    error_message = "permissions (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["permissions"]}"
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["permissions"].name != ""
@@ -49,10 +41,6 @@ run "create" {
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["permissions"].payload.storage_class == "standard"
     error_message = "permissions (create) : payload.storage_class attendu \"standard\", relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["permissions"].payload.storage_class, null))}."
-  }
-  assert {
-    condition     = output.bucket_status["versioned"] == null || output.bucket_status["versioned"] != "DECLINED"
-    error_message = "versioned (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["versioned"]}"
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["versioned"].name != ""
@@ -79,10 +67,6 @@ run "update_enable_versioning" {
     }
   }
 
-  assert {
-    condition     = output.bucket_status["basic"] == null || output.bucket_status["basic"] != "DECLINED"
-    error_message = "basic (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["basic"]}"
-  }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["basic"].name != ""
     error_message = "basic (update) : souscription sans name."
@@ -112,10 +96,6 @@ run "update_custom_permissions" {
     }
   }
 
-  assert {
-    condition     = output.bucket_status["basic"] == null || output.bucket_status["basic"] != "DECLINED"
-    error_message = "basic (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["basic"]}"
-  }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["basic"].name != ""
     error_message = "basic (update) : souscription sans name."
@@ -150,10 +130,6 @@ run "update_disable_versioning" {
     }
   }
 
-  assert {
-    condition     = output.bucket_status["versioned"] == null || output.bucket_status["versioned"] != "DECLINED"
-    error_message = "versioned (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["versioned"]}"
-  }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["versioned"].name != ""
     error_message = "versioned (update) : souscription sans name."

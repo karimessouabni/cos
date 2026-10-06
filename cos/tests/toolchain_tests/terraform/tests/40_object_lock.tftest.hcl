@@ -29,10 +29,6 @@ run "create" {
   }
 
   assert {
-    condition     = output.bucket_status["daily"] == null || output.bucket_status["daily"] != "DECLINED"
-    error_message = "daily (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["daily"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["daily"].name != ""
     error_message = "daily (create) : souscription sans name."
   }
@@ -51,10 +47,6 @@ run "create" {
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["daily"].payload.storage_class == "standard"
     error_message = "daily (create) : payload.storage_class attendu \"standard\", relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["daily"].payload.storage_class, null))}."
-  }
-  assert {
-    condition     = output.bucket_status["yearly"] == null || output.bucket_status["yearly"] != "DECLINED"
-    error_message = "yearly (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["yearly"]}"
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["yearly"].name != ""
@@ -77,10 +69,6 @@ run "create" {
     error_message = "yearly (create) : payload.storage_class attendu \"standard\", relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["yearly"].payload.storage_class, null))}."
   }
   assert {
-    condition     = output.bucket_status["generic_choice_days"] == null || output.bucket_status["generic_choice_days"] != "DECLINED"
-    error_message = "generic_choice_days (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["generic_choice_days"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["generic_choice_days"].name != ""
     error_message = "generic_choice_days (create) : souscription sans name."
   }
@@ -99,10 +87,6 @@ run "create" {
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["generic_choice_days"].payload.storage_class == "standard"
     error_message = "generic_choice_days (create) : payload.storage_class attendu \"standard\", relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["generic_choice_days"].payload.storage_class, null))}."
-  }
-  assert {
-    condition     = output.bucket_status["generic_choice_years"] == null || output.bucket_status["generic_choice_years"] != "DECLINED"
-    error_message = "generic_choice_years (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["generic_choice_years"]}"
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["generic_choice_years"].name != ""
@@ -125,10 +109,6 @@ run "create" {
     error_message = "generic_choice_years (create) : payload.storage_class attendu \"standard\", relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["generic_choice_years"].payload.storage_class, null))}."
   }
   assert {
-    condition     = output.bucket_status["inferred_years"] == null || output.bucket_status["inferred_years"] != "DECLINED"
-    error_message = "inferred_years (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["inferred_years"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["inferred_years"].name != ""
     error_message = "inferred_years (create) : souscription sans name."
   }
@@ -143,10 +123,6 @@ run "create" {
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["inferred_years"].payload.storage_class == "standard"
     error_message = "inferred_years (create) : payload.storage_class attendu \"standard\", relu ${jsonencode(try(orchestrator_subscription_cosbucket_v1.bucket["inferred_years"].payload.storage_class, null))}."
-  }
-  assert {
-    condition     = output.bucket_status["yearly_ignores_days"] == null || output.bucket_status["yearly_ignores_days"] != "DECLINED"
-    error_message = "yearly_ignores_days (create) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["yearly_ignores_days"]}"
   }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["yearly_ignores_days"].name != ""
@@ -189,10 +165,6 @@ run "update_daily_duration" {
   }
 
   assert {
-    condition     = output.bucket_status["daily"] == null || output.bucket_status["daily"] != "DECLINED"
-    error_message = "daily (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["daily"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["daily"].name != ""
     error_message = "daily (update) : souscription sans name."
   }
@@ -232,10 +204,6 @@ run "update_yearly_ceiling" {
     }
   }
 
-  assert {
-    condition     = output.bucket_status["yearly"] == null || output.bucket_status["yearly"] != "DECLINED"
-    error_message = "yearly (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["yearly"]}"
-  }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["yearly"].name != ""
     error_message = "yearly (update) : souscription sans name."
@@ -277,10 +245,6 @@ run "update_daily_to_years" {
   }
 
   assert {
-    condition     = output.bucket_status["daily"] == null || output.bucket_status["daily"] != "DECLINED"
-    error_message = "daily (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["daily"]}"
-  }
-  assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["daily"].name != ""
     error_message = "daily (update) : souscription sans name."
   }
@@ -320,10 +284,6 @@ run "update_inferred_to_days" {
     }
   }
 
-  assert {
-    condition     = output.bucket_status["inferred_years"] == null || output.bucket_status["inferred_years"] != "DECLINED"
-    error_message = "inferred_years (update) : refusé alors que le DAG l'accepte : ${output.bucket_status_reason["inferred_years"]}"
-  }
   assert {
     condition     = orchestrator_subscription_cosbucket_v1.bucket["inferred_years"].name != ""
     error_message = "inferred_years (update) : souscription sans name."

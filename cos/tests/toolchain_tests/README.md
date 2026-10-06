@@ -131,8 +131,8 @@ par défaut, « Copy token » dans le menu utilisateur, puis Entrée dans le ter
 ```bash
 cd tests/toolchain_tests
 
-python toolchain_env.py --env int --run test                                   # tous les scénarios, un par un
-python toolchain_env.py --env int --run test --parallel                        # tous en même temps (un tofu par fichier)
+python toolchain_env.py --env int --run test                                   # tous les scénarios, un tofu par fichier, l'un après l'autre
+python toolchain_env.py --env int --run test --parallel                        # tous en même temps
 python toolchain_env.py --env int --run test --parallel 3                      # trois à la fois
 python toolchain_env.py --env int --run test -- -filter=tests/30_retention.tftest.hcl  # un seul
 python toolchain_env.py --env int --run test -- -verbose                       # plans et state à chaque run
@@ -293,25 +293,25 @@ Pour chaque bucket d'un run, les assertions générées sont :
   ressource porte chaque clé envoyée (`retention.default_days == 2`…) ; pour un update, `name`
   est celui du run qui a créé le bucket (une mise à jour qui recrée la souscription est un
   échec) ;
-- **refusé** : `status == "DECLINED"` et `status_reason` reconnaît le message exact du DAG
-  (regex ; les décomptes de jours « (1826 days) » sont génériques car ils dépendent de la date
-  du jour, années bissextiles) ;
+- **refusé** : voir « Les cas de refus » ci-dessous : le run est dans **son propre fichier**
+  `<nn>_<slug>__<run>.tftest.hcl` (précédé de la création du bucket de base s'il s'agit d'un
+  update), sans assertion, et le motif attendu est dans `tests/expected_failures.json` ;
 - **retiré** : la clé n'est plus dans `bucket_names`.
 
-| Fichier | Couvre | Runs | Acceptés | Refusés |
-|---|---|---|---|---|
-| `20_bucket_lifecycle.tftest.hcl` | Cycle de vie d'un bucket standard | 5 | 6 | 0 |
-| `21_storage_classes.tftest.hcl` | Classes de stockage | 2 | 3 | 1 |
-| `25_immutability_after_create.tftest.hcl` | Immutabilité ajoutée après la création | 4 | 6 | 0 |
-| `30_retention.tftest.hcl` | Rétention (ADR 0001) : jours, années, format historique | 5 | 10 | 0 |
-| `31_retention_limits.tftest.hcl` | Rétention aux bornes acceptées | 2 | 4 | 1 |
-| `35_retention_rules.tftest.hcl` | Rétention : refus à la création | 21 | 0 | 21 |
-| `40_object_lock.tftest.hcl` | Object lock : jours, années, choix explicite ou déduit | 5 | 10 | 0 |
-| `45_object_lock_rules.tftest.hcl` | Object lock : refus à la création | 10 | 0 | 10 |
-| `50_backup.tftest.hcl` | Sauvegarde : vault, bucket sauvegardé, désactivation | 4 | 5 | 0 |
-| `55_backup_rules.tftest.hcl` | Sauvegarde : refus | 8 | 2 | 7 |
-| `60_update_rules.tftest.hcl` | Mises à jour d'un bucket déjà immuable | 12 | 5 | 8 |
-| `70_context_rules.tftest.hcl` | Contexte de la demande | 1 | 0 | 1 |
+| Scénario | Couvre | Runs acceptés | Fichiers de refus |
+|---|---|---|---|
+| `20_bucket_lifecycle` | Cycle de vie d'un bucket standard | 7 | 0 |
+| `21_storage_classes` | Classes de stockage | 3 | 1 |
+| `25_immutability_after_create` | Immutabilité ajoutée après la création | 6 | 0 |
+| `30_retention` | Rétention (ADR 0001) : jours, années, format historique | 10 | 0 |
+| `31_retention_limits` | Rétention aux bornes acceptées | 4 | 1 |
+| `35_retention_rules` | Rétention : refus à la création | 0 | 21 |
+| `40_object_lock` | Object lock : jours, années, choix explicite ou déduit | 10 | 0 |
+| `45_object_lock_rules` | Object lock : refus à la création | 0 | 10 |
+| `50_backup` | Sauvegarde : vault, bucket sauvegardé, désactivation | 5 | 0 |
+| `55_backup_rules` | Sauvegarde : refus | 2 | 7 |
+| `60_update_rules` | Mises à jour d'un bucket déjà immuable | 5 | 8 |
+| `70_context_rules` | Contexte de la demande | 0 | 1 |
 
 Les mises à jour partent du principe que le provider envoie **la ressource entière** à
 `cos.bucket.v1.update` (le payload Terraform complet), pas seulement les attributs modifiés :
@@ -346,26 +346,45 @@ Alternatives écartées : Terratest (Go, plus puissant pour vérifier côté API
 seconde stack), pytest-terraform (idem en Python, envisageable pour vérifier côté S3 depuis
 `bucketService`). tflint, checkov et `tofu validate` restent complémentaires en statique.
 
-### Les cas de refus et ce que le provider doit exposer
+### Les cas de refus : jugés par `toolchain_env.py`
 
-Un cas de refus envoie le payload invalide à l'orchestrateur et vérifie que **le DAG l'a
-refusé**. Pour ça, `main.tf` expose `bucket_status` et `bucket_status_reason`, lus sur la
-ressource avec `try(b.status, b.state.status, null)` : les noms de la console orchestrator
-(`status`, `status_reason` de la demande). Deux cas selon le provider :
+Sur une demande refusée par le DAG, le provider orchestrator **fait échouer l'`apply`** :
 
-- il remonte la demande refusée dans la ressource : les assertions comparent
-  `status == "DECLINED"` et le motif au message du DAG ;
-- il fait échouer l'`apply` sur un refus : les runs de refus sont alors en `fail` pour la
-  bonne raison, mais tofu ne sait pas l'attendre (`expect_failures` ne couvre pas les erreurs
-  de provider). Dans ce cas, dis-le : les fichiers `*_rules` deviendront une suite « doit
-  échouer » lancée à part, et les motifs restent couverts par les tests unitaires Python.
+```
+Error: Cannot create subscription "3caf2901-…"
+Demand create status is "CANCELLED" but should be "SUCCESS", status reason "1 validation error for
+BucketCreatePayload\nretention\n  Value error, default_days (1900 days) cannot be superior to 5 years …"
+```
 
-Au premier lancement d'un fichier `*_rules` sur INT, regarder le premier run :
-`status = null` signifie que l'attribut porte un autre nom dans le provider, à ajuster dans
-les deux outputs. Les refus de **schéma** (`BucketRetention`, classe de stockage inconnue,
-`immutability_choice` inconnu : source `schema` dans le commentaire « Attendu ») sont émis
-par pydantic à la lecture du payload ; si l'orchestrateur les remonte autrement qu'en
-`DECLINED`, ajuster `render_step` dans `generate_tests.py`.
+`tofu test` ne sait pas attendre une erreur de provider (`expect_failures` ne couvre que les
+variables, outputs, checks et pre/postconditions), et un run en erreur arrête le fichier. D'où
+le découpage : **un fichier par refus**, et le script juge la sortie de tofu :
+
+- `generate_tests.py` écrit, pour chaque refus, `<nn>_<slug>__<run>.tftest.hcl` (création du
+  bucket de base d'abord si c'est un update) et l'entrée correspondante de
+  `tests/expected_failures.json` : run attendu en échec, runs préalables, motif du DAG et sa
+  regex (le plafond en jours « (1826 days) » est générique, il dépend de la date du jour) ;
+- `toolchain_env.py --run test` lance **un processus tofu par fichier** (`--parallel` pour en
+  lancer plusieurs à la fois) et, pour un fichier listé dans le manifeste, remplace le verdict
+  de tofu par le sien : préalables passés **et** run attendu en `fail` **et** motif présent
+  dans la sortie = ✔ « refus attendu, motif conforme ». Un run attendu en refus qui **passe**
+  est une régression (le DAG accepte ce qu'il doit refuser), un refus sans le motif attendu
+  aussi (le DAG refuse pour une autre raison : lire le journal).
+
+```
+  ▶ 35_retention_rules__days_over_five_years
+  ✔ 35_retention_rules__days_over_five_years (1m12s) : refus attendu, motif conforme : « default_days (1900 days) cannot be superior to 5 years (1826 days, leap years included). »
+  ✘ 60_update_rules__ret_equal_bounds (2m03s) : ACCEPTÉ alors que le DAG doit refuser : « Retention default (5 days) cannot … »
+```
+
+Les refus de **schéma** (`BucketRetention`, classe de stockage ou `immutability_choice`
+inconnus ; source `schema` dans le commentaire « Attendu ») sont émis par pydantic à la
+lecture du payload : le provider les cite après « Value error, », seul le premier motif est
+attendu. Les refus de **service** et de **DAG** (`DeclineDemandException`) sont cités en
+entier, motifs joints par « | ».
+
+Avec OpenTofu 1.6 (pas de `-filter`), les fichiers de refus ne peuvent pas être jugés : ils
+apparaissent en échec, le script le dit.
 
 ### Environnement persistant et restauration (`terraform/persistent`, `terraform/restore`)
 

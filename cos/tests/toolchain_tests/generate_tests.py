@@ -6,20 +6,27 @@
     python generate_tests.py --summary  # tableau des scénarios (pour le README)
 
 Pour chaque run d'un scénario, l'oracle (le code des DAGs) donne l'issue de
-chaque bucket ajouté ou modifié, et les assertions sont écrites en
-conséquence :
+chaque bucket ajouté ou modifié :
 
-* accepté : la souscription existe, n'est pas refusée, le payload relu porte
-  ce qui a été envoyé ; pour un update, le `name` n'a pas changé ;
-* refusé : status DECLINED et motif = message exact du DAG (regex, les
-  nombres de jours « (1826 days) » sont génériques car ils dépendent de la
-  date : années bissextiles) ;
-* retiré (`drop`) : la souscription n'est plus dans les outputs.
+* accepté : le run reste dans le fichier du scénario (<nn>_<slug>.tftest.hcl)
+  avec ses assertions : la souscription existe, le payload relu porte ce qui a
+  été envoyé, et pour un update le `name` n'a pas changé ;
+* retiré (`drop`) : la souscription n'est plus dans les outputs ;
+* refusé : le provider orchestrator fait ÉCHOUER l'apply sur une demande
+  refusée (« Demand create status is CANCELLED … status reason … »), ce que
+  `tofu test` ne sait pas attendre (expect_failures ne couvre pas les erreurs
+  de provider) et qui arrête le fichier. Chaque refus a donc SON fichier
+  (<nn>_<slug>__<run>.tftest.hcl : le bucket de base s'il s'agit d'un update,
+  puis le run refusé, sans assertion), et le motif attendu est écrit dans
+  tests/expected_failures.json. toolchain_env.py lance ces fichiers et juge :
+  run en échec ET motif du DAG dans la sortie = succès ; run passé = échec
+  (le DAG accepte ce qu'il devrait refuser).
 """
 from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import logging
 import os
 import re
@@ -36,6 +43,7 @@ logging.getLogger("cos_service").setLevel(logging.ERROR)  # avertissements « le
 TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "terraform", "tests")
 HEADER = "# GÉNÉRÉ par generate_tests.py depuis scenario_matrix.py : ne pas éditer à la main."
 RESOURCE = "orchestrator_subscription_cosbucket_v1.bucket"
+MANIFEST = "expected_failures.json"  # dans terraform/tests/ : lu par toolchain_env.py
 
 
 @dataclass
@@ -46,6 +54,7 @@ class Step:
     payload: dict | None
     outcome: dag_oracle.Outcome | None
     created_in: str | None = None  # run qui a créé le bucket (pour vérifier `name`)
+    base_payload: dict | None = None  # update : dernier payload accepté du bucket
 
 
 # --------------------------------------------------------------------------- #
@@ -72,7 +81,7 @@ def plan_scenario(scenario: Scenario) -> list[tuple[Run, dict[str, dict], list[S
                 if payload == current_payload[key]:
                     raise ValueError(f"{scenario.filename} / {run.name} : {key!r} inchangé, le run n'enverrait rien")
                 outcome = dag_oracle.expected_update(current_imm[key], payload)
-                steps.append(Step(key, "update", payload, outcome, created_in[key]))
+                steps.append(Step(key, "update", payload, outcome, created_in[key], current_payload[key]))
             else:
                 outcome = dag_oracle.expected_create(payload)
                 steps.append(Step(key, "create", payload, outcome, run.name))
@@ -110,12 +119,21 @@ def hcl_value(value) -> str:
     raise TypeError(f"valeur HCL non gérée : {value!r}")
 
 
-def hcl_regex(message: str) -> str:
-    """Regex RE2 qui reconnaît le message exact, les décomptes de jours
-    « (1826 days » étant génériques (ils dépendent de la date du jour)."""
-    escaped = re.sub(r"([\\.^$*+?{}\[\]|()])", r"\\\1", message)
-    escaped = re.sub(r"\\\(\d+ days", r"\\(\\d+ days", escaped)
+def failure_regex(message: str) -> str:
+    """Regex Python qui reconnaît le message exact dans la sortie de tofu : les
+    décomptes du plafond en jours « (1826 days » sont génériques (1825 à 1827
+    selon la date du jour), les points de suspension acceptent leurs écritures
+    échappées."""
+    escaped = re.escape(message)
+    escaped = re.sub(r"\\\(182[5-7]\\ days", r"\\(\\d+ days", escaped)  # plafond 5 ans en jours
+    escaped = escaped.replace("…", r"(?:…|\\u2026|\.\.\.)")
     return escaped
+
+
+def expected_message(outcome: dag_oracle.Outcome) -> str:
+    """Motif à retrouver : pour un refus de schéma (pydantic) seul le premier
+    motif est sûr, le provider ne remonte que le texte de l'erreur."""
+    return outcome.message.split(" | ")[0] if outcome.source == "schema" else outcome.message
 
 
 def hcl_string(text: str) -> str:
@@ -170,30 +188,15 @@ def _echo_assertions(key: str, echo: dict, prefix: str) -> list[str]:
 
 def render_step(step: Step) -> str:
     key = step.key
-    status = f'output.bucket_status["{key}"]'
-    reason = f'output.bucket_status_reason["{key}"]'
     label = f"{key} ({step.kind})"
     if step.kind == "drop":
         return _assert(
             f'!contains(keys(output.bucket_names), "{key}")',
             f"{label} : le bucket aurait dû être détruit.",
         )
-    outcome = step.outcome
-    if outcome.declined:
-        message = outcome.message
-        if outcome.source == "schema":  # format du refus d'un payload invalide : seul le premier motif est sûr
-            message = message.split(" | ")[0]
-        return (
-            _assert(f'{status} == "DECLINED"',
-                    f"{label} : aurait dû être refusé ({message}) ; status = ${{jsonencode({status})}}.")
-            + _assert(f"can(regex({hcl_string(hcl_regex(message))}, {reason}))",
-                      f"{label} : motif inattendu : ${{{reason}}}")
-        )
-    parts = [
-        _assert(f'{status} == null || {status} != "DECLINED"',
-                f"{label} : refusé alors que le DAG l'accepte : ${{{reason}}}"),
-        _assert(f'{RESOURCE}["{key}"].name != ""', f"{label} : souscription sans name."),
-    ]
+    if step.outcome.declined:
+        return ""  # l'apply échoue avant toute assertion : jugé par toolchain_env.py (expected_failures.json)
+    parts = [_assert(f'{RESOURCE}["{key}"].name != ""', f"{label} : souscription sans name.")]
     if step.kind == "update":
         parts.append(_assert(
             f'{RESOURCE}["{key}"].name == run.{step.created_in}.bucket_names["{key}"]',
@@ -210,38 +213,95 @@ def describe(step: Step) -> str:
     return f"#   {step.key} : {step.kind} -> {verdict}"
 
 
-def render_scenario(scenario: Scenario) -> str:
-    out = [HEADER, f"# {scenario.title}", "#"]
-    out.extend(f"# {line}" for line in _wrap(scenario.doc))
+def _render_run(out: list[str], run: Run, buckets: dict[str, dict], steps: list[Step]) -> None:
+    out.append("")
+    if run.note:
+        out.extend(f"# {line}" for line in _wrap(run.note))
+    out.append("# Attendu :")
+    out.extend(describe(step) for step in steps)
+    out.append(f'run "{run.name}" {{')
+    out.append("  variables {")
+    if buckets:
+        out.append("    buckets = {")
+        width = max(len(k) for k in buckets)
+        for key, payload in buckets.items():
+            out.append(f"      {key.ljust(width)} = {hcl_value(payload)}")
+        out.append("    }")
+    else:
+        out.append("    buckets = {}")
+    out.append("  }")
+    body = "".join(render_step(step) for step in steps).rstrip("\n")
+    if body:
+        out.append("")
+        out.append(body)
+    out.append("}")
+
+
+def _render_file(scenario: Scenario, title: str, doc: str, with_vault: bool,
+                 runs: list[tuple[Run, dict[str, dict], list[Step]]], label: str = "") -> str:
+    out = [HEADER, f"# {title}", "#"]
+    out.extend(f"# {line}" for line in _wrap(doc))
     out.append("")
     out.append("variables {")
-    if needs_vault(scenario):
-        out.append(f'  scenario   = "{scenario.slug.replace("_", " ")}"')
+    name = scenario.slug.replace("_", " ") + (f" {label}" if label else "")
+    if with_vault:
+        out.append(f'  scenario   = "{name}"')
         out.append("  with_vault = true")
     else:
-        out.append(f'  scenario = "{scenario.slug.replace("_", " ")}"')
+        out.append(f'  scenario = "{name}"')
     out.append("}")
-    for run, buckets, steps in plan_scenario(scenario):
-        out.append("")
-        if run.note:
-            out.extend(f"# {line}" for line in _wrap(run.note))
-        out.append("# Attendu :")
-        out.extend(describe(step) for step in steps)
-        out.append(f'run "{run.name}" {{')
-        out.append("  variables {")
-        if buckets:
-            out.append("    buckets = {")
-            width = max(len(k) for k in buckets)
-            for key, payload in buckets.items():
-                out.append(f"      {key.ljust(width)} = {hcl_value(payload)}")
-            out.append("    }")
-        else:
-            out.append("    buckets = {}")
-        out.append("  }")
-        out.append("")
-        out.append("".join(render_step(step) for step in steps).rstrip("\n"))
-        out.append("}")
+    for run, buckets, steps in runs:
+        _render_run(out, run, buckets, steps)
     return "\n".join(out) + "\n"
+
+
+def _has_backup(buckets: dict[str, dict]) -> bool:
+    return any(dag_oracle.backup_block(p) is not None for p in buckets.values())
+
+
+def split_scenario(scenario: Scenario) -> tuple[dict[str, str], dict[str, dict]]:
+    """Fichiers d'un scénario : la chaîne des runs acceptés, puis un fichier par
+    refus. Renvoie ({nom: contenu}, {nom: entrée du manifeste})."""
+    files, manifest = {}, {}
+    chain = []
+    for run, buckets, steps in plan_scenario(scenario):
+        refused = [s for s in steps if s.outcome is not None and s.outcome.declined]
+        if not refused:
+            if steps:
+                chain.append((run, buckets, steps))
+            continue
+        if len(steps) != 1:
+            raise ValueError(f"{scenario.filename} / {run.name} : un run refusé ne porte qu'un seul bucket")
+        step = refused[0]
+        name = f"{scenario.number}_{scenario.slug}__{run.name}.tftest.hcl"
+        if step.kind == "create":
+            own_buckets = {step.key: step.payload}
+            prelude = []
+        else:
+            base_payload = step.base_payload
+            base = dag_oracle.expected_create(base_payload)
+            step = Step(step.key, "update", step.payload, dag_oracle.expected_update(base.immutability, step.payload), "create_base")
+            if step.outcome.accepted:
+                raise ValueError(f"{name} : refusé dans la chaîne mais accepté sur une base créée directement")
+            own_buckets = {step.key: step.payload}
+            prelude = [(Run("create_base", {step.key: base_payload}), {step.key: base_payload},
+                        [Step(step.key, "create", base_payload, base, "create_base")])]
+        doc = (f"{scenario.title} : cas de refus « {run.name} ». " + (run.note or "") +
+               " Le provider fait échouer l'apply du run refusé ; toolchain_env.py vérifie "
+               "que la sortie porte le motif du DAG (tests/expected_failures.json).")
+        with_vault = _has_backup(own_buckets) or any(_has_backup(b) for _, b, _ in prelude)
+        files[name] = _render_file(scenario, f"{scenario.title} : refus « {run.name} »", doc, with_vault,
+                                   prelude + [(run, own_buckets, [step])], label=run.name)
+        message = expected_message(step.outcome)
+        manifest[name] = {
+            "scenario": scenario.slug, "run": run.name, "bucket": step.key, "kind": step.kind,
+            "source": step.outcome.source, "message": message, "regex": failure_regex(message),
+            "prelude": [r.name for r, _, _ in prelude],
+        }
+    if chain:
+        files[scenario.filename] = _render_file(scenario, scenario.title, scenario.doc,
+                                                any(_has_backup(b) for _, b, _ in chain), chain)
+    return files, manifest
 
 
 def _wrap(text: str, width: int = 78) -> list[str]:
@@ -262,11 +322,16 @@ def _wrap(text: str, width: int = 78) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 def rendered_files() -> dict[str, str]:
-    files = {}
+    """Tous les fichiers générés, manifeste compris ({nom: contenu})."""
+    files, manifest = {}, {}
     for scenario in SCENARIOS:
-        if scenario.filename in files:
-            raise ValueError(f"deux scénarios produisent {scenario.filename}")
-        files[scenario.filename] = render_scenario(scenario)
+        scenario_files, scenario_manifest = split_scenario(scenario)
+        for name in scenario_files:
+            if name in files:
+                raise ValueError(f"deux scénarios produisent {name}")
+        files.update(scenario_files)
+        manifest.update(scenario_manifest)
+    files[MANIFEST] = json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
     return files
 
 
@@ -313,12 +378,12 @@ def write(tests_dir: str = TESTS_DIR) -> list[str]:
 
 def summary() -> str:
     """Tableau Markdown des scénarios : fichier, runs, buckets acceptés / refusés."""
-    rows = ["| Fichier | Couvre | Runs | Acceptés | Refusés |", "|---|---|---|---|---|"]
+    rows = ["| Scénario | Couvre | Runs acceptés | Fichiers de refus |", "|---|---|---|---|"]
     for scenario in SCENARIOS:
-        steps = [s for _, _, steps in plan_scenario(scenario) for s in steps if s.outcome is not None]
-        ok = sum(s.outcome.accepted for s in steps)
-        ko = len(steps) - ok
-        rows.append(f"| `{scenario.filename}` | {scenario.title} | {len(scenario.runs)} | {ok} | {ko} |")
+        files, manifest = split_scenario(scenario)
+        accepted = sum(1 for _, _, steps in plan_scenario(scenario) for s in steps
+                       if s.outcome is None or s.outcome.accepted)
+        rows.append(f"| `{scenario.number}_{scenario.slug}` | {scenario.title} | {accepted} | {len(manifest)} |")
     return "\n".join(rows)
 
 
