@@ -188,17 +188,21 @@ def bucket_clean() -> None:
         state_manager: StateManager = depends(state_manager_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> bool:
-        """Trace la règle en base. Renvoie vrai : le sensor consomme ce résultat,
-        c'est ce qui en fait une étape amont (Airflow ne déduit l'ordre que des
-        valeurs consommées ; sans ça la sauvegarde échouait dans son coin et le
-        clean continuait)."""
+        """Trace la règle en base et renvoie ``is_expiration_created`` tel quel.
+
+        Le sensor consomme ce résultat (et non le drapeau d'origine) : c'est ce
+        qui fait de la sauvegarde une étape amont, Airflow ne déduisant l'ordre
+        que des valeurs consommées (sans ça elle échouait dans son coin et le
+        clean continuait). Un mot-clé supplémentaire sur le sensor est refusé
+        par la bibliothèque ("unexpected keyword"), d'où le passage par le
+        drapeau existant."""
         from cos_service.services.lifecyclePolicyRuleService import (
             complete_lifecycle_policy_rule_creation,
             disable_lifecycle_policy_rules_by_bucket_sub_id,
         )
 
         if not is_expiration_created:
-            return True
+            return False
         try:
             disable_lifecycle_policy_rules_by_bucket_sub_id(bucket, payload.requestor, session)
             complete_lifecycle_policy_rule_creation(
@@ -220,12 +224,11 @@ def bucket_clean() -> None:
         bucket: dict,
         api_key: str,
         is_expiration_created: bool,
-        rule_saved: bool,
         state_manager: StateManager = depends(state_manager_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> PokeReturnValue:
         """Sonde le bucket jusqu'à ce qu'il soit vide ; sans règle posée, terminé tout de suite.
-        ``rule_saved`` n'est là que pour attendre la sauvegarde en base."""
+        ``is_expiration_created`` vient de la sauvegarde en base : le sensor l'attend."""
         from cos_service.services.bucketService import check_bucket_has_contents
         from cos_service.services.ibm_iam_service import get_iam_access_token
 
@@ -287,10 +290,10 @@ def bucket_clean() -> None:
     api_key = get_cos_api_key(bucket=bucket)
     is_bucket_empty = is_bucket_empty(bucket=bucket, api_key=api_key)
     is_expiration_created = create_expiration_rule(api_key=api_key, bucket=bucket, is_bucket_empty=is_bucket_empty)
+    # Le sensor consomme le drapeau renvoyé par la sauvegarde en base, pas celui
+    # de create_expiration_rule : il attend ainsi que la règle soit tracée.
     rule_saved = save_create_expiration_rule_in_db(is_expiration_created=is_expiration_created, bucket=bucket)
-    check_clean_done = scheduler_clean_bucket(
-        bucket=bucket, api_key=api_key, is_expiration_created=is_expiration_created, rule_saved=rule_saved
-    )
+    check_clean_done = scheduler_clean_bucket(bucket=bucket, api_key=api_key, is_expiration_created=rule_saved)
     is_expiration_deleted = delete_expiration_rule(
         bucket=bucket, api_key=api_key, is_expiration_created=is_expiration_created, check_clean_done=check_clean_done
     )

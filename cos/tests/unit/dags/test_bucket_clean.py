@@ -70,10 +70,12 @@ def test_the_sensor_waits_for_the_db_save(clean_dag):
     coin et le clean continue (vu en recette)."""
     import inspect
 
-    assert "rule_saved" in inspect.signature(clean_dag.steps["scheduler_clean_bucket"]).parameters
+    # Pas de mot-clé supplémentaire sur le sensor (la bibliothèque le refuse :
+    # "unexpected keyword") : le sensor consomme le drapeau renvoyé par la sauvegarde.
+    assert "rule_saved" not in inspect.signature(clean_dag.steps["scheduler_clean_bucket"]).parameters
     source = inspect.getsource(clean_dag.module)
     assert "rule_saved = save_create_expiration_rule_in_db(" in source
-    assert "rule_saved=rule_saved" in source
+    assert "scheduler_clean_bucket(bucket=bucket, api_key=api_key, is_expiration_created=rule_saved)" in source
 
 
 def test_only_the_scheduler_is_a_sensor_with_a_bounded_wait(clean_dag):
@@ -227,7 +229,8 @@ class TestSaveCreateExpirationRuleInDb:
         )
 
     def test_nothing_recorded_without_a_rule(self, clean_dag, services, payload):
-        assert self.run(clean_dag, payload, created=False) is True
+        # Le drapeau est rendu tel quel : le sensor et le retrait de la règle le relisent.
+        assert self.run(clean_dag, payload, created=False) is False
 
         services.lifecyclePolicyRuleService.disable_lifecycle_policy_rules_by_bucket_sub_id.assert_not_called()
         services.lifecyclePolicyRuleService.complete_lifecycle_policy_rule_creation.assert_not_called()
@@ -244,7 +247,7 @@ class TestSaveCreateExpirationRuleInDb:
 class TestSchedulerCleanBucket:
     def run(self, clean_dag, state_manager, created):
         return clean_dag.steps["scheduler_clean_bucket"](
-            bucket=bucket_row(), api_key="api-key", is_expiration_created=created, rule_saved=True,
+            bucket=bucket_row(), api_key="api-key", is_expiration_created=created,
             state_manager=state_manager, session="session",
         )
 
