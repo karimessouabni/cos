@@ -1,7 +1,10 @@
 # ADR 0003 : période de grâce et quarantaine avant le clean d'un bucket
 
-- Statut : accepté, implémenté (`cos.bucket.v1.clean`, `cos.bucket.v1.cancel_clean`)
+- Statut : accepté, mis en œuvre par étapes
 - Date : 2026-10-06
+- Étape en cours : **v1, sans quarantaine** (branche `feature/clean-grace-period-v1`) :
+  grâce réglable en minutes, annulation, contrôle des verrous par le listing.
+  La quarantaine CBR (décisions 2 et 3 ci-dessous) est la v2, portée par `main`.
 
 ## Contexte
 
@@ -52,13 +55,21 @@ Contraintes établies :
    échec) et sur `cancelled` (idempotente : relance seulement la levée de la
    quarantaine). Refusée dès que le clean a commencé : plus de retour en
    arrière une fois la règle posée.
-6. **Les buckets à rétention ou Object Lock sont refusés à la validation**,
-   avec un message qui dit la cause et l'issue (supprimer soi-même les objets
-   déverrouillés, ou relancer quand toutes les rétentions ont expiré). La
-   documentation IBM garantit que l'expiration diffère les objets protégés
-   plutôt que d'échouer ; une acceptation avec borne de date calculée par le
-   listing (`LastModified + durée maximale`) est le deuxième temps, non
-   implémenté.
+6. **Les buckets à rétention ou Object Lock sont jugés sur une date, pas sur
+   la base.** La documentation IBM garantit que l'expiration diffère les objets
+   protégés plutôt que d'échouer : un bucket verrouillé n'est pas dangereux à
+   nettoyer, il est lent. Un objet protégé par la politique du bucket est libre
+   au plus tard à `LastModified + durée maximale` (`retention_maximum` en
+   jours, ou la durée d'Object Lock). Un passage de listing, versions comprises
+   pour l'Object Lock, donne le `LastModified` le plus récent, donc la borne
+   (`latest_object_modification`, une requête par tranche de mille, aucun
+   `HEAD`). Borne avant la fin de la grâce : accepté. Après : refusé avec la
+   date à laquelle relancer. Les legal holds et les rétentions explicites plus
+   longues que la politique ne sont pas vus par cette borne ; ils retardent
+   alors le vidage sans le mettre en danger (sensor, puis timeout).
+7. **La clé API COS ne traverse pas la grâce.** Elle est lue dans Vault pour
+   le contrôle des verrous, puis relue après le délai pour le vidage : son bail
+   peut être plus court que sept jours.
 
 ## Conséquences
 
@@ -73,8 +84,11 @@ Contraintes établies :
   zone sur les premiers clients, puis `enabled`).
 - Le state client porte `clean_status`, `clean_requested_at`,
   `clean_execute_at` et `quarantine`.
-- La grâce est réglable (Airflow Variable `cos_clean_grace_days`, sinon
-  `COS_CLEAN_GRACE_DAYS`, défaut 7) : les tests toolchain en INT la mettent à 0.
+- La grâce est réglable en minutes (Airflow Variable `cos_clean_grace_minutes`,
+  sinon `COS_CLEAN_GRACE_MINUTES`, défaut 10080 soit 7 jours) : les tests
+  toolchain en INT la mettent à quelques minutes.
+- Sans quarantaine (v1), ce que le client écrit pendant la grâce est supprimé
+  aussi : le state le dit (`clean_notice`) avec la date d'exécution.
 - Le succès n'est posé qu'après la levée de la quarantaine. Un échec après la
   décision laisse le bucket en quarantaine et `failed` ; `cancel_clean` la lève.
 - Points à surveiller en exploitation : la propagation d'une règle CBR prend

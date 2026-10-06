@@ -1,7 +1,5 @@
 """Tests des étapes du DAG ``cos.bucket.v1.cancel_clean``."""
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
-
 import pytest
 
 from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
@@ -37,15 +35,10 @@ def payload(cancel_dag):
     return cancel_dag.module.BucketCancelCleanPayload(subscription_id="sub-1", requestor="karim")
 
 
-@pytest.fixture
-def tf():
-    return MagicMock(name="tf")
-
-
 def test_dag_identity(cancel_dag):
     assert cancel_dag.module.bucket_cancel_clean.dag_name == "cos.bucket.v1.cancel_clean"
     assert cancel_dag.module.bucket_cancel_clean.config.options == {"lock_subscription_on_failure": False}
-    assert list(cancel_dag.steps) == ["validate_bucket", "cancel_clean", "lift_quarantine"]
+    assert list(cancel_dag.steps) == ["validate_bucket", "cancel_clean"]
 
 
 class TestValidateBucket:
@@ -57,11 +50,12 @@ class TestValidateBucket:
 
         assert self.run(cancel_dag, payload) == bucket_row()
 
-    @pytest.mark.parametrize("status", [CleanStatus.FAILED.value, CleanStatus.CANCELLED.value])
-    def test_a_failed_or_cancelled_clean_can_be_cancelled_again_to_lift_the_quarantine(self, cancel_dag, services, payload, status):
-        services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_status=status, clean_execute_at=in_days(-3))
+    def test_a_failed_clean_can_be_cancelled_to_allow_a_new_one(self, cancel_dag, services, payload):
+        services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(
+            clean_status=CleanStatus.FAILED.value, clean_execute_at=in_days(-3)
+        )
 
-        assert self.run(cancel_dag, payload)["clean_status"] == status
+        assert self.run(cancel_dag, payload)["clean_status"] == CleanStatus.FAILED.value
 
     @pytest.mark.parametrize("row", [None, bucket_row(name="")])
     def test_missing_bucket_is_declined(self, cancel_dag, services, payload, row):
@@ -70,7 +64,7 @@ class TestValidateBucket:
         with pytest.raises(DeclineDemandException, match="doesn't exist or not fully created"):
             self.run(cancel_dag, payload)
 
-    @pytest.mark.parametrize("status", [CleanStatus.INPROGRESS.value, CleanStatus.SUCCESS.value, None])
+    @pytest.mark.parametrize("status", [CleanStatus.INPROGRESS.value, CleanStatus.SUCCESS.value, CleanStatus.CANCELLED.value, None])
     def test_nothing_to_cancel_is_declined(self, cancel_dag, services, payload, status):
         services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_status=status)
 
@@ -91,7 +85,7 @@ class TestCancelClean:
             bucket=bucket_row(clean_status=status), state_manager=state_manager, session="session"
         )
 
-    @pytest.mark.parametrize("status", [CleanStatus.SCHEDULED, CleanStatus.FAILED, CleanStatus.CANCELLED])
+    @pytest.mark.parametrize("status", [CleanStatus.SCHEDULED, CleanStatus.FAILED])
     def test_transition_is_conditional_on_the_current_status(self, cancel_dag, services, state_manager, status):
         services.bucketService.transition_bucket_clean.return_value = True
 
@@ -111,27 +105,3 @@ class TestCancelClean:
         state_manager.push_state.assert_not_called()
 
 
-class TestLiftQuarantine:
-    def run(self, cancel_dag, payload, tf, state_manager):
-        return cancel_dag.steps["lift_quarantine"](
-            bucket=bucket_row(), cancelled=True, payload=payload, tf=tf, vault="vault", reader="reader",
-            state_manager=state_manager, session="session",
-        )
-
-    def test_lifts_the_quarantine_through_the_workspace(self, cancel_dag, services, payload, tf, state_manager):
-        assert self.run(cancel_dag, payload, tf, state_manager) is True
-
-        services.quarantine_service.set_bucket_quarantine.assert_called_once_with(
-            bucket=bucket_row(), enabled=False, payload=payload, description="my bucket",
-            tf=tf, vault="vault", reader="reader", session="session",
-        )
-        state_manager.push_state.assert_called_once_with({"quarantine": False})
-
-    def test_apply_failure_keeps_the_cancelled_status_and_reraises(self, cancel_dag, services, payload, tf, state_manager):
-        services.quarantine_service.set_bucket_quarantine.side_effect = RuntimeError("apply failed")
-
-        with pytest.raises(RuntimeError, match="apply failed"):
-            self.run(cancel_dag, payload, tf, state_manager)
-
-        services.bucketService.update_bucket_clean_status.assert_not_called()
-        state_manager.push_state.assert_not_called()

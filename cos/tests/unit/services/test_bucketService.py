@@ -364,3 +364,64 @@ class TestCleanScheduling:
         assert statement.values_ == {"clean_status": CleanStatus.INPROGRESS.value}
         assert statement.wheres == [("==", "subscription_id", "sub-1"), ("==", "clean_status", "scheduled")]
         session.commit.assert_called_once()
+
+
+# --- listing : dernière modification (borne de fin des verrous) ------------------------
+
+class TestLatestObjectModification:
+    def page(self, entries: str, truncated: bool = False, next_token: str = "", versions: bool = False) -> str:
+        marker = ("<NextKeyMarker>k</NextKeyMarker><NextVersionIdMarker>v</NextVersionIdMarker>"
+                  if versions else f"<NextContinuationToken>{next_token}</NextContinuationToken>")
+        return (f'<ListBucketResult xmlns="{S3}"><IsTruncated>{"true" if truncated else "false"}</IsTruncated>'
+                f'{marker if truncated else ""}{entries}</ListBucketResult>')
+
+    def test_most_recent_date_across_pages(self, http):
+        from datetime import datetime, timezone
+
+        http.get.side_effect = [
+            xml_response(self.page(
+                "<Contents><Key>a</Key><LastModified>2026-10-01T10:00:00.000Z</LastModified></Contents>"
+                "<Contents><Key>b</Key><LastModified>2026-10-03T10:00:00.000Z</LastModified></Contents>",
+                truncated=True, next_token="tok2",
+            )),
+            xml_response(self.page("<Contents><Key>c</Key><LastModified>2026-10-02T10:00:00.000Z</LastModified></Contents>")),
+        ]
+
+        latest = svc.latest_object_modification("tok", BUCKET)
+
+        assert latest == datetime(2026, 10, 3, 10, 0, tzinfo=timezone.utc)
+        urls = [call.args[0] for call in http.get.call_args_list]
+        assert urls[0] == "https://s3.direct.eu-de.example/bucket-a?list-type=2&max-keys=1000"
+        assert urls[1] == "https://s3.direct.eu-de.example/bucket-a?list-type=2&max-keys=1000&continuation-token=tok2"
+        assert http.get.call_args.kwargs["headers"]["Resource-Crn"] == "crn:cos"
+
+    def test_versions_listing_walks_every_version(self, http):
+        from datetime import datetime, timezone
+
+        http.get.side_effect = [
+            xml_response(self.page(
+                "<Version><Key>a</Key><LastModified>2026-10-05T10:00:00.000Z</LastModified></Version>"
+                "<DeleteMarker><Key>a</Key><LastModified>2026-10-09T10:00:00.000Z</LastModified></DeleteMarker>",
+                truncated=True, versions=True,
+            )),
+            xml_response(self.page("<Version><Key>a</Key><LastModified>2026-10-01T10:00:00.000Z</LastModified></Version>")),
+        ]
+
+        latest = svc.latest_object_modification("tok", BUCKET, versions=True)
+
+        # Les marqueurs de suppression ne sont jamais verrouillés : ignorés.
+        assert latest == datetime(2026, 10, 5, 10, 0, tzinfo=timezone.utc)
+        urls = [call.args[0] for call in http.get.call_args_list]
+        assert urls[0] == "https://s3.direct.eu-de.example/bucket-a?versions&max-keys=1000"
+        assert urls[1] == "https://s3.direct.eu-de.example/bucket-a?versions&max-keys=1000&key-marker=k&version-id-marker=v"
+
+    def test_empty_bucket_has_no_date(self, http):
+        http.get.return_value = xml_response(self.page(""))
+
+        assert svc.latest_object_modification("tok", BUCKET) is None
+
+    def test_http_error_is_raised(self, http):
+        http.get.return_value = xml_response("<Error/>", status_code=403)
+
+        with pytest.raises(RuntimeError, match="HTTP 403"):
+            svc.latest_object_modification("tok", BUCKET)

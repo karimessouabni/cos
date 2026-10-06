@@ -187,6 +187,47 @@ def check_bucket_has_contents(access_token: str, bucket: dict) -> bool:
     return len(root.findall("s3:Contents", S3_NAMESPACES)) > 0
 
 
+S3_LIST_PAGE_SIZE = 1000
+
+
+def _parse_s3_date(text: str) -> datetime:
+    """``LastModified`` S3 : ISO 8601 en UTC, ``2026-10-06T10:00:00.000Z``."""
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
+def latest_object_modification(access_token: str, bucket: dict, versions: bool = False) -> datetime | None:
+    """Date de modification la plus récente parmi les objets du bucket, versions
+    non courantes comprises avec ``versions`` (Object Lock : chaque version a son
+    propre verrou). None si le bucket est vide. Une requête par tranche de
+    1 000 entrées, pas de HEAD par objet.
+
+    Sert à borner la fin des verrous : un objet protégé par la politique du
+    bucket est libre au plus tard à ``LastModified + durée maximale``.
+    """
+    headers = _s3_headers(access_token, bucket["cos"]["crn"])
+    base = bucket["virtual_server_endpoint"]
+    latest: datetime | None = None
+    params = {"versions": ""} if versions else {"list-type": "2"}
+    params["max-keys"] = str(S3_LIST_PAGE_SIZE)
+    while True:
+        query = "&".join(f"{k}={v}" if v != "" else k for k, v in params.items())
+        root = _s3_get_xml(f"{base}?{query}", headers)
+        entries = root.findall("s3:Version", S3_NAMESPACES) if versions else root.findall("s3:Contents", S3_NAMESPACES)
+        for entry in entries:
+            modified = entry.find("s3:LastModified", S3_NAMESPACES)
+            if modified is not None and modified.text:
+                moment = _parse_s3_date(modified.text)
+                latest = moment if latest is None or moment > latest else latest
+        truncated = root.find("s3:IsTruncated", S3_NAMESPACES)
+        if truncated is None or truncated.text != "true":
+            return latest
+        if versions:
+            params["key-marker"] = root.findtext("s3:NextKeyMarker", "", S3_NAMESPACES)
+            params["version-id-marker"] = root.findtext("s3:NextVersionIdMarker", "", S3_NAMESPACES)
+        else:
+            params["continuation-token"] = root.findtext("s3:NextContinuationToken", "", S3_NAMESPACES)
+
+
 def is_versioning_enabled(access_token: str, bucket_vpe: str) -> bool:
     root = _s3_get_xml(f"{bucket_vpe}?versioning", _s3_headers(access_token))
     status = root.find("s3:Status", S3_NAMESPACES)

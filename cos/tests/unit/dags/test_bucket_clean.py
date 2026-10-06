@@ -1,4 +1,4 @@
-"""Tests des étapes du DAG ``cos.bucket.v1.clean`` (période de grâce + quarantaine)."""
+"""Tests des étapes du DAG ``cos.bucket.v1.clean`` (période de grâce v1, sans quarantaine)."""
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -17,6 +17,8 @@ def bucket_row(**overrides) -> dict:
         "clean_execute_at": None,
         "virtual_server_endpoint": "https://vpe/bucket-a",
         "retention_enabled": False,
+        "retention_maximum": None,
+        "retention_default": None,
         "object_lock_duration_days": None,
         "object_lock_duration_years": None,
         "workspace": {"workspace_id": "ws-1"},
@@ -24,6 +26,10 @@ def bucket_row(**overrides) -> dict:
     }
     row.update(overrides)
     return row
+
+
+def utc(*args) -> datetime:
+    return datetime(*args, tzinfo=timezone.utc)
 
 
 class S3Error(Exception):
@@ -48,13 +54,6 @@ def s3(services):
     return services
 
 
-@pytest.fixture
-def tf():
-    from unittest.mock import MagicMock
-
-    return MagicMock(name="tf")
-
-
 def assert_failed(services, state_manager):
     services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", CleanStatus.FAILED, "session")
     state_manager.push_state.assert_called_once_with({"clean_status": CleanStatus.FAILED.value})
@@ -65,8 +64,8 @@ def test_dag_identity(clean_dag):
     assert clean_dag.module.bucket_clean.config.options == {"lock_subscription_on_failure": False}
     assert list(clean_dag.steps) == [
         "validate_bucket",
+        "check_locks",
         "schedule_clean",
-        "quarantine_bucket",
         "claim_clean",
         "get_cos_api_key",
         "is_bucket_empty",
@@ -75,12 +74,12 @@ def test_dag_identity(clean_dag):
         "scheduler_clean_bucket",
         "delete_expiration_rule",
         "save_delete_expiration_rule_in_db",
-        "lift_quarantine",
+        "complete_clean",
     ]
 
 
-def test_wiring_waits_for_the_grace_period_between_quarantine_and_claim(clean_dag):
-    """Le sensor de date est câblé entre la quarantaine et la décision ; il lit la
+def test_wiring_waits_for_the_grace_period_between_schedule_and_claim(clean_dag):
+    """Le sensor de date est câblé entre la programmation et la décision ; il lit la
     date renvoyée par schedule_clean. Airflow ne déduit l'ordre que des valeurs
     consommées : chaque étape de base est consommée par la suivante."""
     import inspect
@@ -88,13 +87,13 @@ def test_wiring_waits_for_the_grace_period_between_quarantine_and_claim(clean_da
     source = inspect.getsource(clean_dag.module)
     assert 'task_id="wait_for_grace_period"' in source
     assert "xcom_pull(task_ids='%s') }}\" % execute_at.operator.task_id" in source
-    assert "quarantined >> wait" in source and "wait >> claimed" in source
-    assert "claim_clean(bucket=bucket, quarantined=quarantined)" in source
+    assert "execute_at >> wait" in source and "wait >> claimed" in source
+    assert "schedule_clean(bucket=bucket, locked_until=lock_check)" in source
+    assert "claim_clean(bucket=bucket, execute_at=execute_at)" in source
     assert "get_cos_api_key(bucket=bucket, claimed=claimed)" in source
     # Un step.sensor refuse un mot-clé supplémentaire : il consomme le drapeau renvoyé par la sauvegarde.
     assert "scheduler_clean_bucket(bucket=bucket, api_key=api_key, is_expiration_created=rule_saved)" in source
-    assert "rule_saved=" not in source.split("def bucket_clean")[1].split("scheduler_clean_bucket(bucket=")[0]
-    assert "lift_quarantine(bucket=bucket, rules_saved=rules_saved)" in source
+    assert "complete_clean(bucket=bucket, rules_saved=rules_saved)" in source
 
 
 def test_only_the_scheduler_is_a_sensor_with_a_bounded_wait(clean_dag):
@@ -106,14 +105,45 @@ def test_only_the_scheduler_is_a_sensor_with_a_bounded_wait(clean_dag):
 
 class TestGracePeriod:
     def test_defaults_to_seven_days(self, clean_dag, monkeypatch):
-        monkeypatch.delenv("COS_CLEAN_GRACE_DAYS", raising=False)
+        monkeypatch.delenv("COS_CLEAN_GRACE_MINUTES", raising=False)
 
         assert clean_dag.module.grace_period() == timedelta(days=7)
 
-    def test_can_be_shortened_for_the_toolchain_tests(self, clean_dag, monkeypatch):
-        monkeypatch.setenv("COS_CLEAN_GRACE_DAYS", "0")
+    def test_is_set_in_minutes_for_the_toolchain_tests(self, clean_dag, monkeypatch):
+        monkeypatch.setenv("COS_CLEAN_GRACE_MINUTES", "5")
 
-        assert clean_dag.module.grace_period() == timedelta(0)
+        assert clean_dag.module.grace_period() == timedelta(minutes=5)
+
+
+class TestLockPolicy:
+    """La borne de fin des verrous : LastModified le plus récent + durée maximale."""
+
+    def test_no_policy_means_nothing_locked(self, clean_dag):
+        assert clean_dag.module.lock_policy(bucket_row()) is None
+        assert clean_dag.module.locked_until(bucket_row(), utc(2026, 10, 1)) is None
+
+    def test_retention_uses_the_maximum_in_days(self, clean_dag):
+        row = bucket_row(retention_enabled=True, retention_maximum=30, retention_default=10)
+
+        assert clean_dag.module.lock_policy(row)[0] == "retention"
+        assert clean_dag.module.locked_until(row, utc(2026, 10, 1)) == utc(2026, 10, 31)
+
+    def test_retention_falls_back_to_the_default_then_to_unknown(self, clean_dag):
+        assert clean_dag.module.locked_until(
+            bucket_row(retention_enabled=True, retention_default=10), utc(2026, 10, 1)
+        ) == utc(2026, 10, 11)
+        assert clean_dag.module.lock_policy(bucket_row(retention_enabled=True)) == ("retention", None)
+
+    def test_object_lock_in_days_or_years(self, clean_dag):
+        assert clean_dag.module.locked_until(
+            bucket_row(object_lock_duration_days=45), utc(2026, 10, 1)
+        ) == utc(2026, 11, 15)
+        assert clean_dag.module.locked_until(
+            bucket_row(object_lock_duration_years=1), utc(2024, 2, 29)
+        ) == utc(2025, 2, 28)  # année bissextile : relativedelta, pas 365 jours
+
+    def test_empty_bucket_has_no_lock_to_wait_for(self, clean_dag):
+        assert clean_dag.module.locked_until(bucket_row(retention_enabled=True, retention_maximum=30), None) is None
 
 
 class TestValidateBucket:
@@ -152,36 +182,98 @@ class TestValidateBucket:
         assert self.run(clean_dag, payload)["clean_status"] == status
 
     @pytest.mark.parametrize("locked", [
-        {"retention_enabled": True},
+        {"retention_enabled": True, "retention_maximum": 30},
         {"object_lock_duration_days": 30},
-        {"object_lock_duration_years": 1},
     ])
-    def test_locked_objects_cannot_expire_so_the_clean_is_declined_with_a_way_out(self, clean_dag, services, payload, locked):
+    def test_locks_are_not_judged_from_the_database_alone(self, clean_dag, services, payload, locked):
         services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(**locked)
 
-        with pytest.raises(DeclineDemandException) as excinfo:
+        assert self.run(clean_dag, payload) == bucket_row(**locked)
+
+    def test_no_endpoint_means_no_listing_so_declined(self, clean_dag, services, payload):
+        services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(virtual_server_endpoint=None)
+
+        with pytest.raises(DeclineDemandException, match="no endpoint"):
             self.run(clean_dag, payload)
+
+
+class TestCheckLocks:
+    def run(self, clean_dag, row):
+        return clean_dag.steps["check_locks"](bucket=row, vault="vault", reader="reader")
+
+    @pytest.fixture
+    def listing(self, services):
+        services.vault_service.get_cos_api_key.return_value = "api-key"
+        services.ibm_iam_service.get_iam_access_token.return_value = "tok"
+        services.schematics_service.setting.return_value = str(7 * 24 * 60)
+        return services
+
+    def test_without_a_policy_nothing_is_listed(self, clean_dag, listing):
+        assert self.run(clean_dag, bucket_row()) is None
+
+        listing.bucketService.latest_object_modification.assert_not_called()
+        listing.vault_service.get_cos_api_key.assert_not_called()
+
+    def test_locks_ending_before_the_execution_are_accepted(self, clean_dag, listing):
+        row = bucket_row(retention_enabled=True, retention_maximum=30)
+        listing.bucketService.latest_object_modification.return_value = datetime.now(timezone.utc) - timedelta(days=29)
+
+        until = self.run(clean_dag, row)
+
+        assert datetime.fromisoformat(until) < datetime.now(timezone.utc) + timedelta(days=7)
+        listing.vault_service.get_cos_api_key.assert_called_once_with(row, "vault", "reader")
+        listing.bucketService.latest_object_modification.assert_called_once_with("tok", row, versions=False)
+
+    def test_object_lock_lists_the_versions(self, clean_dag, listing):
+        row = bucket_row(object_lock_duration_days=3)
+        listing.bucketService.latest_object_modification.return_value = datetime.now(timezone.utc) - timedelta(days=2)
+
+        assert self.run(clean_dag, row) is not None
+
+        listing.bucketService.latest_object_modification.assert_called_once_with("tok", row, versions=True)
+
+    def test_locks_ending_after_the_grace_period_are_declined_with_the_date(self, clean_dag, listing):
+        row = bucket_row(retention_enabled=True, retention_maximum=30)
+        latest = datetime.now(timezone.utc) - timedelta(days=1)
+        listing.bucketService.latest_object_modification.return_value = latest
+
+        with pytest.raises(DeclineDemandException) as excinfo:
+            self.run(clean_dag, row)
 
         message = str(excinfo.value)
-        assert "retention policy or an object lock" in message
-        assert "Delete the unlocked objects yourself" in message
-        assert "once every retention has expired" in message
+        assert (latest + timedelta(days=30)).isoformat() in message
+        assert "after the end of the grace period" in message
+        assert "request the clean again after that date" in message
 
-    @pytest.mark.parametrize("workspace", [None, {"workspace_id": None}])
-    def test_no_workspace_means_no_quarantine_so_declined(self, clean_dag, services, payload, workspace):
-        services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(workspace=workspace)
+    def test_a_shorter_grace_period_makes_the_same_locks_a_refusal(self, clean_dag, listing):
+        listing.schematics_service.setting.return_value = "5"  # minutes
+        row = bucket_row(object_lock_duration_days=3)
+        listing.bucketService.latest_object_modification.return_value = datetime.now(timezone.utc) - timedelta(days=2)
 
-        with pytest.raises(DeclineDemandException, match="no Terraform workspace"):
-            self.run(clean_dag, payload)
+        with pytest.raises(DeclineDemandException, match="may stay locked until"):
+            self.run(clean_dag, row)
+
+    def test_empty_locked_bucket_is_accepted(self, clean_dag, listing):
+        listing.bucketService.latest_object_modification.return_value = None
+
+        assert self.run(clean_dag, bucket_row(retention_enabled=True, retention_maximum=30)) is None
+
+    def test_retention_without_known_duration_is_declined(self, clean_dag, listing):
+        with pytest.raises(DeclineDemandException, match="without a known maximum duration"):
+            self.run(clean_dag, bucket_row(retention_enabled=True))
+
+        listing.bucketService.latest_object_modification.assert_not_called()
 
 
 class TestScheduleClean:
     def test_marks_scheduled_with_the_execution_date_and_returns_it(self, clean_dag, services, state_manager):
         # La grâce est lue par schematics_service.setting (Airflow Variable, env, défaut) : ici doublé.
-        services.schematics_service.setting.return_value = "7"
+        services.schematics_service.setting.return_value = str(7 * 24 * 60)
         before = datetime.now(timezone.utc)
 
-        execute_at = clean_dag.steps["schedule_clean"](bucket=bucket_row(), state_manager=state_manager, session="session")
+        execute_at = clean_dag.steps["schedule_clean"](
+            bucket=bucket_row(), locked_until=None, state_manager=state_manager, session="session"
+        )
 
         args = services.bucketService.schedule_bucket_clean.call_args.args
         assert args[0] == "sub-1" and args[3] == "session"
@@ -190,42 +282,19 @@ class TestScheduleClean:
         assert planned - requested_at == timedelta(days=7)
         assert planned.tzinfo is not None
         assert execute_at == planned.isoformat()
-        state_manager.push_state.assert_called_once_with({
-            "clean_status": CleanStatus.SCHEDULED.value,
-            "clean_requested_at": requested_at.isoformat(),
-            "clean_execute_at": planned.isoformat(),
-        })
-        services.schematics_service.setting.assert_called_once_with("cos_clean_grace_days", "7")
-
-
-class TestQuarantineBucket:
-    def run(self, clean_dag, payload, tf, state_manager):
-        return clean_dag.steps["quarantine_bucket"](
-            bucket=bucket_row(), execute_at="2026-10-13T10:00:00+00:00", payload=payload, tf=tf,
-            vault="vault", reader="reader", state_manager=state_manager, session="session",
-        )
-
-    def test_sets_the_quarantine_through_the_workspace(self, clean_dag, services, payload, tf, state_manager):
-        assert self.run(clean_dag, payload, tf, state_manager) is True
-
-        services.quarantine_service.set_bucket_quarantine.assert_called_once_with(
-            bucket=bucket_row(), enabled=True, payload=payload, description="my bucket",
-            tf=tf, vault="vault", reader="reader", session="session",
-        )
-        state_manager.push_state.assert_called_once_with({"quarantine": True})
-
-    def test_apply_failure_marks_the_clean_failed_and_reraises(self, clean_dag, services, payload, tf, state_manager):
-        services.quarantine_service.set_bucket_quarantine.side_effect = RuntimeError("apply failed")
-
-        with pytest.raises(RuntimeError, match="apply failed"):
-            self.run(clean_dag, payload, tf, state_manager)
-
-        assert_failed(services, state_manager)
+        state = state_manager.push_state.call_args.args[0]
+        assert state["clean_status"] == CleanStatus.SCHEDULED.value
+        assert state["clean_requested_at"] == requested_at.isoformat()
+        assert state["clean_execute_at"] == planned.isoformat()
+        assert planned.isoformat() in state["clean_notice"] and "Cancel the clean" in state["clean_notice"]
+        services.schematics_service.setting.assert_called_once_with("cos_clean_grace_minutes", "10080")
 
 
 class TestClaimClean:
     def run(self, clean_dag, state_manager):
-        return clean_dag.steps["claim_clean"](bucket=bucket_row(), quarantined=True, state_manager=state_manager, session="session")
+        return clean_dag.steps["claim_clean"](
+            bucket=bucket_row(), execute_at="2026-10-13T10:00:00+00:00", state_manager=state_manager, session="session"
+        )
 
     def test_scheduled_becomes_in_progress_atomically(self, clean_dag, services, state_manager):
         services.bucketService.transition_bucket_clean.return_value = True
@@ -402,7 +471,7 @@ class TestDeleteExpirationRule:
         assert self.run(clean_dag, state_manager, created=True) is True
 
         s3.bucketService.delete_lifecycle_policy.assert_called_once_with("tok", bucket_row())
-        s3.bucketService.update_bucket_clean_status.assert_not_called()  # success après la levée de quarantaine
+        s3.bucketService.update_bucket_clean_status.assert_not_called()  # success posé par complete_clean
 
     def test_bucket_already_empty_keeps_its_lifecycle_configuration(self, clean_dag, s3, state_manager):
         assert self.run(clean_dag, state_manager, created=False) is False
@@ -465,28 +534,9 @@ class TestSaveDeleteExpirationRuleInDb:
         assert_failed(services, state_manager)
 
 
-class TestLiftQuarantine:
-    def run(self, clean_dag, payload, tf, state_manager):
-        return clean_dag.steps["lift_quarantine"](
-            bucket=bucket_row(), rules_saved=True, payload=payload, tf=tf, vault="vault", reader="reader",
-            state_manager=state_manager, session="session",
-        )
+class TestCompleteClean:
+    def test_marks_the_clean_a_success_once_the_rule_is_gone(self, clean_dag, services, state_manager):
+        assert clean_dag.steps["complete_clean"](bucket=bucket_row(), rules_saved=True, state_manager=state_manager, session="session") is True
 
-    def test_lifts_the_quarantine_then_the_clean_is_a_success(self, clean_dag, services, payload, tf, state_manager):
-        assert self.run(clean_dag, payload, tf, state_manager) is True
-
-        services.quarantine_service.set_bucket_quarantine.assert_called_once_with(
-            bucket=bucket_row(), enabled=False, payload=payload, description="my bucket",
-            tf=tf, vault="vault", reader="reader", session="session",
-        )
         services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", CleanStatus.SUCCESS, "session")
-        state_manager.push_state.assert_called_once_with({"clean_status": CleanStatus.SUCCESS.value, "quarantine": False})
-
-    def test_apply_failure_leaves_the_bucket_quarantined_and_failed(self, clean_dag, services, payload, tf, state_manager):
-        """cancel_clean (accepté sur failed) lèvera la quarantaine."""
-        services.quarantine_service.set_bucket_quarantine.side_effect = RuntimeError("apply failed")
-
-        with pytest.raises(RuntimeError, match="apply failed"):
-            self.run(clean_dag, payload, tf, state_manager)
-
-        assert_failed(services, state_manager)
+        state_manager.push_state.assert_called_once_with({"clean_status": CleanStatus.SUCCESS.value})
