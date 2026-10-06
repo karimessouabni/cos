@@ -1134,7 +1134,7 @@ def _run_scenario(command: Sequence[str], cwd: str, env: dict[str, str], log_pat
             return EXIT_TERRAFORM_FAILED
 
 
-EXPECTED_FAILURES = "expected_failures.json"  # tests/ : écrit par generate_tests.py
+EXPECTED_FAILURES = "expected_failures.json"  # tests/ : cas de refus attendus (6x_refused_*)
 
 
 def load_expected_failures(cwd: str) -> dict[str, dict]:
@@ -1147,7 +1147,7 @@ def load_expected_failures(cwd: str) -> dict[str, dict]:
     except OSError:
         return {}
     except ValueError as exc:
-        raise CliExit(EXIT_USAGE, f"{path} illisible : {exc} (régénérer avec generate_tests.py)")
+        raise CliExit(EXIT_USAGE, f"{path} illisible : {exc}")
 
 
 _RUN_VERDICT = re.compile(r'run "([^"]+)"\.\.\. (pass|fail|skip|error)')

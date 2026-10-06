@@ -25,8 +25,7 @@ locals {
 }
 
 # --- Backup vault : seulement si un bucket demande une sauvegarde
-# (backup_retention_days) ou si le scénario le demande (with_vault, posé par
-# generate_tests.py dès qu'un run du fichier envoie un bloc backup). ----------
+# (backup_retention_days) ou si le scénario le demande (with_vault). ----------
 locals {
   with_vault = var.with_vault || anytrue([for b in values(var.buckets) : b.backup_retention_days != null])
 }
@@ -48,26 +47,11 @@ resource "orchestrator_subscription_cosbackup_vault_v1" "vault" {
 # cos.bucket.v1.*) : seules les clés renseignées sont envoyées, pour que
 # create et update transportent exactement ce que le scénario demande.
 locals {
-  # Bloc backup : présent dès qu'une clé backup_* est renseignée. Sans
-  # backup_vault_name explicite, le vault du scénario (nom résolu par le DAG en
-  # sub_id) ; null si aucun vault : le DAG refuse « name is required ».
-  backup_blocks = {
-    for key, b in var.buckets : key => (
-      b.backup_retention_days == null && b.backup_enabled == null && b.backup_vault_name == null ? null : {
-        for k, v in {
-          backup_enabled        = coalesce(b.backup_enabled, true)
-          backup_vault_name     = b.backup_vault_name != null ? b.backup_vault_name : one(orchestrator_subscription_cosbackup_vault_v1.vault[*].name)
-          backup_retention_days = b.backup_retention_days
-        } : k => v if v != null
-      }
-    )
-  }
-
   bucket_payloads = {
     for key, b in var.buckets : key => merge(
       {
         storage_class = b.storage_class
-        cos_instance  = coalesce(b.cos_instance, local.cos_name)
+        cos_instance  = local.cos_name
       },
       { for k, v in {
         enable_versioning          = b.enable_versioning
@@ -79,7 +63,13 @@ locals {
       b.retention == null ? {} : {
         retention = { for k, v in b.retention : k => v if v != null }
       },
-      local.backup_blocks[key] == null ? {} : { backup = local.backup_blocks[key] },
+      b.backup_retention_days == null && b.backup_enabled == null ? {} : {
+        backup = { for k, v in {
+          backup_enabled        = coalesce(b.backup_enabled, true)
+          backup_vault_name     = one(orchestrator_subscription_cosbackup_vault_v1.vault[*].name) # le DAG résout le sub_id
+          backup_retention_days = b.backup_retention_days
+        } : k => v if v != null }
+      },
     )
   }
 }

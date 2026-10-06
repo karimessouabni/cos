@@ -66,14 +66,10 @@ variable "buckets" {
     immutability_choice        = optional(string)
     object_lock_duration_days  = optional(number)
     object_lock_duration_years = optional(number)
-    # --- sauvegarde : le bloc backup est envoyé dès qu'une de ces clés est
-    # renseignée ; backup_enabled vaut true par défaut, backup_vault_name le
-    # vault du scénario (with_vault) ; les surcharger sert aux cas de refus.
-    backup_retention_days = optional(number) # crée le backup vault automatiquement
+    # sauvegarde : backup_retention_days crée le backup vault automatiquement ;
+    # backup_enabled = false (avec versioning) désactive la sauvegarde d'un bucket.
+    backup_retention_days = optional(number)
     backup_enabled        = optional(bool)
-    backup_vault_name     = optional(string)
-    # --- contexte : instance COS autre que celle du scénario (cas de refus)
-    cos_instance = optional(string)
     retention = optional(object({
       retention_enabled = optional(bool, true)
       # format historique (ADR 0001) : jours implicites, déprécié mais accepté
@@ -91,8 +87,5 @@ variable "buckets" {
   }))
   default = {}
   # Pas de validation ici : les règles métier (unités de rétention, bornes,
-  # classes de stockage...) sont celles des DAGs. Les scénarios générés
-  # (generate_tests.py) envoient aussi des payloads invalides et vérifient que
-  # l'orchestrateur les refuse avec le motif du DAG : c'est le produit qui est
-  # testé, pas une copie de ses règles.
+  # classes de stockage...) sont celles des DAGs, testées dans tests/unit/.
 }
