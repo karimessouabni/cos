@@ -134,10 +134,10 @@ cd tests/toolchain_tests
 python toolchain_env.py --env int --run test                                   # tous les scénarios, un par un
 python toolchain_env.py --env int --run test --parallel                        # tous en même temps (un tofu par fichier)
 python toolchain_env.py --env int --run test --parallel 3                      # trois à la fois
-python toolchain_env.py --env int --run test -- -filter=tests/10_cos.tftest.hcl  # un seul
+python toolchain_env.py --env int --run test -- -filter=tests/30_retention.tftest.hcl  # un seul
 python toolchain_env.py --env int --run test -- -verbose                       # plans et state à chaque run
 python toolchain_env.py --env int --run test --follow debug                    # tout le détail du provider en direct
-python toolchain_env.py --env pprod --run test -- -filter=tests/10_cos.tftest.hcl
+python toolchain_env.py --env pprod --run test -- -filter=tests/20_bucket_lifecycle.tftest.hcl
 
 python toolchain_env.py                     # mode guidé : menus numérotés
 python toolchain_env.py --env int --shell   # sous-shell avec tout exporté, puis `tofu test` à la main
@@ -174,10 +174,10 @@ journal de tofu et du provider :
   par `|`, entre les lignes de `tofu test` :
 
 ```
-tests/20_bucket_basic.tftest.hcl... in progress
+tests/20_bucket_lifecycle.tftest.hcl... in progress
   | 14:02:11 [INFO]  Starting apply for orchestrator_subscription_cos_v1.cos
   | 14:03:40 [INFO]  Starting apply for orchestrator_subscription_cosbucket_v1.bucket["basic"]
-  run "create_bucket"... pass
+  run "create"... pass
 ```
 
 | Option | Effet |
@@ -199,37 +199,38 @@ Le principe est celui du `test.tf` d'avant : un `apply`, on regarde, on modifie,
 `apply`, puis un `destroy`. La différence : un fichier décrit cette séquence, tofu la déroule
 seul et vérifie des conditions à chaque étape.
 
-- `terraform/main.tf` est une configuration normale : une instance COS (celle de
-  `cos_instance` dans le tfvars, réutilisée par tous les scénarios ; créée et détruite
-  seulement par `10_cos`), un bucket par clé de
-  la map `buckets`, et un backup vault seulement si un bucket demande une sauvegarde
-  (`backup_retention_days`) ou si `with_vault = true`. Les scénarios rétention et object lock
-  n'ont donc pas de vault. Le payload d'un bucket est construit
-  à partir de cette map en n'envoyant que les clés renseignées (celles de `BucketCreatePayload`
+- `terraform/main.tf` est une configuration normale : l'instance COS de `cos_instance`
+  (tfvars, réutilisée par tous les scénarios ; vide = chaque scénario crée et détruit la
+  sienne), un bucket par clé de la map `buckets`, et un backup vault seulement si un bucket
+  demande une sauvegarde ou si `with_vault = true`. Le payload d'un bucket est construit à
+  partir de cette map en n'envoyant que les clés renseignées (celles de `BucketCreatePayload`
   / `BucketUpdatePayload` des DAGs `cos.bucket.v1.*`).
-- Un fichier `tests/20_bucket_basic.tftest.hcl` est un scénario : des blocs `run` dans l'ordre.
-  Chaque `run` ne définit **que ce qui change** et ses assertions lisent **directement les
+- Un fichier `tests/30_retention.tftest.hcl` est un scénario : des blocs `run` dans l'ordre.
+  Chaque `run` donne la map `buckets` complète et ses assertions lisent **directement les
   attributs des ressources** du provider :
 
 ```hcl
-variables { scenario = "bucket basic" }
+variables { scenario = "retention" }
 
-run "create_bucket" {
-  variables { buckets = { basic = {} } }
+run "create" {
+  variables { buckets = { days = { retention = { minimum_days = 1, default_days = 2, maximum_days = 3 } } } }
   assert {
-    condition     = orchestrator_subscription_cosbucket_v1.bucket["basic"].payload.storage_class == "standard"
-    error_message = "storage_class attendue : standard."
+    condition     = orchestrator_subscription_cosbucket_v1.bucket["days"].payload.retention.default_days == 2
+    error_message = "days (create) : payload.retention.default_days attendu 2, relu ${jsonencode(...)}."
   }
 }
 
-run "update_enable_versioning" {
-  variables { buckets = { basic = { enable_versioning = true } } }
+run "update_days_bounds" {
+  variables { buckets = { days = { retention = { minimum_days = 1, default_days = 5, maximum_days = 10 } } } }
   assert {
-    condition     = orchestrator_subscription_cosbucket_v1.bucket["basic"].name == run.create_bucket.bucket_names["basic"]
-    error_message = "L'update a recréé le bucket au lieu de le modifier en place."
+    condition     = orchestrator_subscription_cosbucket_v1.bucket["days"].name == run.create.bucket_names["days"]
+    error_message = "days (update) : l'update a recréé la souscription au lieu de la modifier en place."
   }
 }
 ```
+
+Ces fichiers sont **générés** (voir « Les scénarios sont générés par les DAGs » plus bas) :
+on ne les édite pas, on édite la matrice.
 
 Déroulé d'un `tofu test` :
 
@@ -245,57 +246,126 @@ Déroulé d'un `tofu test` :
    des dépendances (bucket, vault, cos). C'est ce qui remplace le fichier vidé à la main.
 5. Il n'y a **aucune règle métier dans `variables.tf`** : unités de rétention, bornes, classes de
    stockage sont validées par les DAGs (`BucketRetention`, `StorageClass`) et testées dans
-   `tests/schemas/`. Les dupliquer ici reviendrait à tester une copie. Un payload refusé par
-   l'orchestrateur fait simplement échouer le run.
+   `tests/unit/`. Les dupliquer ici reviendrait à tester une copie. À la place, les
+   scénarios envoient aussi des payloads invalides et vérifient que l'orchestrateur les
+   **refuse avec le motif du DAG**.
 
-### Les scénarios
+### Les scénarios sont générés par les DAGs
 
-| Fichier | Couvre | Runs |
-|---|---|---|
-| `10_cos.tftest.hcl` | instance COS | create → destroy (seul scénario qui en crée une ; les autres réutilisent `cos_instance` du tfvars) |
-| `20_bucket_basic.tftest.hcl` | bucket standard | create → update versioning → update custom permissions → destroy |
-| `21_bucket_storage_classes.tftest.hcl` | vault, cold, smart | create ×3 en un run → destroy |
-| `30_bucket_retention.tftest.hcl` | rétention jours, années et format historique `default` / `minimum` / `maximum` (ADR 0001) | create ×3 → update des bornes en jours → destroy |
-| `31_bucket_retention_limits.tftest.hcl` | bornes acceptées : 5 ans pile, 1826 jours, format historique au plafond, bornes égales | create ×4 → destroy |
-| `40_bucket_immutability.tftest.hcl` | object lock en jours | create (durée 1 j + versioning) → update durée → destroy |
-| `41_object_lock_years.tftest.hcl` | object lock en années | create 1 an → update 5 ans (plafond) → destroy |
-| `50_bucket_backup.tftest.hcl` | backup vault (rattaché par `backup_vault_name`, le DAG résout le sub_id) | vault → bucket sauvegardé → update rétention backup → destroy |
-| `60_immutability_failures.tftest.hcl` | **cas d'échec** : > 5 ans en jours, en années et au format historique, jours et années mélangés, historique et nouveau format mélangés, bornes incohérentes ou incomplètes, choix `_daily` / `_yearly` contredit par les valeurs, object lock > 5 ans, sans durée dans l'unité choisie, à 0, rétention et object lock ensemble | 19 runs, un payload invalide chacun, qui doivent tous être **refusés** |
+Trois fichiers Python, à côté de `toolchain_env.py` :
 
-Chaque `update` vérifie que `name` n'a pas changé : une mise à jour qui recrée la souscription
-est un échec. Les descriptions des souscriptions commencent par `TF_VAR_prefix` (ton user) puis
-le nom du scénario : facile à retrouver et à nettoyer dans l'orchestrateur, et
+| Fichier | Rôle |
+|---|---|
+| `scenario_matrix.py` | **la matrice** : pour chaque scénario, la suite des runs et, pour chaque run, les buckets ajoutés ou modifiés (payload tel que `var.buckets`). Elle ne dit jamais ce que l'orchestrateur doit répondre. |
+| `dag_oracle.py` | **l'oracle** : rejoue le vrai code du produit (`BucketRetention`, `immutability_service.compute_bucket_new_immutability` / `validate_immutability_for_update_bucket`, et les contrôles de `validate_request` des DAGs) sur chaque payload, et renvoie « accepté » ou « refusé avec ce message ». |
+| `generate_tests.py` | écrit `terraform/tests/*.tftest.hcl` : pour chaque bucket de chaque run, les assertions qui vont avec l'issue calculée. `--check` vérifie que les fichiers sont à jour, `--summary` imprime le tableau ci-dessous. |
+
+Ce que ça apporte :
+
+- **les motifs de refus sont ceux du DAG, mot pour mot** : un message qui change dans
+  `immutability_service.py` change l'assertion à la régénération, et un cas que le DAG
+  accepte n'est jamais asserté « refusé » par erreur (l'oracle décide, pas l'auteur du test) ;
+- **la couverture est vérifiée** : `test_scenario_matrix.py` extrait tous les messages de
+  refus du produit (`errors.append`, `DeclineDemandException`, `ValueError`) et échoue si l'un
+  d'eux n'est provoqué par aucun scénario, sauf exemption explicite et motivée (`UNTESTABLE`).
+  Une règle ajoutée au DAG sans scénario casse donc la CI ;
+- **les fichiers générés restent lisibles** : HCL plat, un commentaire « Attendu : » au-dessus
+  de chaque run avec l'issue de chaque bucket, et les messages d'assertion disent ce qui était
+  attendu et ce qui a été relu.
+
+Ajouter un cas = une ligne `Run("nom", {"clé": payload})` dans la matrice, puis :
+
+```bash
+cd tests/toolchain_tests
+python generate_tests.py            # réécrit terraform/tests/*.tftest.hcl
+python -m pytest tests/toolchain_tests   # depuis cos/ : fichiers à jour, couverture, oracle
+```
+
+Règles d'enchaînement dans un fichier (même state) : un bucket accepté est conservé tel quel
+d'un run à l'autre (aucune nouvelle demande), un bucket refusé à la création disparaît du run
+suivant, un update refusé revient à son dernier payload accepté, `drop=` retire un bucket et
+vérifie sa destruction. Un fichier dont un run envoie un bloc `backup` reçoit
+`with_vault = true` : le vault du scénario existe dès le premier run.
+
+Pour chaque bucket d'un run, les assertions générées sont :
+
+- **accepté** : status différent de `DECLINED`, `name` non vide, et le `payload` relu sur la
+  ressource porte chaque clé envoyée (`retention.default_days == 2`…) ; pour un update, `name`
+  est celui du run qui a créé le bucket (une mise à jour qui recrée la souscription est un
+  échec) ;
+- **refusé** : `status == "DECLINED"` et `status_reason` reconnaît le message exact du DAG
+  (regex ; les décomptes de jours « (1826 days) » sont génériques car ils dépendent de la date
+  du jour, années bissextiles) ;
+- **retiré** : la clé n'est plus dans `bucket_names`.
+
+| Fichier | Couvre | Runs | Acceptés | Refusés |
+|---|---|---|---|---|
+| `20_bucket_lifecycle.tftest.hcl` | Cycle de vie d'un bucket standard | 5 | 6 | 0 |
+| `21_storage_classes.tftest.hcl` | Classes de stockage | 2 | 3 | 1 |
+| `25_immutability_after_create.tftest.hcl` | Immutabilité ajoutée après la création | 4 | 6 | 0 |
+| `30_retention.tftest.hcl` | Rétention (ADR 0001) : jours, années, format historique | 5 | 10 | 0 |
+| `31_retention_limits.tftest.hcl` | Rétention aux bornes acceptées | 2 | 4 | 1 |
+| `35_retention_rules.tftest.hcl` | Rétention : refus à la création | 21 | 0 | 21 |
+| `40_object_lock.tftest.hcl` | Object lock : jours, années, choix explicite ou déduit | 5 | 10 | 0 |
+| `45_object_lock_rules.tftest.hcl` | Object lock : refus à la création | 10 | 0 | 10 |
+| `50_backup.tftest.hcl` | Sauvegarde : vault, bucket sauvegardé, désactivation | 4 | 5 | 0 |
+| `55_backup_rules.tftest.hcl` | Sauvegarde : refus | 8 | 2 | 7 |
+| `60_update_rules.tftest.hcl` | Mises à jour d'un bucket déjà immuable | 12 | 5 | 8 |
+| `70_context_rules.tftest.hcl` | Contexte de la demande | 1 | 0 | 1 |
+
+Les mises à jour partent du principe que le provider envoie **la ressource entière** à
+`cos.bucket.v1.update` (le payload Terraform complet), pas seulement les attributs modifiés :
+l'oracle reçoit donc le même payload complet. Si le provider ne renvoie que le delta, dis-le :
+seul `expected_update` dans `dag_oracle.py` change.
+
+Un scénario met en évidence une incohérence du produit, à trancher : `31_retention_limits`
+crée un bucket aux bornes égales (`30 / 30 / 30`, accepté par `BucketRetention`), puis le
+moindre update de ce bucket est refusé, parce que la règle d'update
+(`check_retention_bounds`) exige `minimum < default < maximum` strictement. Le run
+`equal_bounds_then_permissions` asserte ce refus tel que le DAG le produit aujourd'hui ; quand
+la règle sera alignée, l'oracle changera l'assertion tout seul.
+
+Les descriptions des souscriptions commencent par `TF_VAR_prefix` (ton user) puis le nom du
+scénario : facile à retrouver et à nettoyer dans l'orchestrateur, et
 `cos-subscriptions/subscriptions_cleanup.py` reste là en cas de coupure réseau au milieu d'un test.
 
 ### Stratégie : trois niveaux
 
 1. **Règles métier** : tests unitaires Python des schémas et services (`python -m pytest`),
-   sur chaque MR. Rien à dupliquer côté HCL.
+   sur chaque MR. Rien à dupliquer côté HCL : les scénarios en sont dérivés.
 2. **Scénarios par fonctionnalité sur INT** : à la demande, puis en nocturne (voir CI).
-3. **Fumée en pprod / prod** (`10_cos` ou `20_bucket_basic`) après une montée de version du
+3. **Fumée en pprod / prod** (`20_bucket_lifecycle`) après une montée de version du
    provider ou de l'orchestrateur : même code, seul `envs/<env>.tfvars` change.
+
+L'instance COS n'a plus de scénario à elle : la créer et la détruire ne testait rien que les
+autres fichiers ne fassent déjà quand `cos_instance` est vide dans le tfvars (chaque scénario
+crée alors la sienne). Pour tester la création d'une instance : vider `cos_instance` et lancer
+`20_bucket_lifecycle`.
 
 Alternatives écartées : Terratest (Go, plus puissant pour vérifier côté API IBM, mais une
 seconde stack), pytest-terraform (idem en Python, envisageable pour vérifier côté S3 depuis
 `bucketService`). tflint, checkov et `tofu validate` restent complémentaires en statique.
 
-### Les cas d'échec et ce que le provider doit exposer
+### Les cas de refus et ce que le provider doit exposer
 
-Les règles métier ne sont pas revérifiées côté Terraform (voir plus haut) : un cas d'échec
-envoie le payload invalide à l'orchestrateur et vérifie que **le DAG l'a refusé**. Pour ça,
-`main.tf` expose `bucket_status` et `bucket_status_reason`, lus sur la ressource avec
-`try(b.status, b.state.status, null)` : les noms de la console orchestrator (`status`,
-`status_reason` de la demande). Deux cas selon le provider :
+Un cas de refus envoie le payload invalide à l'orchestrateur et vérifie que **le DAG l'a
+refusé**. Pour ça, `main.tf` expose `bucket_status` et `bucket_status_reason`, lus sur la
+ressource avec `try(b.status, b.state.status, null)` : les noms de la console orchestrator
+(`status`, `status_reason` de la demande). Deux cas selon le provider :
 
-- il remonte la demande refusée dans la ressource : les assertions de `60_*` comparent
+- il remonte la demande refusée dans la ressource : les assertions comparent
   `status == "DECLINED"` et le motif au message du DAG ;
-- il fait échouer l'`apply` sur un refus : les runs de `60_*` sont alors en `fail` pour la
+- il fait échouer l'`apply` sur un refus : les runs de refus sont alors en `fail` pour la
   bonne raison, mais tofu ne sait pas l'attendre (`expect_failures` ne couvre pas les erreurs
-  de provider). Dans ce cas, dis-le : on gardera `60_*` comme suite « doit échouer » lancée
-  à part, et les motifs restent couverts par les tests unitaires Python.
+  de provider). Dans ce cas, dis-le : les fichiers `*_rules` deviendront une suite « doit
+  échouer » lancée à part, et les motifs restent couverts par les tests unitaires Python.
 
-Au premier lancement de `60_*` sur INT, regarder le premier run : `status = null` signifie
-que l'attribut porte un autre nom dans le provider, à ajuster dans les deux outputs.
+Au premier lancement d'un fichier `*_rules` sur INT, regarder le premier run :
+`status = null` signifie que l'attribut porte un autre nom dans le provider, à ajuster dans
+les deux outputs. Les refus de **schéma** (`BucketRetention`, classe de stockage inconnue,
+`immutability_choice` inconnu : source `schema` dans le commentaire « Attendu ») sont émis
+par pydantic à la lecture du payload ; si l'orchestrateur les remonte autrement qu'en
+`DECLINED`, ajuster `render_step` dans `generate_tests.py`.
 
 ### Environnement persistant et restauration (`terraform/persistent`, `terraform/restore`)
 
@@ -418,8 +488,13 @@ curl -sk -H "Authorization: Bearer $TOKEN" "https://$HOST/.well-known/terraform.
 curl -sk -H "Authorization: Bearer $TOKEN" "https://$HOST<providers.v1>bp2i/orchestrator/versions" | jq -r '.versions[].version'
 ```
 
-## 7. Tests du script
+## 7. Tests du script et de la matrice
 
 ```bash
-python -m pytest tests/toolchain_tests        # depuis cos/
+python -m pytest tests/toolchain_tests        # depuis cos/ : script (toolchain_env.py) + matrice (generate_tests.py)
 ```
+
+`test_scenario_matrix.py` échoue si un `.tftest.hcl` généré n'est pas à jour (lancer
+`python generate_tests.py`), si un message de refus du produit n'a pas de scénario, si un
+message rejoué par l'oracle n'existe plus dans le DAG, ou si une exemption `UNTESTABLE` ne
+correspond plus à rien.

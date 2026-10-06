@@ -36,7 +36,7 @@ Utilisation
 
     # ou tout enchaîné : les étapes 1-6 puis tofu test / plan / apply
     python toolchain_env.py --env int --run test
-    python toolchain_env.py --env int --run test -- -filter=tests/20_bucket_basic.tftest.hcl
+    python toolchain_env.py --env int --run test -- -filter=tests/20_bucket_lifecycle.tftest.hcl
     python toolchain_env.py --env int --run plan
 
 Logs
@@ -1303,7 +1303,7 @@ def normalize_test_filter(path: str, cwd: str) -> str:
     except OSError as exc:
         found = f"dossier absent ({exc.strerror})"
     raise CliExit(EXIT_USAGE, f"fichier de scénario introuvable : {path!r} (chemins relatifs à {cwd}, "
-                              f"ex. -filter=tests/20_bucket_basic.tftest.hcl).\n  {tests_dir} contient : {found}")
+                              f"ex. -filter=tests/20_bucket_lifecycle.tftest.hcl).\n  {tests_dir} contient : {found}")
 
 
 def adapt_test_filter(command: Sequence[str], cwd: str, version: tuple[int, ...] | None) -> list[str]:
@@ -1898,7 +1898,7 @@ def interactive_argv(ask: Callable[[str], str] = input) -> list[str] | None:
         ("Rien en direct, seulement le journal (--follow off)", ["--follow", FOLLOW_OFF]),
     ], ask)
     if action and action[-1] == "-filter=":
-        action[-1] += "tests/" + _ask_text("Fichier de scénario (dans tests/)", "20_bucket_basic.tftest.hcl", ask)
+        action[-1] += "tests/" + _ask_text("Fichier de scénario (dans tests/)", "20_bucket_lifecycle.tftest.hcl", ask)
     argv += action  # --run et les arguments terraform restent en dernier
 
     shown = ["<token>" if i and argv[i - 1] == "--vault-token" else a for i, a in enumerate(argv)]
