@@ -142,5 +142,121 @@
         "regex": "immutability_choice"
       }
     }
+  },
+  "64_refused_bucket_update_inputs.tftest.hcl": {
+    "run": "update",
+    "prelude": [
+      "create"
+    ],
+    "cases": {
+      "plain_retention_mixed_units": {
+        "message": "Retention must be set either in days or in years, not a mix of both",
+        "regex": "not a mix of both"
+      },
+      "plain_retention_zero": {
+        "message": "minimum_days must be superior to 0",
+        "regex": "minimum_days must be superior to 0"
+      },
+      "plain_retention_over_limit": {
+        "message": "default_days (1900 days) cannot be superior to 5 years",
+        "regex": "default_days \\(1900 days\\) cannot be superior to 5 years"
+      },
+      "plain_retention_incomplete": {
+        "message": "Retention configuration is not valid. You must set default, minimum and maximum",
+        "regex": "Retention configuration is not valid"
+      },
+      "plain_retention_with_versioning": {
+        "message": "Retention and versioning are not compatible",
+        "regex": "Retention and versioning are not compatible"
+      },
+      "plain_retention_with_object_lock": {
+        "message": "Retention and object Lock are not compatible",
+        "regex": "Retention and object Lock are not compatible"
+      },
+      "plain_object_lock_without_versioning": {
+        "message": "Versioning should be enabled to enable object-lock",
+        "regex": "Versioning should be enabled to enable object-lock"
+      },
+      "plain_object_lock_both_units": {
+        "message": "Object lock retention must be set either in days (object_lock_duration_days) or in years (object_lock_duration_years), not both",
+        "regex": "Object lock retention must be set either in days \\(object_lock_duration_days\\) or in years \\(object_lock_duration_years\\), not both"
+      },
+      "plain_object_lock_zero": {
+        "message": "Object lock retention (0 days) cannot be inferior or equal to ZERO",
+        "regex": "Object lock retention \\(0 days\\) cannot be inferior or equal to ZERO"
+      },
+      "plain_object_lock_over_limit": {
+        "message": "Object lock retention (6 years) cannot be superior to 5 years",
+        "regex": "Object lock retention \\(6 years\\) cannot be superior to 5 years"
+      },
+      "plain_backup_without_vault": {
+        "message": "The Backup Vault name is required to enable bucket backup",
+        "regex": "The Backup Vault name is required to enable bucket backup"
+      },
+      "plain_backup_disable_without_versioning": {
+        "message": "Versioning should be enabled to disable bucket backup",
+        "regex": "Versioning should be enabled to disable bucket backup"
+      },
+      "locked_set_retention": {
+        "message": "Setting a retention is not possible when object-lock is already enabled",
+        "regex": "Setting a retention is not possible when object-lock is already enabled"
+      },
+      "locked_disable_versioning": {
+        "message": "Disabling versioning is not possible when object-lock is already enabled",
+        "regex": "Disabling versioning is not possible when object-lock is already enabled"
+      },
+      "locked_both_units": {
+        "message": "Object lock retention must be set either in days (object_lock_duration_days) or in years (object_lock_duration_years), not both",
+        "regex": "Object lock retention must be set either in days \\(object_lock_duration_days\\) or in years \\(object_lock_duration_years\\), not both"
+      },
+      "locked_zero": {
+        "message": "Object lock retention (0 days) cannot be inferior or equal to ZERO",
+        "regex": "Object lock retention \\(0 days\\) cannot be inferior or equal to ZERO"
+      },
+      "locked_over_limit": {
+        "message": "Object lock retention (6 years) cannot be superior to 5 years",
+        "regex": "Object lock retention \\(6 years\\) cannot be superior to 5 years"
+      },
+      "locked_backup_without_vault": {
+        "message": "The Backup Vault name is required to enable bucket backup",
+        "regex": "The Backup Vault name is required to enable bucket backup"
+      },
+      "retained_set_object_lock": {
+        "message": "Setting an object-lock is not possible when retention is already enabled",
+        "regex": "Setting an object-lock is not possible when retention is already enabled"
+      },
+      "retained_enable_versioning": {
+        "message": "Enabling versioning is not possible when retention is already enabled",
+        "regex": "Enabling versioning is not possible when retention is already enabled"
+      },
+      "retained_backup": {
+        "message": "Retention and bucket backup are not compatible",
+        "regex": "Retention and bucket backup are not compatible"
+      },
+      "retained_minimum_over_default": {
+        "message": "Retention minimum (5 days) cannot be inferior or equal to 0 nor superior to default (2 days)",
+        "regex": "Retention minimum \\(5 days\\) cannot be inferior or equal to 0 nor superior to default \\(2 days\\)"
+      },
+      "retained_default_equal_maximum": {
+        "message": "Retention default (3 days) cannot be inferior to minimum (1 days) nor superior or equal to maximum (3 days)",
+        "regex": "Retention default \\(3 days\\) cannot be inferior to minimum \\(1 days\\) nor superior or equal to maximum \\(3 days\\)"
+      },
+      "retained_maximum_under_default": {
+        "message": "Retention maximum (2 days) cannot be inferior or equal to default (2 days)",
+        "regex": "Retention maximum \\(2 days\\) cannot be inferior or equal to default \\(2 days\\)"
+      },
+      "retained_maximum_over_limit": {
+        "message": "maximum_days (1900 days) cannot be superior to 5 years",
+        "regex": "maximum_days \\(1900 days\\) cannot be superior to 5 years"
+      },
+      "retained_switch_to_years": {
+        "message": "Retention minimum (365 ou 366 days, 1 an converti) cannot be inferior or equal to 0 nor superior to default (2 days)",
+        "regex": "Retention minimum \\(36[56] days\\) cannot be inferior or equal to 0 nor superior to default \\(2 days\\)"
+      },
+      "retained_mixed_units": {
+        "message": "Retention must be set either in days or in years, not a mix of both",
+        "regex": "not a mix of both"
+      }
+    }
   }
 }

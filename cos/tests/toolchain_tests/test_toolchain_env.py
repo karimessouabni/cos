@@ -1068,6 +1068,15 @@ class MainTest(VaultServerTest):
         self.assertIn("✔ zero : motif présent (non attribuable)", summary)
         self.assertIn("✘ ok : motif absent", summary)
 
+        # Avec un préalable (create → update) : le préalable doit passer.
+        expected["prelude"] = ["create"]
+        text = 'run "create"... pass\nrun "refused"... fail\n' + diag("zero", "x must be > 0") + diag("mix", "not a mix") + diag("ok", "should fail")
+        self.assertEqual(verdict(text)[0], 0)
+        code, summary = verdict('run "create"... fail\nrun "refused"... skip\n')
+        self.assertEqual(code, te.EXIT_TERRAFORM_FAILED)
+        self.assertIn("préalable en échec (create)", summary)
+        expected["prelude"] = []
+
         # Bordure « │ » de la sortie colorée acceptée.
         text = 'run "refused"... fail\n' + diag("zero", "x must be > 0").replace("\n", "\n│ ").replace("Error:", "│ Error:", 1)
         self.assertIn("✔ zero", verdict(text)[1])

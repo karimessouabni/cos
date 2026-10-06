@@ -260,6 +260,7 @@ Déroulé d'un `tofu test` :
 | `61_refused_object_lock_without_versioning` | **refus** : object lock sans versioning | idem |
 | `62_refused_retention_with_versioning` | **refus** : rétention + versioning | idem |
 | `63_refused_bucket_inputs` | **tous les refus de validation d'un bucket** en un seul run (rétention : unités, bornes, plafond, format historique, choix d'immutabilité ; object lock ; backup sans vault ; instance COS, classe de stockage et choix inconnus) | un run, une clé de `buckets` par cas, chaque cas doit être refusé avec son motif |
+| `64_refused_bucket_update_inputs` | **tous les refus de validation d'un update** de bucket : depuis un bucket vierge, un bucket en object lock et un bucket en rétention (rétention sur bucket verrouillé, object lock ou versioning sur bucket en rétention, arrêt du versioning sous object lock, bornes de rétention contre l'existant, backup sans vault ou sans versioning) | create (valide) → update (interdit), une clé par cas |
 
 Les assertions restent minimales : la souscription a un `name`, et un update garde le même
 `name` (une mise à jour qui recrée la souscription est un échec). Le reste est vérifié par le
@@ -333,6 +334,18 @@ versioning, rétention + backup) ne sont pas dans ce fichier : il ne crée que d
 Pour ajouter un cas : une clé dans le run et la même clé dans `cases`.
 
 Les fichiers `60`, `61` et `62` restent utilisables seuls ; leurs trois cas sont repris dans `63`.
+
+`64_refused_bucket_update_inputs` fait la même chose pour l'**update** : un run `create` met
+chaque clé dans un état de départ valide (bucket vierge, en object lock, ou en rétention
+1 / 2 / 3 jours), puis un run `update` envoie à chaque clé le payload interdit pour son état.
+Dans le manifeste, `prelude` vaut `["create"]` : si un bucket de départ n'est pas créé, le
+refus n'est pas testé et le verdict le dit. Les bornes de rétention d'un bucket déjà en
+rétention sont comparées à l'existant, en jours (une borne en années est convertie : 1 an
+= 365 ou 366 jours selon la date).
+
+```bash
+python toolchain_env.py --env int --run test -- -filter=tests/64_refused_bucket_update_inputs.tftest.hcl
+```
 
 ### Environnement persistant et restauration (`terraform/persistent`, `terraform/restore`)
 
