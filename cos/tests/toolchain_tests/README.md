@@ -256,8 +256,11 @@ Déroulé d'un `tofu test` :
 | `20_bucket_basic.tftest.hcl` | bucket standard | create → update versioning → update custom permissions → destroy |
 | `21_bucket_storage_classes.tftest.hcl` | vault, cold, smart | create ×3 en un run → destroy |
 | `30_bucket_retention.tftest.hcl` | rétention jours, années et format historique `default` / `minimum` / `maximum` (ADR 0001) | create ×3 → update des bornes en jours → destroy |
-| `40_bucket_immutability.tftest.hcl` | object lock | create (durée 1 j + versioning) → update durée → destroy |
-| `50_bucket_backup.tftest.hcl` | backup vault | cos → vault → bucket sauvegardé → update rétention backup → destroy |
+| `31_bucket_retention_limits.tftest.hcl` | bornes acceptées : 5 ans pile, 1826 jours, format historique au plafond, bornes égales | create ×4 → destroy |
+| `40_bucket_immutability.tftest.hcl` | object lock en jours | create (durée 1 j + versioning) → update durée → destroy |
+| `41_object_lock_years.tftest.hcl` | object lock en années | create 1 an → update 5 ans (plafond) → destroy |
+| `50_bucket_backup.tftest.hcl` | backup vault (rattaché par `backup_vault_name`, le DAG résout le sub_id) | vault → bucket sauvegardé → update rétention backup → destroy |
+| `60_immutability_failures.tftest.hcl` | **cas d'échec** : > 5 ans en jours, en années et au format historique, jours et années mélangés, historique et nouveau format mélangés, bornes incohérentes ou incomplètes, choix `_daily` / `_yearly` contredit par les valeurs, object lock > 5 ans, sans durée dans l'unité choisie, à 0, rétention et object lock ensemble | 19 runs, un payload invalide chacun, qui doivent tous être **refusés** |
 
 Chaque `update` vérifie que `name` n'a pas changé : une mise à jour qui recrée la souscription
 est un échec. Les descriptions des souscriptions commencent par `TF_VAR_prefix` (ton user) puis
@@ -275,6 +278,24 @@ le nom du scénario : facile à retrouver et à nettoyer dans l'orchestrateur, e
 Alternatives écartées : Terratest (Go, plus puissant pour vérifier côté API IBM, mais une
 seconde stack), pytest-terraform (idem en Python, envisageable pour vérifier côté S3 depuis
 `bucketService`). tflint, checkov et `tofu validate` restent complémentaires en statique.
+
+### Les cas d'échec et ce que le provider doit exposer
+
+Les règles métier ne sont pas revérifiées côté Terraform (voir plus haut) : un cas d'échec
+envoie le payload invalide à l'orchestrateur et vérifie que **le DAG l'a refusé**. Pour ça,
+`main.tf` expose `bucket_status` et `bucket_status_reason`, lus sur la ressource avec
+`try(b.status, b.state.status, null)` : les noms de la console orchestrator (`status`,
+`status_reason` de la demande). Deux cas selon le provider :
+
+- il remonte la demande refusée dans la ressource : les assertions de `60_*` comparent
+  `status == "DECLINED"` et le motif au message du DAG ;
+- il fait échouer l'`apply` sur un refus : les runs de `60_*` sont alors en `fail` pour la
+  bonne raison, mais tofu ne sait pas l'attendre (`expect_failures` ne couvre pas les erreurs
+  de provider). Dans ce cas, dis-le : on gardera `60_*` comme suite « doit échouer » lancée
+  à part, et les motifs restent couverts par les tests unitaires Python.
+
+Au premier lancement de `60_*` sur INT, regarder le premier run : `status = null` signifie
+que l'attribut porte un autre nom dans le provider, à ajuster dans les deux outputs.
 
 ### Pièges connus
 

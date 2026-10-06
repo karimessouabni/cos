@@ -23,8 +23,8 @@ run "create_bucket_with_backup" {
     error_message = "backup_enabled attendu : true."
   }
   assert {
-    condition     = orchestrator_subscription_cosbucket_v1.bucket["saved"].payload.backup.backup_vault_sub_id == orchestrator_subscription_cosbackup_vault_v1.vault[0].id
-    error_message = "Le bucket n'est pas rattaché au backup vault."
+    condition     = orchestrator_subscription_cosbucket_v1.bucket["saved"].payload.backup.backup_vault_name == orchestrator_subscription_cosbackup_vault_v1.vault[0].name
+    error_message = "Le bucket n'est pas rattaché au backup vault par son nom (backup_vault_name)."
   }
 }
 

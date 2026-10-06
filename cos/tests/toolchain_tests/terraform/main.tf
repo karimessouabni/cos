@@ -67,7 +67,7 @@ locals {
       b.backup_retention_days == null ? {} : {
         backup = {
           backup_enabled        = true
-          backup_vault_sub_id   = one(orchestrator_subscription_cosbackup_vault_v1.vault[*].id)
+          backup_vault_name     = one(orchestrator_subscription_cosbackup_vault_v1.vault[*].name) # le DAG résout le sub_id
           backup_retention_days = b.backup_retention_days
         }
       },
@@ -85,10 +85,23 @@ resource "orchestrator_subscription_cosbucket_v1" "bucket" {
   tier        = var.tier
   payload     = local.bucket_payloads[each.key]
   # Pas de depends_on : un bucket ne dépend du vault que si son payload le
-  # référence (backup_vault_sub_id), donc seulement avec backup_retention_days.
+  # référence (backup_vault_name), donc seulement avec backup_retention_days.
 }
 
 output "cos_name" { value = local.cos_name }
 output "cos_created" { value = var.cos_instance == "" }
 output "vault_id" { value = one(orchestrator_subscription_cosbackup_vault_v1.vault[*].id) }
 output "bucket_names" { value = { for k, b in orchestrator_subscription_cosbucket_v1.bucket : k => b.name } }
+output "vault_name" { value = one(orchestrator_subscription_cosbackup_vault_v1.vault[*].name) }
+
+# Issue de la demande vue par le provider : status (ACTIVE, DECLINED, ...) et
+# motif. Les scénarios d'échec (60_*) assertent dessus : une demande refusée
+# par le DAG doit se voir ici, avec le message du DAG. Les noms d'attributs
+# sont ceux de la console orchestrator ; try() tolère un provider qui les
+# nomme autrement (les assertions diront alors "null").
+output "bucket_status" {
+  value = { for k, b in orchestrator_subscription_cosbucket_v1.bucket : k => try(b.status, b.state.status, null) }
+}
+output "bucket_status_reason" {
+  value = { for k, b in orchestrator_subscription_cosbucket_v1.bucket : k => try(b.status_reason, b.state.status_reason, "") }
+}
