@@ -56,14 +56,14 @@ info, warn et error sont recopiées en direct dans le terminal, préfixées par
     python toolchain_env.py
 
 Proxy
-    export PROXY_USER=h12345 PROXY_PASSWORD=...   # ou --proxy-user / --proxy-password
+    export PROXY_USER=h12345                      # mot de passe : variable PROXY_*_ENV, option dédiée, ou demandé
     --no-proxy                                    # pas de proxy du tout
 Si https_proxy est déjà exporté dans le shell et répond, il est réutilisé tel
 quel. Sinon user et mot de passe sont demandés une fois, vérifiés sur
 iam.cloud.ibm.com, puis mémorisés dans le trousseau macOS (sans trousseau, le
 mot de passe est redemandé à chaque lancement ; il n'est jamais écrit sur le
 disque) : plus rien n'est redemandé tant que le proxy les accepte.
---new-proxy-password pour en saisir un autre, --forget-proxy-password pour l'oublier.
+Option --new-proxy-… pour en saisir un autre, --forget-proxy-… pour l'oublier.
 
 Token Vault
     export VAULT_TOKEN=hvs....                # ou --vault-token
@@ -241,9 +241,10 @@ EXIT_OK, EXIT_USAGE, EXIT_VAULT_FAILED, EXIT_TERRAFORM_FAILED = 0, 1, 2, 3
 _MASK_RE = re.compile(r"://([^:/@]+):([^@/]+)@")
 
 
-def mask_url(url: str) -> str:
-    """Cache le mot de passe d'une URL de proxy pour les logs."""
-    return _MASK_RE.sub(r"://\1:***@", url)
+def proxy_host(url: str) -> str:
+    """hôte:port d'une URL de proxy, sans ses identifiants (pour les logs)."""
+    parts = urllib.parse.urlsplit(url if "://" in url else f"http://{url}")
+    return f"{parts.hostname}:{parts.port}" if parts.port else (parts.hostname or url)
 
 
 class CliExit(Exception):
@@ -484,7 +485,7 @@ def service_token(base_url: str, uid: str, namespace: str, timeout: int = DEFAUL
     if socket.AF_INET6 in families and socket.AF_INET in families:
         routes.append(("direct en IPv4 seulement", None))
     if proxy:
-        routes.append((f"via le proxy {mask_url(proxy)}", {"https": proxy, "http": proxy}))
+        routes.append((f"via le proxy {proxy_host(proxy)}", {"https": proxy, "http": proxy}))
     if not resolves:
         routes.reverse()
     attempt_timeout = max(5, min(timeout, 15))
@@ -1448,16 +1449,17 @@ def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
     """Variables http_proxy / https_proxy / no_proxy à utiliser : rien avec
     --no-proxy ; celles déjà exportées dans le shell si --proxy n'est pas passé
     explicitement ; sinon le proxy d'entreprise avec le user (--proxy-user,
-    $PROXY_USER, mémorisé, ou demandé) et le mot de passe (--proxy-password,
-    $PROXY_PASSWORD, ou demandé sans écho, jamais sauvegardé)."""
+    $PROXY_USER, mémorisé, ou demandé) et le mot de passe (option dédiée,
+    variable d'environnement, ou demandé sans écho, jamais sauvegardé)."""
     environ = os.environ if environ is None else environ
     args.proxy_origin = "none"
     if args.no_proxy:
         return {}
     existing = environ.get("https_proxy") or environ.get("HTTPS_PROXY")
     if existing and not args.proxy_from_cli and not ignore_shell:
-        _log(f"Proxy déjà exporté dans le shell, réutilisé : {mask_url(existing)} (--proxy pour l'ignorer)")
+        _log(f"Proxy déjà exporté dans le shell, réutilisé : {proxy_host(existing)} (--proxy pour l'ignorer)")
         args.proxy_origin = "shell"
+        args.proxy_display = proxy_host(existing)
         return {"http_proxy": environ.get("http_proxy") or environ.get("HTTP_PROXY") or existing,
                 "https_proxy": existing,
                 "no_proxy": environ.get("no_proxy") or environ.get("NO_PROXY") or args.no_proxy_hosts}
@@ -1485,6 +1487,7 @@ def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
     if user != load_setting("proxy_user"):
         save_setting("proxy_user", user)
     args.proxy_credentials = (user, password)
+    args.proxy_display = f"{args.proxy} (user {user})"
     url = proxy_url(args.proxy, user, password)
     return {"http_proxy": url, "https_proxy": url, "no_proxy": args.no_proxy_hosts}
 
@@ -1562,7 +1565,7 @@ def resolve_and_check_proxy(args: argparse.Namespace, ask: Callable[[str], str] 
         problem = check(proxy_vars)
     if problem:
         if "identifiants refusés" in problem:
-            raise CliExit(EXIT_USAGE, f"proxy {mask_url(proxy_vars['https_proxy'])} : {problem}. Vérifier le user "
+            raise CliExit(EXIT_USAGE, f"proxy {args.proxy} : {problem}. Vérifier le user "
                                       "et le mot de passe (--proxy-user / --proxy-password), ou le compte bloqué.")
         _log(f"Proxy non vérifié ({problem}) ; tofu échouera si le proxy refuse.")
     elif args.proxy_origin == "asked" and getattr(args, "proxy_credentials", None):
@@ -1639,21 +1642,14 @@ def secret_export_parts(variables: dict[str, str], api_key_ref: str, proxy_user:
     return parts
 
 
-def mask_secrets(variables: dict[str, str]) -> dict[str, str]:
-    """Copie des variables avec les secrets masqués (sortie --json)."""
-    masked = {}
-    for name, value in variables.items():
-        if name in API_KEY_VARS:
-            masked[name] = _mask(value)
-        elif name.lower() in PROXY_ENV_VARS[:2]:
-            masked[name] = mask_url(value)
-        else:
-            masked[name] = value
-    return masked
-
-
-def _mask(value: str) -> str:
-    return value[:4] + "…" + value[-4:] if len(value) > 12 else "…"
+def public_variables(variables: dict[str, str], parts: dict[str, Sequence[str]]) -> dict[str, str]:
+    """Variables pour la sortie JSON : une variable secrète est remplacée par
+    l'expression shell qui la lit dans le trousseau, ou par `***` sans
+    trousseau (jamais sa valeur)."""
+    return {
+        name: ("".join(parts[name]) if name in parts else ("***" if name in SECRET_VARIABLES else value))
+        for name, value in variables.items()
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1742,7 +1738,7 @@ def resolve_api_key(args: argparse.Namespace, client: VaultClient,
         cached = load_cached_api_key(args.vault_url, args.kv_path)
         if cached:
             args.api_key_ref = f"api-key:{_api_key_cache_key(args.vault_url, args.kv_path)}"
-            _log(f"API key sauvegardée réutilisée ({_mask(cached)}, {state_path()}).")
+            _log(f"API key sauvegardée réutilisée ({state_path()}).")
             return cached
     token = resolve_vault_token(args, client, acquire)
     try:
@@ -1757,8 +1753,7 @@ def resolve_api_key(args: argparse.Namespace, client: VaultClient,
     if not api_key:
         raise CliExit(EXIT_VAULT_FAILED, f"pas d'api_key dans la réponse de {args.kv_path} "
                                          f"(champs: {', '.join(sorted(data)) or 'aucun'})")
-    _log(f"API key lue dans Vault ({_mask(api_key)}"
-         + ("" if lease is None else f", lease {_duration(lease)}") + ").")
+    _log("API key lue dans Vault" + ("" if lease is None else f" (lease {_duration(lease)})") + ".")
     save_cached_api_key(args.vault_url, args.kv_path, api_key, lease)
     args.api_key_ref = f"api-key:{_api_key_cache_key(args.vault_url, args.kv_path)}"
     return api_key
@@ -1853,10 +1848,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     output.add_argument("--shell", action="store_true",
                         help="ouvrir un sous-shell avec les variables exportées")
     output.add_argument("--json", action="store_true", dest="as_json",
-                        help="imprimer les variables en JSON au lieu de lignes `export` (secrets masqués)")
-    output.add_argument("--print-secrets", action="store_true",
-                        help="imprimer les secrets en clair dans les `export` / le JSON (par défaut : "
-                             "références au trousseau, lues par le shell à l'eval)")
+                        help="imprimer les variables en JSON au lieu de lignes `export` (secrets remplacés par "
+                             "leur lecture depuis le trousseau)")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
 
     args = parser.parse_args(argv)
@@ -1984,7 +1977,7 @@ def prepare(args: argparse.Namespace, acquire: Callable[[str], str] | None = Non
     proxy_vars = with_no_proxy(resolve_and_check_proxy(args), args.token_service)
     apply_proxy(proxy_vars)
     if proxy_vars:
-        _log(f"Proxy : {mask_url(proxy_vars['https_proxy'])}  no_proxy : {proxy_vars['no_proxy']}")
+        _log(f"Proxy : {getattr(args, 'proxy_display', args.proxy)}  no_proxy : {proxy_vars['no_proxy']}")
     client = VaultClient(args.vault_url, args.namespace, args.timeout, args.ca_bundle)
     try:
         api_key = resolve_api_key(args, client, acquire)
@@ -2008,14 +2001,14 @@ def probe(args: argparse.Namespace) -> int:
     try:
         proxy_vars = with_no_proxy(resolve_and_check_proxy(args), args.token_service)
         apply_proxy(proxy_vars)
-        token = service_token(args.token_service, resolve_uid(args), args.namespace, args.timeout, args.ca_bundle)
+        service_token(args.token_service, resolve_uid(args), args.namespace, args.timeout, args.ca_bundle)
     except CliExit as exc:
         _log(str(exc))
         return exc.code
     except VaultError as exc:
         _log(f"Échec : {exc}")
         return EXIT_VAULT_FAILED
-    _log(f"OK : token {_mask(token)} obtenu.")
+    _log("OK : token obtenu.")
     return EXIT_OK
 
 
@@ -2091,20 +2084,20 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"Sous-shell {shell} dans {args.dir} avec " + ", ".join(variables)
              + " exportées (exit pour revenir).")
         return subprocess.call([shell], cwd=args.dir, env=env)
-    # Sortie sur stdout (eval / --json) : jamais un secret en clair, sauf
-    # --print-secrets. Les secrets sont référencés depuis le trousseau, que le
-    # shell lit lui-même au moment de l'eval ; --run et --shell n'ont pas ce
-    # problème (variables passées en mémoire au processus).
+    # Sortie sur stdout (eval / --json) : jamais un secret. Les secrets sont
+    # référencés depuis le trousseau, que le shell lit lui-même au moment de
+    # l'eval ; --run et --shell n'ont pas ce problème (variables passées en
+    # mémoire au processus).
+    parts = secret_export_parts(
+        variables, getattr(args, "api_key_ref", ""),
+        (getattr(args, "proxy_credentials", None) or ("", ""))[0], args.proxy_origin == "shell")
     if args.as_json:
-        print(json.dumps(variables if args.print_secrets else mask_secrets(variables), indent=2))
+        print(json.dumps(public_variables(variables, parts), indent=2))
     else:
-        parts = {} if args.print_secrets else secret_export_parts(
-            variables, getattr(args, "api_key_ref", ""),
-            (getattr(args, "proxy_credentials", None) or ("", ""))[0], args.proxy_origin == "shell")
         unsafe = [n for n in variables if n in SECRET_VARIABLES and n not in parts]
-        if unsafe and not args.print_secrets:
-            _log(f"Pas de trousseau pour {', '.join(unsafe)} : rien n'est imprimé en clair. Utiliser --run "
-                 "ou --shell (secrets passés en mémoire), ou --print-secrets en connaissance de cause.")
+        if unsafe:
+            _log(f"Pas de trousseau pour {', '.join(unsafe)} : rien n'est imprimé. Utiliser --run "
+                 "ou --shell (secrets passés en mémoire au processus).")
             return EXIT_USAGE
         sys.stdout.write(export_lines(variables, parts))
         _log("Variables prêtes : " + ", ".join(variables)

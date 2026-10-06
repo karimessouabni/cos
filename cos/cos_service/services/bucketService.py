@@ -205,7 +205,8 @@ def is_object_lock_enabled(access_token: str, bucket_vpe: str) -> bool:
 def create_expiration_rule(access_token: str, bucket: dict) -> bool:
     """Pose la règle de cycle de vie qui vide le bucket en un jour."""
     body = CLEAN_BUCKET_LIFECYCLE_CONFIGURATION.encode("utf-8")
-    content_md5 = base64.b64encode(hashlib.md5(body).digest()).decode("utf-8")
+    # Content-MD5 : somme de contrôle exigée par l'API S3, pas un usage cryptographique.
+    content_md5 = base64.b64encode(hashlib.md5(body, usedforsecurity=False).digest()).decode("utf-8")
     headers = _s3_headers(
         access_token,
         bucket["cos"]["crn"],

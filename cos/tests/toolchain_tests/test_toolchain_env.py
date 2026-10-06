@@ -277,9 +277,10 @@ class ProxyTest(unittest.TestCase):
                          f"http://h90871:{PW_SPECIAL_ENCODED}@ncproxy.fr.net.intra:8080")
         self.assertEqual(te.proxy_url("http://p:1/", "", ""), "http://p:1")
 
-    def test_mask_url(self):
-        self.assertEqual(te.mask_url(f"http://h90871:{PW_BANG_ENCODED}@ncproxy:8080"), "http://h90871:***@ncproxy:8080")
-        self.assertEqual(te.mask_url("http://ncproxy:8080"), "http://ncproxy:8080")
+    def test_proxy_host(self):
+        self.assertEqual(te.proxy_host(f"http://h90871:{PW_BANG_ENCODED}@ncproxy:8080"), "ncproxy:8080")
+        self.assertEqual(te.proxy_host("http://ncproxy:8080"), "ncproxy:8080")
+        self.assertEqual(te.proxy_host("ncproxy:8080"), "ncproxy:8080")
 
     def test_no_proxy(self):
         self.assertEqual(te.resolve_proxy(te.parse_args(["--no-proxy"]), environ={}), {})
@@ -877,14 +878,15 @@ class MainTest(VaultServerTest):
         run.assert_called_once_with(["init"], tests_dir)  # init sur stderr, stdout = exports seuls
         self.assertTrue(all(line.startswith("export ") for line in out.splitlines()))
 
-    def test_exports_without_keychain_refuse_unless_print_secrets(self):
+    def test_exports_without_keychain_print_nothing(self):
         with mock.patch.object(te, "_keychain", lambda *a: None):
             code, out, _, _ = self._run_main()
             self.assertEqual(code, te.EXIT_USAGE)
             self.assertEqual(out, "")
-            code, out, _, _ = self._run_main("--print-secrets")
-        self.assertEqual(code, 0)
-        self.assertIn(f"export IBM_CLOUD_API_KEY={API_KEY}\n", out)
+            code, out, _, _ = self._run_main("--json")
+            self.assertEqual(code, 0)
+            self.assertNotIn(API_KEY, out)
+            self.assertEqual(json.loads(out)["IBM_CLOUD_API_KEY"], "***")
 
     def test_export_lines_with_parts(self):
         v = {"IBM_CLOUD_API_KEY": "K", "https_proxy": f"http://h90871:{PW_BANG_ENCODED}@ncproxy:8080", "no_proxy": "a,b"}
@@ -907,7 +909,10 @@ class MainTest(VaultServerTest):
             def in_keychain(self, name):
                 return False
         self.assertEqual(te.secret_export_parts(v, "api-key:x", "h90871", False, Empty()), {})
-        self.assertEqual(te.mask_secrets(v)["https_proxy"], "http://h90871:***@ncproxy:8080")
+        public = te.public_variables(v, te.secret_export_parts(v, "api-key:https://v/v1/p", "h90871", False, Store()))
+        self.assertNotIn(PW_BANG_ENCODED, json.dumps(public))
+        self.assertIn("security find-generic-password -a api-key:", public["IBM_CLOUD_API_KEY"])
+        self.assertEqual(public["no_proxy"], "a,b")
 
     def test_json_and_options(self):
         code, out, _, _ = self._run_main("--json", "--tf-log", "--skip-init")
@@ -927,8 +932,8 @@ class MainTest(VaultServerTest):
             code = te.main(argv)
         self.assertEqual(code, 0)  # no_proxy=127.0.0.1 : le faux Vault est joint sans passer par le proxy
         variables = json.loads(out.getvalue())
-        self.assertEqual(variables["https_proxy"], "http://u:***@127.0.0.1:9")  # --json masque les secrets
-        self.assertEqual(variables["HTTP_PROXY"], "http://u:***@127.0.0.1:9")
+        self.assertEqual(variables["https_proxy"], "***")  # sans trousseau : jamais l'URL avec identifiants
+        self.assertEqual(variables["HTTP_PROXY"], "***")
         self.assertNotIn(PW_BANG_ENCODED, out.getvalue())
         self.assertEqual(variables["no_proxy"], "127.0.0.1,s02vl9956141")  # + hôte du service token
 
