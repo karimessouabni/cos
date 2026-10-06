@@ -297,6 +297,46 @@ envoie le payload invalide à l'orchestrateur et vérifie que **le DAG l'a refus
 Au premier lancement de `60_*` sur INT, regarder le premier run : `status = null` signifie
 que l'attribut porte un autre nom dans le provider, à ajuster dans les deux outputs.
 
+### Environnement persistant et restauration (`terraform/persistent`, `terraform/restore`)
+
+`tofu test` détruit tout à la fin de chaque fichier : impossible d'y garder un bucket, d'y
+déposer des fichiers et de le restaurer plus tard. Les ressources qui doivent **survivre aux
+tests** vivent donc dans un root Terraform classique, avec un vrai state local
+(`terraform.tfstate`, ignoré par git) :
+
+| Root | Contenu | Cycle de vie |
+|---|---|---|
+| `terraform/persistent` | un backup vault + un bucket `saved` (versioning, `backup_retention_days = 7`) sur le COS partagé `cos_instance` | créé une fois, **mis à jour** par les `apply` suivants, jamais détruit par un test |
+| `terraform/restore` | une demande de restauration du bucket `saved` à un point dans le temps | lit le state de `persistent`, ne crée ni ne détruit rien d'autre |
+
+```bash
+# 1. Créer (ou mettre à jour) le vault et le bucket sauvegardé
+python toolchain_env.py --env int --dir terraform/persistent --run apply
+python toolchain_env.py --env int --dir terraform/persistent --run plan      # drift ? doit dire "No changes"
+
+# 2. Déposer des objets dans le bucket (console IBM ou ibmcloud cos), attendre une sauvegarde
+
+# 3. Restaurer à un point dans le temps : déclenche le DAG cos.bucket.v1.restore
+python toolchain_env.py --env int --dir terraform/restore --run apply -- \
+    -var restore_point_in_time=2026-10-06T10:30:00Z
+#   options : -var bucket_key=saved  -var target_bucket=<autre bucket>  -var recovery_range_id=<id>
+
+# 4. Seulement quand on n'en a plus besoin
+python toolchain_env.py --env int --dir terraform/persistent --run destroy
+```
+
+Pour modifier le bucket persistant (ajouter une classe de stockage, changer la rétention de
+sauvegarde…), éditer `var.buckets` dans `terraform/persistent/variables.tf` puis relancer
+`--run apply` : le provider envoie un **update**, jamais un delete/create. Pour ajouter un
+second bucket sauvegardé, ajouter une clé à `var.buckets` (le vault est partagé).
+
+Le payload envoyé par `restore` est celui de `BucketRestoreBackupVaultPayload`
+(`backup_vault_name`, `target_bucket`, `app_code`, `realm`, `restore_point_in_time`,
+`recovery_range_id` optionnel). **À confirmer** dans la doc du provider : le type de ressource
+qui déclenche une action sur une souscription existante (`terraform/restore/main.tf` utilise
+le nom provisoire `orchestrator_action_cosbucket_restore_v1`) ; tant qu'il n'est pas le bon,
+`tofu validate` échoue sur ce root et rien n'est envoyé.
+
 ### Pièges connus
 
 - La **version du provider** ne peut pas être une variable : `versions.tf` est généré depuis
