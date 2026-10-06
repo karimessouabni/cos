@@ -1174,11 +1174,61 @@ def judge_scenario(log_path: str, expected: dict) -> tuple[int, str]:
     verdict = verdicts.get(run)
     if verdict is None:
         return EXIT_TERRAFORM_FAILED, f"run « {run} » absent de la sortie"
+    if "cases" in expected:
+        return judge_cases(text, expected["cases"], accepted=verdict == "pass")
     if verdict == "pass":
         return EXIT_TERRAFORM_FAILED, f"ACCEPTÉ alors que le DAG doit refuser : « {expected['message']} »"
     if re.search(expected["regex"], text, re.DOTALL):
         return EXIT_OK, f"refus attendu, motif conforme : « {expected['message']} »"
     return EXIT_TERRAFORM_FAILED, f"refusé, mais sans le motif attendu « {expected['message']} » (voir le journal)"
+
+
+# Début d'un diagnostic tofu (-no-color : « Error: … » en tête de ligne ; avec
+# couleur, précédé de la bordure « │ »).
+_DIAGNOSTIC_START = re.compile(r"(?m)^[│ ]*(?=Error: )")
+# Adresse d'une instance de la ressource bucket citée par un diagnostic.
+_BUCKET_ADDRESS = re.compile(r'\.bucket\["([^"]+)"\]')
+
+
+def error_blocks_by_bucket(text: str) -> dict[str, list[str]]:
+    """{clé de `buckets`: diagnostics « Error: » de tofu qui citent son adresse}."""
+    by_key: dict[str, list[str]] = {}
+    for block in _DIAGNOSTIC_START.split(text):
+        for key in dict.fromkeys(_BUCKET_ADDRESS.findall(block)):
+            by_key.setdefault(key, []).append(block)
+    return by_key
+
+
+def judge_cases(text: str, cases: dict[str, dict], accepted: bool = False) -> tuple[int, str]:
+    """Verdict d'un fichier à plusieurs cas de refus dans un seul run (une clé
+    de `buckets` par cas) : chaque clé doit avoir son diagnostic « Cannot create
+    subscription » portant le motif attendu. Résumé sur une ligne, puis une
+    ligne par cas (✔ motif conforme, ✘ accepté ou motif absent)."""
+    by_key = error_blocks_by_bucket(text)
+    lines, failed = [], 0
+    for key, case in cases.items():
+        blocks = by_key.get(key)
+        if blocks:
+            if any(re.search(case["regex"], block, re.DOTALL) for block in blocks):
+                lines.append(f"    ✔ {key} : « {case['message']} »")
+                continue
+            lines.append(f"    ✘ {key} : refusé, mais sans le motif attendu « {case['message']} »")
+        elif by_key or accepted:
+            lines.append(f"    ✘ {key} : ACCEPTÉ (aucune erreur sur ce cas) alors que le DAG doit refuser : "
+                         f"« {case['message']} »")
+        elif re.search(case["regex"], text, re.DOTALL):
+            # Sortie sans adresse de ressource (format inattendu) : motif cherché dans
+            # tout le journal, sans pouvoir l'attribuer à ce cas.
+            lines.append(f"    ✔ {key} : motif présent (non attribuable) « {case['message']} »")
+            continue
+        else:
+            lines.append(f"    ✘ {key} : motif absent « {case['message']} »")
+        failed += 1
+    total = len(cases)
+    if failed:
+        summary = f"{failed} cas sur {total} NON conformes ({total - failed} refus avec le motif attendu)"
+        return EXIT_TERRAFORM_FAILED, "\n".join([summary, *lines])
+    return EXIT_OK, "\n".join([f"{total} cas refusés avec le motif attendu", *lines])
 
 
 def _scenario_summary(log_path: str) -> str:
