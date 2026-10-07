@@ -425,3 +425,14 @@ class TestLatestObjectModification:
 
         with pytest.raises(RuntimeError, match="HTTP 403"):
             svc.latest_object_modification("tok", BUCKET)
+
+
+class TestCleanWorkspace:
+    @pytest.mark.parametrize("workspace_id", ["ws-cbr-1", None])
+    def test_records_or_forgets_the_quarantine_workspace(self, session, workspace_id):
+        svc.set_bucket_clean_workspace("sub-1", workspace_id, session)
+
+        statement = executed(session)[0]
+        assert statement.table is Bucket
+        assert statement.values_ == {"clean_cbr_workspace_id": workspace_id}
+        assert statement.where_ == ("==", "subscription_id", "sub-1")

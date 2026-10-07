@@ -243,6 +243,18 @@ def bucket_delete():
                 raise
             logger.info("workspace %s is already deleted", workspace_id)
 
+        # Reliquat d'un clean : le workspace de quarantaine (règle CBR) part avec le bucket.
+        quarantine_workspace_id = bucket.get("clean_cbr_workspace_id")
+        if quarantine_workspace_id:
+            from cos_service.services.quarantine_service import lift_bucket_quarantine
+
+            try:
+                lift_bucket_quarantine(tf=tf, workspace_id=quarantine_workspace_id)
+            except Exception as exc:
+                logger.error("deleting quarantine workspace %s failed: %s", quarantine_workspace_id, exc)
+                _mark_failed(bucket["subscription_id"], session)
+                raise
+
         return True
 
     @step

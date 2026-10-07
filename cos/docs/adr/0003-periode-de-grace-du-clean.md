@@ -2,9 +2,9 @@
 
 - Statut : accepté, mis en œuvre par étapes
 - Date : 2026-10-06
-- Étape en cours : **v1, sans quarantaine** (branche `feature/clean-grace-period-v1`) :
-  grâce réglable en minutes, annulation, contrôle des verrous par le listing.
-  La quarantaine CBR (décisions 2 et 3 ci-dessous) est la v2, portée par `main`.
+- Étapes : **v1** (branche `feature/clean-grace-period-v1`) grâce réglable en
+  minutes, annulation, contrôle des verrous par le listing, sans quarantaine ;
+  **v2** (`main`) la même chose plus la quarantaine CBR par un workspace séparé.
 
 ## Contexte
 
@@ -38,12 +38,22 @@ Contraintes établies :
    zone réseau de l'orchestrateur (VPC de la plateforme, référence de service
    Schematics). Les clients, sur l'endpoint public, reçoivent 403 quel que
    soit leur proxy. Le discriminant est le type d'endpoint, pas l'adresse IP.
-3. **La règle CBR est portée par le Terraform du workspace du bucket**
-   (`terraform/v1.12/bucket/quarantine.tf`, variable `quarantine`). Elle vit
-   dans le compte workload avec les accès que Schematics a déjà, elle est dans
-   le state donc jamais orpheline, et la lever est le même apply avec
-   `quarantine = false`. Seul prérequis : le rôle d'administration CBR sur
-   l'identité que Schematics utilise. Aucune nouvelle identité pour Airflow.
+3. **La règle CBR est portée par un workspace Schematics séparé du bucket**
+   (`terraform/v1.12/bucket_quarantine`, nom `ws_cbr_bucket_<subscription>`,
+   identifiant gardé en base dans `clean_cbr_workspace_id`). Son state ne
+   contient que la zone et la règle : son refresh n'appelle que l'API CBR,
+   qu'une règle sur COS ne bloque jamais, il reste donc pilotable quoi que la
+   règle bloque, et la lever est toujours possible. Le bucket n'y est jamais
+   lu, son nom et son instance passent en variables depuis la base. Une
+   première version mettait la règle dans le workspace du bucket : son refresh
+   relisait le bucket sous quarantaine, avec un risque d'auto-verrouillage si
+   la zone était mal taillée. Le workspace est créé à la pose et détruit à la
+   levée (fin du clean, annulation, ou suppression du bucket par `delete`),
+   ce qui tient aussi le plafond de règles CBR par compte. Même identité et
+   mêmes accès croisés hub vers workload que les workspaces de buckets ; seul
+   prérequis : le rôle d'administration CBR sur cette identité. Sortie de
+   secours : l'identifiant de la règle est en sortie du workspace, `ibmcloud
+   cbr rule-delete <id>` puis suppression du workspace.
 4. **La décision est une mise à jour conditionnelle en base**
    (`transition_bucket_clean` : `scheduled -> in_progress`, rowcount 1). Elle
    départage l'exécution et une annulation arrivant au même instant : la base
@@ -77,18 +87,21 @@ Contraintes établies :
   (horodatage avec fuseau). `clean_status` prend les valeurs de
   `CleanStatus` : `scheduled`, `in_progress`, `success`, `failed`,
   `cancelled`. Les trois valeurs existantes sont inchangées.
-- `workspaceService.build_bucket_workspace_details` accepte un argument
-  `quarantine` (bool) reporté dans la variable Terraform du même nom ; le
-  workspace reçoit aussi `quarantine_allowed_vpc_crns` (VPC de
-  l'orchestrateur) et `quarantine_enforcement_mode` (`report` pour valider la
-  zone sur les premiers clients, puis `enabled`).
+- Colonne `bucket.clean_cbr_workspace_id` (texte, nullable). Réglages de la
+  quarantaine (Airflow Variable, sinon variable d'environnement) :
+  `cos_quarantine_allowed_vpc_crns` (VPC de l'orchestrateur, séparés par des
+  virgules) et `cos_quarantine_enforcement_mode` (`report` pour valider la
+  zone sur les premiers clients, puis `enabled`). Le workspace de quarantaine
+  lit la clé API du compte workload dans Vault comme celui du bucket
+  (`providers.tf` à aligner sur celui du bucket, absent de ce dépôt).
 - Le state client porte `clean_status`, `clean_requested_at`,
   `clean_execute_at` et `quarantine`.
 - La grâce est réglable en minutes (Airflow Variable `cos_clean_grace_minutes`,
   sinon `COS_CLEAN_GRACE_MINUTES`, défaut 10080 soit 7 jours) : les tests
   toolchain en INT la mettent à quelques minutes.
-- Sans quarantaine (v1), ce que le client écrit pendant la grâce est supprimé
-  aussi : le state le dit (`clean_notice`) avec la date d'exécution.
+- Ce que le client écrit pendant la grâce est supprimé aussi : le state le dit
+  (`clean_notice`) avec la date d'exécution. En v2 il ne peut plus écrire,
+  la notice reste vraie pour ce qui passe avant la propagation de la règle.
 - Le succès n'est posé qu'après la levée de la quarantaine. Un échec après la
   décision laisse le bucket en quarantaine et `failed` ; `cancel_clean` la lève.
 - Points à surveiller en exploitation : la propagation d'une règle CBR prend
@@ -99,7 +112,10 @@ Contraintes établies :
   celle de l'orchestrateur ; le timeout Airflow du sensor de vidage est levé
   hors du `try` et ne pose pas `failed` (callback d'échec à ajouter si
   `step.sensor` le transmet).
-- Reste à faire hors de ce dépôt : la migration des deux colonnes, l'argument
-  `quarantine` dans `workspaceService`, le rôle CBR sur l'identité Schematics,
-  l'exposition de `cancel_clean` dans le provider, et la notification du
-  demandeur à la programmation et la veille de l'exécution.
+- Reste à faire hors de ce dépôt : la migration des trois colonnes
+  (`clean_requested_at`, `clean_execute_at`, `clean_cbr_workspace_id`), le
+  `providers.tf` du module de quarantaine aligné sur celui du bucket, le rôle
+  CBR sur l'identité Schematics, les deux réglages de quarantaine en INT, les
+  actions `cancel_clean` dans le provider, et la notification du demandeur à
+  la programmation et la veille de l'exécution. À refuser en v1.1 : `update`,
+  `delete` et `restore` tant qu'un clean est programmé.

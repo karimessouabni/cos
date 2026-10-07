@@ -122,8 +122,8 @@ Ce qu'il faut savoir :
 | Mettre à jour | `cos.bucket.v1.update` | Change la protection, le versioning, le backup ou les permissions, planifiable à une date |
 | Supprimer | `cos.bucket.v1.delete` | Détruit les ressources Terraform, puis le workspace, puis marque `TERMINATED` |
 | Restaurer | `cos.bucket.v1.restore` | Restaure le contenu depuis un backup vault, à un point dans le temps choisi |
-| Nettoyer | `cos.bucket.v1.clean`, `force_clean` | Vérifie la date de fin des verrous (listing), programme le vidage à J+7, puis vide via une règle d'expiration S3 |
-| Annuler un nettoyage | `cos.bucket.v1.cancel_clean` | Pendant la période de grâce : rien n'a été supprimé |
+| Nettoyer | `cos.bucket.v1.clean`, `force_clean` | Vérifie la date de fin des verrous (listing), programme le vidage à J+7, met le bucket en quarantaine (règle CBR dans un workspace séparé), puis le vide via une règle d'expiration S3 |
+| Annuler un nettoyage | `cos.bucket.v1.cancel_clean` | Pendant la période de grâce : lève la quarantaine, rien n'a été supprimé |
 | Règles de cycle de vie | `create/update/delete_lifecycle_policy_rule` | Gère les règles d'expiration du bucket |
 | Recovery ranges | `refresh_restore_ranges` | Rafraîchit les fenêtres de restauration disponibles |
 

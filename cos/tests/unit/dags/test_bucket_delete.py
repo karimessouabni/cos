@@ -274,6 +274,33 @@ class TestDestroyTfWorkspace:
         services.bucketService.update_bucket_status.assert_called_once_with("sub-1", SubscriptionStatus.LOCKED, "session")
 
 
+class TestLeftoverQuarantine:
+    """Un clean interrompu peut laisser son workspace CBR : il part avec le bucket."""
+
+    def run(self, delete_dag, tf, workspace_id):
+        return delete_dag.steps["destroy_tf_workspace"](
+            bucket=bucket_row(clean_cbr_workspace_id=workspace_id), update_db_resources_task=True, tf=tf, session="session"
+        )
+
+    def test_leftover_quarantine_workspace_is_removed(self, delete_dag, services, tf):
+        assert self.run(delete_dag, tf, "ws-cbr-1") is True
+
+        services.quarantine_service.lift_bucket_quarantine.assert_called_once_with(tf=tf, workspace_id="ws-cbr-1")
+
+    def test_nothing_to_remove_without_a_quarantine(self, delete_dag, services, tf):
+        assert self.run(delete_dag, tf, None) is True
+
+        services.quarantine_service.lift_bucket_quarantine.assert_not_called()
+
+    def test_failure_locks_the_bucket_and_reraises(self, delete_dag, services, tf):
+        services.quarantine_service.lift_bucket_quarantine.side_effect = RuntimeError("cbr down")
+
+        with pytest.raises(RuntimeError, match="cbr down"):
+            self.run(delete_dag, tf, "ws-cbr-1")
+
+        services.bucketService.update_bucket_status.assert_called_once_with("sub-1", SubscriptionStatus.LOCKED, "session")
+
+
 def test_update_db_for_workspace_terminates_the_bucket(delete_dag, services):
     assert delete_dag.steps["update_db_for_workspace"](bucket=bucket_row(), destroyed_workspace=True, session="session") is True
     services.bucketService.update_bucket_status.assert_called_once_with("sub-1", SubscriptionStatus.TERMINATED, "session")

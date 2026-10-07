@@ -1,4 +1,4 @@
-"""Tests des étapes du DAG ``cos.bucket.v1.clean`` (période de grâce v1, sans quarantaine)."""
+"""Tests des étapes du DAG ``cos.bucket.v1.clean`` (période de grâce + quarantaine CBR)."""
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -66,6 +66,7 @@ def test_dag_identity(clean_dag):
         "validate_bucket",
         "check_locks",
         "schedule_clean",
+        "quarantine_bucket",
         "claim_clean",
         "get_cos_api_key",
         "is_bucket_empty",
@@ -74,12 +75,12 @@ def test_dag_identity(clean_dag):
         "scheduler_clean_bucket",
         "delete_expiration_rule",
         "save_delete_expiration_rule_in_db",
-        "complete_clean",
+        "lift_quarantine",
     ]
 
 
-def test_wiring_waits_for_the_grace_period_between_schedule_and_claim(clean_dag):
-    """Le sensor de date est câblé entre la programmation et la décision ; il lit la
+def test_wiring_waits_for_the_grace_period_between_quarantine_and_claim(clean_dag):
+    """Le sensor de date est câblé entre la quarantaine et la décision ; il lit la
     date renvoyée par schedule_clean. Airflow ne déduit l'ordre que des valeurs
     consommées : chaque étape de base est consommée par la suivante."""
     import inspect
@@ -87,13 +88,14 @@ def test_wiring_waits_for_the_grace_period_between_schedule_and_claim(clean_dag)
     source = inspect.getsource(clean_dag.module)
     assert 'task_id="wait_for_grace_period"' in source
     assert "xcom_pull(task_ids='%s') }}\" % execute_at.operator.task_id" in source
-    assert "execute_at >> wait" in source and "wait >> claimed" in source
+    assert "quarantine_workspace_id >> wait" in source and "wait >> claimed" in source
     assert "schedule_clean(bucket=bucket, locked_until=lock_check)" in source
-    assert "claim_clean(bucket=bucket, execute_at=execute_at)" in source
+    assert "quarantine_bucket(bucket=bucket, execute_at=execute_at)" in source
+    assert "claim_clean(bucket=bucket, quarantine_workspace_id=quarantine_workspace_id)" in source
     assert "get_cos_api_key(bucket=bucket, claimed=claimed)" in source
     # Un step.sensor refuse un mot-clé supplémentaire : il consomme le drapeau renvoyé par la sauvegarde.
     assert "scheduler_clean_bucket(bucket=bucket, api_key=api_key, is_expiration_created=rule_saved)" in source
-    assert "complete_clean(bucket=bucket, rules_saved=rules_saved)" in source
+    assert "lift_quarantine(bucket=bucket, rules_saved=rules_saved)" in source
 
 
 def test_only_the_scheduler_is_a_sensor_with_a_bounded_wait(clean_dag):
@@ -293,7 +295,7 @@ class TestScheduleClean:
 class TestClaimClean:
     def run(self, clean_dag, state_manager):
         return clean_dag.steps["claim_clean"](
-            bucket=bucket_row(), execute_at="2026-10-13T10:00:00+00:00", state_manager=state_manager, session="session"
+            bucket=bucket_row(), quarantine_workspace_id="ws-cbr-1", state_manager=state_manager, session="session"
         )
 
     def test_scheduled_becomes_in_progress_atomically(self, clean_dag, services, state_manager):
@@ -534,9 +536,73 @@ class TestSaveDeleteExpirationRuleInDb:
         assert_failed(services, state_manager)
 
 
-class TestCompleteClean:
-    def test_marks_the_clean_a_success_once_the_rule_is_gone(self, clean_dag, services, state_manager):
-        assert clean_dag.steps["complete_clean"](bucket=bucket_row(), rules_saved=True, state_manager=state_manager, session="session") is True
+@pytest.fixture
+def tf():
+    from unittest.mock import MagicMock
 
+    return MagicMock(name="tf")
+
+
+class TestQuarantineBucket:
+    def run(self, clean_dag, payload, tf, state_manager):
+        return clean_dag.steps["quarantine_bucket"](
+            bucket=bucket_row(), execute_at="2026-10-13T10:00:00+00:00", payload=payload, tf=tf,
+            vault="vault", reader="reader", state_manager=state_manager, session="session",
+        )
+
+    def test_sets_the_quarantine_and_keeps_its_workspace_in_db(self, clean_dag, services, payload, tf, state_manager):
+        services.quarantine_service.set_bucket_quarantine.return_value = "ws-cbr-1"
+
+        assert self.run(clean_dag, payload, tf, state_manager) == "ws-cbr-1"
+
+        services.quarantine_service.set_bucket_quarantine.assert_called_once_with(
+            tf=tf, bucket=bucket_row(), payload=payload, vault="vault", reader="reader"
+        )
+        services.bucketService.set_bucket_clean_workspace.assert_called_once_with("sub-1", "ws-cbr-1", "session")
+        state_manager.push_state.assert_called_once_with({"quarantine": True})
+
+    def test_apply_failure_marks_the_clean_failed_and_reraises(self, clean_dag, services, payload, tf, state_manager):
+        services.quarantine_service.set_bucket_quarantine.side_effect = RuntimeError("apply failed")
+
+        with pytest.raises(RuntimeError, match="apply failed"):
+            self.run(clean_dag, payload, tf, state_manager)
+
+        assert_failed(services, state_manager)
+        services.bucketService.set_bucket_clean_workspace.assert_not_called()
+
+
+class TestLiftQuarantine:
+    def run(self, clean_dag, tf, state_manager):
+        return clean_dag.steps["lift_quarantine"](
+            bucket=bucket_row(), rules_saved=True, tf=tf, state_manager=state_manager, session="session"
+        )
+
+    def test_lifts_the_quarantine_then_the_clean_is_a_success(self, clean_dag, services, tf, state_manager):
+        # Le workspace est relu en base : le dict bucket date d'avant la quarantaine.
+        services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id="ws-cbr-1")
+
+        assert self.run(clean_dag, tf, state_manager) is True
+
+        services.quarantine_service.lift_bucket_quarantine.assert_called_once_with(tf=tf, workspace_id="ws-cbr-1")
+        services.bucketService.set_bucket_clean_workspace.assert_called_once_with("sub-1", None, "session")
         services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", CleanStatus.SUCCESS, "session")
-        state_manager.push_state.assert_called_once_with({"clean_status": CleanStatus.SUCCESS.value})
+        state_manager.push_state.assert_called_once_with({"clean_status": CleanStatus.SUCCESS.value, "quarantine": False})
+
+    def test_without_a_recorded_workspace_only_the_status_changes(self, clean_dag, services, tf, state_manager):
+        services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id=None)
+
+        assert self.run(clean_dag, tf, state_manager) is True
+
+        services.quarantine_service.lift_bucket_quarantine.assert_not_called()
+        services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", CleanStatus.SUCCESS, "session")
+
+    def test_lift_failure_leaves_the_bucket_quarantined_and_failed(self, clean_dag, services, tf, state_manager):
+        """cancel_clean (accepté sur failed) lèvera la quarantaine."""
+        services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id="ws-cbr-1")
+        services.quarantine_service.lift_bucket_quarantine.side_effect = RuntimeError("destroy failed")
+
+        with pytest.raises(RuntimeError, match="destroy failed"):
+            self.run(clean_dag, tf, state_manager)
+
+        assert_failed(services, state_manager)
+        services.bucketService.set_bucket_clean_workspace.assert_not_called()

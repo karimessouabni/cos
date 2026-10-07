@@ -382,6 +382,16 @@ def schedule_bucket_clean(
     )
 
 
+def set_bucket_clean_workspace(subscription_id: str, workspace_id: str | None, session: SASession) -> None:
+    """Workspace Schematics de la quarantaine du clean (None une fois levée)."""
+    _execute(
+        session,
+        update(Bucket)
+        .values(clean_cbr_workspace_id=workspace_id)
+        .where(Bucket.subscription_id == subscription_id),
+    )
+
+
 def transition_bucket_clean(
     subscription_id: str, from_status: CleanStatus, to_status: CleanStatus, session: SASession
 ) -> bool:

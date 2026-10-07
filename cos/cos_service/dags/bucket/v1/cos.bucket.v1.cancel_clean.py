@@ -1,10 +1,14 @@
-"""DAG cos.bucket.v1.cancel_clean : annule un clean pendant sa période de grâce (v1).
+"""DAG cos.bucket.v1.cancel_clean : annule un clean pendant sa période de grâce.
 
 Accepté sur un clean ``scheduled`` dont la date d'exécution n'est pas passée,
-et sur un clean ``failed`` (le remettre dans un état d'où un nouveau clean est
-possible). Le passage à ``cancelled`` est une mise à jour conditionnelle : si
-le clean a commencé entre-temps, l'annulation est refusée, il n'y a plus de
-retour en arrière une fois la règle d'expiration posée.
+sur un clean ``failed`` (rendre le bucket accessible après un échec) et sur un
+clean déjà ``cancelled`` (idempotent : relance seulement la levée de la
+quarantaine si elle avait échoué). Le passage à ``cancelled`` est une mise à
+jour conditionnelle : si le clean a commencé entre-temps, l'annulation est
+refusée, il n'y a plus de retour en arrière une fois la règle d'expiration posée.
+
+Déroulé : validation, ``-> cancelled`` (atomique), levée de la quarantaine
+(workspace CBR séparé : toujours pilotable), state mis à jour.
 Voir docs/adr/0003-periode-de-grace-du-clean.md.
 """
 from bp2i_airflow_library import add_project_to_path
@@ -24,9 +28,11 @@ from bp2i_airflow_library.config import ENVIRONMENT  # noqa: E402 - après add_p
 from bp2i_airflow_library.dag import product_action, step  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_project_to_path()
     SASession,
+    SchematicsBackend,
     StateManager,
     depends,
     payload_dependency,
+    smart_schematics_backend_dependency,
     sqlalchemy_session_dependency,
     state_manager_dependency,
 )
@@ -37,7 +43,7 @@ from cos_service.schemas.clean_status import CleanStatus  # noqa: E402 - après 
 
 logger = logging.getLogger(__name__)
 
-CANCELLABLE = (CleanStatus.SCHEDULED, CleanStatus.FAILED)
+CANCELLABLE = (CleanStatus.SCHEDULED, CleanStatus.FAILED, CleanStatus.CANCELLED)
 
 
 class BucketCancelCleanPayload(ProductActionPayload):
@@ -108,8 +114,30 @@ def bucket_cancel_clean() -> None:
         logger.info("clean of bucket %s cancelled", bucket["name"])
         return True
 
+    @step
+    def lift_quarantine(
+        bucket: dict,
+        cancelled: bool,
+        tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
+        state_manager: StateManager = depends(state_manager_dependency),
+        session: SASession = depends(sqlalchemy_session_dependency),
+    ) -> bool:
+        """Détruit la règle CBR et son workspace. Le statut reste ``cancelled`` même
+        si ça échoue : relancer l'annulation (acceptée sur ``cancelled``) réessaie
+        seulement la levée."""
+        from cos_service.services.bucketService import set_bucket_clean_workspace
+        from cos_service.services.quarantine_service import lift_bucket_quarantine
+
+        workspace_id = bucket.get("clean_cbr_workspace_id")
+        if workspace_id:
+            lift_bucket_quarantine(tf=tf, workspace_id=workspace_id)
+            set_bucket_clean_workspace(bucket["subscription_id"], None, session)
+        state_manager.push_state({"quarantine": False})
+        return True
+
     bucket = validate_bucket()
-    cancel_clean(bucket=bucket)
+    cancelled = cancel_clean(bucket=bucket)
+    lift_quarantine(bucket=bucket, cancelled=cancelled)
 
 
 bucket_cancel_clean()
