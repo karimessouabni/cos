@@ -97,7 +97,8 @@ Contraintes établies :
   `cos_quarantine_enforcement_mode` (`report` pour valider sur les premiers
   clients, puis `enabled`). Le workspace de quarantaine
   lit la clé API du compte workload dans Vault comme celui du bucket
-  (`providers.tf` à aligner sur celui du bucket, absent de ce dépôt).
+  (`providers.tf` aligné : sortie `secrets["api_key"]` du module Vault,
+  `skip_child_token`, sans le fichier d'endpoints, inutile pour IAM et CBR).
 - Le state client porte `clean_status`, `clean_requested_at`,
   `clean_execute_at` et `quarantine`.
 - La grâce est réglable en minutes (Airflow Variable `cos_clean_grace_minutes`,
@@ -121,8 +122,7 @@ Contraintes établies :
 - Modèle `cos_service/models/Bucket.py` et migration
   `alembic/versions/20261008_bucket_clean_grace_and_retention_unit.py` dans
   ce dépôt (`down_revision` à renseigner avec `alembic heads`).
-- Reste à faire hors de ce dépôt : jouer cette migration, le
-  `providers.tf` du module de quarantaine aligné sur celui du bucket, le rôle
+- Reste à faire hors de ce dépôt : jouer cette migration, le rôle
   CBR sur l'identité Schematics, le réglage de quarantaine en INT, les
   actions `cancel_clean` dans le provider, et la notification du demandeur à
   la programmation et la veille de l'exécution. À refuser en v1.1 : `update`,
