@@ -32,7 +32,6 @@ def deps(monkeypatch):
     mocks["vault_service"].get_vault_secrets.return_value = SECRETS
     mocks["contextService"].get_realm.return_value.model_dump.return_value = {"name": "realm-a", "wklapp_account_number": "wk-123"}
     mocks["schematics_service"].setting.side_effect = lambda name, default: {
-        "cos_quarantine_allowed_vpc_crns": "crn:vpc:a, crn:vpc:b",
         "cos_quarantine_enforcement_mode": "report",
     }.get(name, default)
     # create_or_update_ws / run_workspace sont importés au chargement du module : patchés sur lui.
@@ -47,13 +46,13 @@ def test_workspace_name_is_derived_from_the_subscription():
 
 
 def test_settings_come_from_airflow_variables_or_env(deps):
-    assert svc.quarantine_settings() == {"allowed_vpc_crns": ["crn:vpc:a", "crn:vpc:b"], "enforcement_mode": "report"}
+    assert svc.quarantine_settings() == {"enforcement_mode": "report"}
 
 
-def test_settings_default_to_no_vpc_and_enforcement_enabled(deps):
+def test_settings_default_to_enforcement_enabled(deps):
     deps["schematics_service"].setting.side_effect = lambda name, default: default
 
-    assert svc.quarantine_settings() == {"allowed_vpc_crns": [], "enforcement_mode": "enabled"}
+    assert svc.quarantine_settings() == {"enforcement_mode": "enabled"}
 
 
 def test_set_creates_the_separate_workspace_from_database_values_and_applies(deps):
@@ -75,7 +74,7 @@ def test_set_creates_the_separate_workspace_from_database_values_and_applies(dep
     assert variables["cos_instance_crn"] == BUCKET["cos"]["crn"]
     assert variables["wklapp_account_id"] == "wk-123"
     assert variables["app_code"] == "AP1"
-    assert variables["allowed_vpc_crns"] == ["crn:vpc:a", "crn:vpc:b"]
+    assert "allowed_vpc_crns" not in variables  # la règle bloque tout, aucune zone à tailler
     assert variables["enforcement_mode"] == "report"
     assert variables["vault_read_token"].value == "rt" and variables["vault_read_token"].sensitive is True
     svc.run_workspace.assert_called_once_with("tf", "ws-cbr-1")

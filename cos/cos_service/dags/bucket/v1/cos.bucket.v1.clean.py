@@ -8,18 +8,19 @@ Déroulé (docs/adr/0003-periode-de-grace-du-clean.md) :
    au plus tard à ``LastModified + durée maximale`` ; si cette borne dépasse
    la fin de la grâce, la demande est refusée avec la date à laquelle relancer ;
 2. ``clean_status = scheduled`` avec la date d'exécution, visible dans le state ;
-3. quarantaine : règle CBR posée par un workspace Schematics séparé du bucket
-   (``quarantine_service``) ; les clients, sur l'URL publique, reçoivent 403,
-   l'orchestrateur garde l'accès ;
+3. quarantaine : règle CBR qui bloque tout accès au bucket, posée par un
+   workspace Schematics séparé du bucket (``quarantine_service``) ;
 4. attente différée jusqu'à la date (``DateTimeSensorAsync``, aucun worker occupé) ;
 5. décision atomique en base : ``scheduled -> in_progress``. Si le clean a été
    annulé entre-temps (``cos.bucket.v1.cancel_clean``, qui lève la quarantaine),
    la demande est déclinée et rien n'est supprimé ;
-6. vidage : règle d'expiration à 1 jour, sensor jusqu'au vide, retrait de la règle ;
-7. levée de la quarantaine, ``clean_status = success``.
+6. levée de la quarantaine : personne n'en a besoin pendant la grâce, et le
+   vidage, lui, a besoin du bucket ;
+7. vidage : règle d'expiration à 1 jour, sensor jusqu'au vide, retrait de la
+   règle, ``clean_status = success``.
 
-Aucune configuration destructrice n'est posée avant l'étape 6. Un échec après
-la décision laisse le bucket en quarantaine et ``failed`` : ``cancel_clean``
+Aucune configuration destructrice n'est posée avant l'étape 7. Un échec avant
+la levée laisse le bucket en quarantaine et ``failed`` : ``cancel_clean``
 lève la quarantaine.
 
 La clé API COS est lue deux fois (contrôle des verrous, puis vidage) : son
@@ -285,9 +286,35 @@ def bucket_clean() -> None:
         return True
 
     @step
-    def get_cos_api_key(
+    def lift_quarantine(
         bucket: dict,
         claimed: bool,
+        tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
+        state_manager: StateManager = depends(state_manager_dependency),
+        session: SASession = depends(sqlalchemy_session_dependency),
+    ) -> bool:
+        """Lève la quarantaine avant le vidage (workspace relu en base : il a été
+        créé après la validation). En cas d'échec le bucket reste en quarantaine
+        et ``failed`` : ``cancel_clean`` la lève."""
+        from cos_service.services.bucketService import get_bucket_by_sub_id, set_bucket_clean_workspace
+        from cos_service.services.quarantine_service import lift_bucket_quarantine
+
+        current = get_bucket_by_sub_id(session, bucket["subscription_id"]) or {}
+        workspace_id = current.get("clean_cbr_workspace_id")
+        try:
+            if workspace_id:
+                lift_bucket_quarantine(tf=tf, workspace_id=workspace_id)
+                set_bucket_clean_workspace(bucket["subscription_id"], None, session)
+        except Exception:
+            _mark_failed(bucket["subscription_id"], state_manager, session)
+            raise
+        state_manager.push_state({"quarantine": False})
+        return True
+
+    @step
+    def get_cos_api_key(
+        bucket: dict,
+        lifted: bool,
         session: SASession = depends(sqlalchemy_session_dependency),
         state_manager: StateManager = depends(state_manager_dependency),
         reader: ReaderConnector = depends(reader_dependency),
@@ -451,34 +478,17 @@ def bucket_clean() -> None:
         return True
 
     @step
-    def lift_quarantine(
+    def complete_clean(
         bucket: dict,
         rules_saved: bool,
-        tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
         state_manager: StateManager = depends(state_manager_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> bool:
-        """Lève la quarantaine (workspace relu en base : il a été créé après la
-        validation), puis ``clean_status = success``. En cas d'échec le bucket
-        reste en quarantaine et ``failed`` : ``cancel_clean`` la lève."""
-        from cos_service.services.bucketService import (
-            get_bucket_by_sub_id,
-            set_bucket_clean_workspace,
-            update_bucket_clean_status,
-        )
-        from cos_service.services.quarantine_service import lift_bucket_quarantine
+        """``clean_status = success``, une fois la règle retirée et tracée."""
+        from cos_service.services.bucketService import update_bucket_clean_status
 
-        current = get_bucket_by_sub_id(session, bucket["subscription_id"]) or {}
-        workspace_id = current.get("clean_cbr_workspace_id")
-        try:
-            if workspace_id:
-                lift_bucket_quarantine(tf=tf, workspace_id=workspace_id)
-                set_bucket_clean_workspace(bucket["subscription_id"], None, session)
-        except Exception:
-            _mark_failed(bucket["subscription_id"], state_manager, session)
-            raise
         update_bucket_clean_status(bucket["subscription_id"], CleanStatus.SUCCESS, session)
-        state_manager.push_state({"clean_status": CleanStatus.SUCCESS.value, "quarantine": False})
+        state_manager.push_state({"clean_status": CleanStatus.SUCCESS.value})
         return True
 
     bucket = validate_bucket()
@@ -495,7 +505,8 @@ def bucket_clean() -> None:
     claimed = claim_clean(bucket=bucket, quarantine_workspace_id=quarantine_workspace_id)
     wait >> claimed
 
-    api_key = get_cos_api_key(bucket=bucket, claimed=claimed)
+    lifted = lift_quarantine(bucket=bucket, claimed=claimed)
+    api_key = get_cos_api_key(bucket=bucket, lifted=lifted)
     is_bucket_empty = is_bucket_empty(bucket=bucket, api_key=api_key)
     is_expiration_created = create_expiration_rule(api_key=api_key, bucket=bucket, is_bucket_empty=is_bucket_empty)
     # Le sensor consomme le drapeau renvoyé par la sauvegarde en base, pas celui
@@ -506,7 +517,7 @@ def bucket_clean() -> None:
         bucket=bucket, api_key=api_key, is_expiration_created=is_expiration_created, check_clean_done=check_clean_done
     )
     rules_saved = save_delete_expiration_rule_in_db(is_expiration_deleted=is_expiration_deleted, bucket=bucket)
-    lift_quarantine(bucket=bucket, rules_saved=rules_saved)
+    complete_clean(bucket=bucket, rules_saved=rules_saved)
 
 
 bucket_clean()

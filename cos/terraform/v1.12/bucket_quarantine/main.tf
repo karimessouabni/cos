@@ -8,9 +8,11 @@
 # possible. Le bucket n'est jamais lu ici, son nom et son instance arrivent en
 # variables depuis la base de l'orchestrateur.
 #
-# La règle n'autorise que les endpoints direct / private depuis la zone réseau
-# de l'orchestrateur (VPC de la plateforme, référence de service Schematics).
-# Les clients, sur l'URL publique, reçoivent 403 quel que soit leur proxy.
+# La règle bloque tout : son seul contexte est une zone réseau qui ne
+# correspond à rien (une adresse de documentation, RFC 5737, jamais routée).
+# Personne n'a besoin du bucket pendant la grâce, ni le client ni
+# l'orchestrateur : la quarantaine est levée à la fin de la grâce, juste avant
+# le vidage, qui se fait donc bucket ouvert.
 
 data "ibm_iam_account_settings" "quarantine" {}
 
@@ -21,22 +23,11 @@ locals {
 
 resource "ibm_cbr_zone" "quarantine" {
   name        = "quarantine-${var.bucket_name}"
-  description = "Orchestrateur seulement, le temps de la période de grâce du clean"
+  description = "Zone vide (adresse de documentation) : aucune requête ne la satisfait"
 
-  dynamic "addresses" {
-    for_each = var.allowed_vpc_crns
-    content {
-      type  = "vpc"
-      value = addresses.value
-    }
-  }
-
-  # Schematics doit rester autorisé (applies du bucket après la quarantaine).
   addresses {
-    type = "serviceRef"
-    ref {
-      service_name = "schematics"
-    }
+    type  = "ipAddress"
+    value = "192.0.2.1"
   }
 }
 
@@ -44,17 +35,10 @@ resource "ibm_cbr_rule" "quarantine" {
   description      = "Quarantaine du bucket ${var.bucket_name} (clean programmé)"
   enforcement_mode = var.enforcement_mode
 
-  dynamic "contexts" {
-    for_each = toset(["direct", "private"])
-    content {
-      attributes {
-        name  = "networkZoneId"
-        value = ibm_cbr_zone.quarantine.id
-      }
-      attributes {
-        name  = "endpointType"
-        value = contexts.value
-      }
+  contexts {
+    attributes {
+      name  = "networkZoneId"
+      value = ibm_cbr_zone.quarantine.id
     }
   }
 

@@ -1,10 +1,9 @@
 """Quarantaine d'un bucket pendant la période de grâce d'un clean (v2).
 
-Une règle Context-Based Restrictions (CBR) sur le bucket n'autorise plus que
-les endpoints ``direct`` / ``private`` depuis la zone réseau de
-l'orchestrateur : les clients, sur l'URL publique (clé API ou HMAC, proxy ou
-non), reçoivent 403 ; Airflow (endpoint direct) et Schematics (référence de
-service) continuent de passer.
+Une règle Context-Based Restrictions (CBR) sur le bucket bloque tout accès :
+son seul contexte est une zone réseau qui ne correspond à rien. Personne n'a
+besoin du bucket pendant la grâce, ni le client ni l'orchestrateur : la
+quarantaine est levée à la fin de la grâce, juste avant le vidage.
 
 La règle vit dans un **workspace Schematics séparé** du bucket
 (``terraform/v1.12/bucket_quarantine``, nom ``ws_cbr_bucket_<subscription>``),
@@ -27,9 +26,8 @@ from cos_service.services.schematics_service import TERRAFORM_VERSION, create_or
 logger = logging.getLogger(__name__)
 
 QUARANTINE_TF_DIRECTORY = f"terraform/v{TERRAFORM_VERSION}/bucket_quarantine"
-# Réglages (Airflow Variable, sinon variable d'environnement, sinon défaut) :
-# VPC de l'orchestrateur autorisés, séparés par des virgules, et mode CBR.
-ALLOWED_VPCS_SETTING = "cos_quarantine_allowed_vpc_crns"
+# Réglage (Airflow Variable, sinon variable d'environnement, sinon défaut) :
+# mode CBR, ``report`` pour valider sur les premiers clients, puis ``enabled``.
 ENFORCEMENT_SETTING = "cos_quarantine_enforcement_mode"
 DEFAULT_ENFORCEMENT = "enabled"
 # Destruction des ressources : Schematics est interrogé toutes les 5 s, au plus 120 fois (10 min).
@@ -45,8 +43,7 @@ def quarantine_workspace_name(subscription_id: str) -> str:
 def quarantine_settings() -> dict:
     from cos_service.services.schematics_service import setting
 
-    vpcs = [v.strip() for v in setting(ALLOWED_VPCS_SETTING, "").split(",") if v.strip()]
-    return {"allowed_vpc_crns": vpcs, "enforcement_mode": setting(ENFORCEMENT_SETTING, DEFAULT_ENFORCEMENT)}
+    return {"enforcement_mode": setting(ENFORCEMENT_SETTING, DEFAULT_ENFORCEMENT)}
 
 
 def quarantine_variables(bucket: dict, secrets: dict, realm: dict) -> dict:

@@ -68,6 +68,7 @@ def test_dag_identity(clean_dag):
         "schedule_clean",
         "quarantine_bucket",
         "claim_clean",
+        "lift_quarantine",
         "get_cos_api_key",
         "is_bucket_empty",
         "create_expiration_rule",
@@ -75,7 +76,7 @@ def test_dag_identity(clean_dag):
         "scheduler_clean_bucket",
         "delete_expiration_rule",
         "save_delete_expiration_rule_in_db",
-        "lift_quarantine",
+        "complete_clean",
     ]
 
 
@@ -92,10 +93,11 @@ def test_wiring_waits_for_the_grace_period_between_quarantine_and_claim(clean_da
     assert "schedule_clean(bucket=bucket, locked_until=lock_check)" in source
     assert "quarantine_bucket(bucket=bucket, execute_at=execute_at)" in source
     assert "claim_clean(bucket=bucket, quarantine_workspace_id=quarantine_workspace_id)" in source
-    assert "get_cos_api_key(bucket=bucket, claimed=claimed)" in source
+    assert "lifted = lift_quarantine(bucket=bucket, claimed=claimed)" in source
+    assert "get_cos_api_key(bucket=bucket, lifted=lifted)" in source
     # Un step.sensor refuse un mot-clé supplémentaire : il consomme le drapeau renvoyé par la sauvegarde.
     assert "scheduler_clean_bucket(bucket=bucket, api_key=api_key, is_expiration_created=rule_saved)" in source
-    assert "lift_quarantine(bucket=bucket, rules_saved=rules_saved)" in source
+    assert "complete_clean(bucket=bucket, rules_saved=rules_saved)" in source
 
 
 def test_only_the_scheduler_is_a_sensor_with_a_bounded_wait(clean_dag):
@@ -322,7 +324,7 @@ class TestClaimClean:
 class TestGetCosApiKey:
     def run(self, clean_dag, state_manager):
         return clean_dag.steps["get_cos_api_key"](
-            bucket=bucket_row(), claimed=True, session="session", state_manager=state_manager, reader="reader", vault="vault"
+            bucket=bucket_row(), lifted=True, session="session", state_manager=state_manager, reader="reader", vault="vault"
         )
 
     def test_reads_the_key_through_vault(self, clean_dag, services, state_manager):
@@ -572,12 +574,15 @@ class TestQuarantineBucket:
 
 
 class TestLiftQuarantine:
+    """Levée à la fin de la grâce, avant le vidage : personne n'avait besoin du
+    bucket pendant la grâce, le vidage en a besoin."""
+
     def run(self, clean_dag, tf, state_manager):
         return clean_dag.steps["lift_quarantine"](
-            bucket=bucket_row(), rules_saved=True, tf=tf, state_manager=state_manager, session="session"
+            bucket=bucket_row(), claimed=True, tf=tf, state_manager=state_manager, session="session"
         )
 
-    def test_lifts_the_quarantine_then_the_clean_is_a_success(self, clean_dag, services, tf, state_manager):
+    def test_lifts_the_quarantine_recorded_in_db(self, clean_dag, services, tf, state_manager):
         # Le workspace est relu en base : le dict bucket date d'avant la quarantaine.
         services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id="ws-cbr-1")
 
@@ -585,16 +590,15 @@ class TestLiftQuarantine:
 
         services.quarantine_service.lift_bucket_quarantine.assert_called_once_with(tf=tf, workspace_id="ws-cbr-1")
         services.bucketService.set_bucket_clean_workspace.assert_called_once_with("sub-1", None, "session")
-        services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", CleanStatus.SUCCESS, "session")
-        state_manager.push_state.assert_called_once_with({"clean_status": CleanStatus.SUCCESS.value, "quarantine": False})
+        services.bucketService.update_bucket_clean_status.assert_not_called()
+        state_manager.push_state.assert_called_once_with({"quarantine": False})
 
-    def test_without_a_recorded_workspace_only_the_status_changes(self, clean_dag, services, tf, state_manager):
+    def test_without_a_recorded_workspace_nothing_to_lift(self, clean_dag, services, tf, state_manager):
         services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id=None)
 
         assert self.run(clean_dag, tf, state_manager) is True
 
         services.quarantine_service.lift_bucket_quarantine.assert_not_called()
-        services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", CleanStatus.SUCCESS, "session")
 
     def test_lift_failure_leaves_the_bucket_quarantined_and_failed(self, clean_dag, services, tf, state_manager):
         """cancel_clean (accepté sur failed) lèvera la quarantaine."""
@@ -606,3 +610,11 @@ class TestLiftQuarantine:
 
         assert_failed(services, state_manager)
         services.bucketService.set_bucket_clean_workspace.assert_not_called()
+
+
+class TestCompleteClean:
+    def test_marks_the_clean_a_success_once_the_rule_is_gone(self, clean_dag, services, state_manager):
+        assert clean_dag.steps["complete_clean"](bucket=bucket_row(), rules_saved=True, state_manager=state_manager, session="session") is True
+
+        services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", CleanStatus.SUCCESS, "session")
+        state_manager.push_state.assert_called_once_with({"clean_status": CleanStatus.SUCCESS.value})

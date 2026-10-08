@@ -8,12 +8,6 @@ variable "cos_instance_crn" {
   type        = string
 }
 
-variable "allowed_vpc_crns" {
-  description = "VPC de l'orchestrateur (Airflow / VPE) autorisés pendant la quarantaine. Aucun VPC client ne doit y figurer."
-  type        = list(string)
-  default     = []
-}
-
 variable "enforcement_mode" {
   description = "enabled : bloque ; report : journalise seulement (CBR), pour valider la zone sur les premiers clients."
   type        = string
