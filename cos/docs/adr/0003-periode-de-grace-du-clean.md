@@ -108,6 +108,10 @@ Contraintes établies :
   la notice reste vraie pour ce qui passe avant la propagation de la règle.
 - Le succès n'est posé qu'après la levée de la quarantaine. Un échec après la
   décision laisse le bucket en quarantaine et `failed` ; `cancel_clean` la lève.
+- `cos.bucket.v1.quarantine_test` éprouve le mécanisme seul, sans grâce ni
+  vidage : règle posée, listing attendu en 403, règle retirée, accès attendu
+  en 200, compte rendu (délais, statuts, mode CBR) dans le state. C'est le
+  premier passage à faire en INT, en `report` puis en `enabled`.
 - Points à surveiller en exploitation : la propagation d'une règle CBR prend
   quelques minutes (quarantaine et levée ne sont pas instantanées) ; le
   nombre de règles CBR par compte est plafonné (une par bucket en grâce,

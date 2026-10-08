@@ -436,3 +436,16 @@ class TestCleanWorkspace:
         assert statement.table is Bucket
         assert statement.values_ == {"clean_cbr_workspace_id": workspace_id}
         assert statement.where_ == ("==", "subscription_id", "sub-1")
+
+
+class TestBucketAccessStatus:
+    @pytest.mark.parametrize("status", [200, 403, 500])
+    def test_returns_the_http_status_without_raising(self, http, status):
+        http.get.return_value = xml_response("<Error/>" if status >= 400 else "<ListBucketResult/>", status_code=status)
+
+        assert svc.bucket_access_status("tok", BUCKET) == status
+
+        call = http.get.call_args
+        assert call.args[0] == "https://s3.direct.eu-de.example/bucket-a?list-type=2&max-keys=1"
+        assert call.kwargs["headers"]["Resource-Crn"] == "crn:cos"
+        assert call.kwargs["timeout"] == svc.S3_TIMEOUT_SECONDS

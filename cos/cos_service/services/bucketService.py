@@ -228,6 +228,17 @@ def latest_object_modification(access_token: str, bucket: dict, versions: bool =
             params["continuation-token"] = root.findtext("s3:NextContinuationToken", "", S3_NAMESPACES)
 
 
+def bucket_access_status(access_token: str, bucket: dict) -> int:
+    """Statut HTTP d'un listing du bucket, sans lever : 200 accessible, 403 refusé
+    (règle CBR), etc. Sert à vérifier qu'une quarantaine bloque, puis qu'elle est levée."""
+    headers = _s3_headers(access_token, bucket["cos"]["crn"])
+    response = requests.get(
+        f'{bucket["virtual_server_endpoint"]}?list-type=2&max-keys=1',
+        headers=headers, verify=S3_VERIFY_TLS, timeout=S3_TIMEOUT_SECONDS,
+    )
+    return response.status_code
+
+
 def is_versioning_enabled(access_token: str, bucket_vpe: str) -> bool:
     root = _s3_get_xml(f"{bucket_vpe}?versioning", _s3_headers(access_token))
     status = root.find("s3:Status", S3_NAMESPACES)
