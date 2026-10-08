@@ -14,9 +14,9 @@
 # l'orchestrateur : la quarantaine est levée à la fin de la grâce, juste avant
 # le vidage, qui se fait donc bucket ouvert.
 
-data "ibm_iam_account_settings" "quarantine" {}
-
 locals {
+  # Compte workload qui possède le bucket : celui du realm, passé par le DAG
+  # (même valeur que le chemin Vault de la clé API). Aucun appel IAM.
   # L'instance COS est identifiée par son GUID dans les attributs CBR.
   cos_instance_guid = element(split(":", var.cos_instance_crn), 7)
 }
@@ -24,8 +24,7 @@ locals {
 resource "ibm_cbr_zone" "quarantine" {
   name        = "quarantine-${var.bucket_name}"
   description = "Zone vide (adresse de documentation) : aucune requête ne la satisfait"
-  # Compte de la clé API lue dans Vault, donc le compte workload qui possède le bucket.
-  account_id  = data.ibm_iam_account_settings.quarantine.account_id
+  account_id  = var.wklapp_account_id
 
   addresses {
     type  = "ipAddress"
@@ -47,7 +46,7 @@ resource "ibm_cbr_rule" "quarantine" {
   resources {
     attributes {
       name  = "accountId"
-      value = data.ibm_iam_account_settings.quarantine.account_id
+      value = var.wklapp_account_id
     }
     attributes {
       name  = "serviceName"

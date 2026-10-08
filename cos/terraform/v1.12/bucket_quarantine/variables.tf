@@ -34,7 +34,8 @@ variable "app_code" {
 }
 
 variable "wklapp_account_id" {
-  type = string
+  description = "Identifiant du compte workload (realm.wklapp_account_number) : chemin Vault de la clé API et compte des ressources CBR"
+  type        = string
 }
 
 variable "orchestrator_environment" {
