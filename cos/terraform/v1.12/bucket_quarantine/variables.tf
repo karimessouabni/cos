@@ -47,9 +47,9 @@ variable "region" {
 }
 
 variable "ibm_visibility" {
-  description = "Endpoints du provider IBM : private (private.cbr.cloud.ibm.com), public, ou public-and-private"
+  description = "Section de ibm_endpoints.json lue par le provider IBM (public comme le module bucket) ; private bascule sur private.*.cloud.ibm.com"
   type        = string
-  default     = "private"
+  default     = "public"
   validation {
     condition     = contains(["public", "private", "public-and-private"], var.ibm_visibility)
     error_message = "ibm_visibility : public, private ou public-and-private."
