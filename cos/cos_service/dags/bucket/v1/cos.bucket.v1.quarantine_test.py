@@ -1,11 +1,13 @@
 """DAG cos.bucket.v1.quarantine_test : éprouve le mécanisme de quarantaine seul.
 
 Pose la règle CBR du bucket par son workspace séparé (``quarantine_service``),
-attend que le listing du bucket réponde 403, lève la quarantaine, attend que
-l'accès revienne, et met le compte rendu dans le state. Ne touche ni au
-contenu du bucket ni à son statut de clean. À lancer en INT avant la période
-de grâce, pour vérifier le rôle CBR de l'identité Schematics, le workspace, et
-le délai de propagation (quelques minutes).
+attend que le listing du bucket depuis Airflow réponde 403, fait lister le
+bucket depuis Schematics (qui doit passer, c'est lui qui videra le bucket),
+lève la quarantaine, attend que l'accès revienne, et met le compte rendu dans
+le state. Ne touche ni au contenu du bucket ni à son statut de clean. À lancer
+en INT avant la période de grâce, pour vérifier le rôle CBR de l'identité
+Schematics, la référence de service du compte hub (``cos_hub_account_id``), le
+workspace et le délai de propagation (quelques minutes).
 
 En mode ``report`` (``cos_quarantine_enforcement_mode``), rien n'est bloqué :
 le compte rendu le dit, et les événements CBR du compte montrent ce qui
@@ -174,9 +176,33 @@ def bucket_quarantine_test() -> None:
         return result
 
     @step
-    def lift_quarantine(
+    def check_schematics_access(
         bucket: dict,
         blocked: dict,
+        workspace_id: str,
+        tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
+        vault: Vault = depends(vault_dependency),
+        reader: ReaderConnector = depends(reader_dependency),
+    ) -> dict:
+        """L'autre face de la règle : Schematics doit lister le bucket (200) pendant
+        qu'Airflow est bloqué. Ne lève pas : la levée doit avoir lieu quoi qu'il arrive."""
+        from cos_service.services.quarantine_service import SCOPE_SCHEMATICS, probe_bucket_via_schematics
+
+        try:
+            probe = probe_bucket_via_schematics(tf=tf, bucket=bucket, workspace_id=workspace_id, vault=vault, reader=reader)
+        except Exception as exc:  # un workspace en échec ne doit pas laisser le bucket en quarantaine
+            logger.exception("probe of %s from Schematics failed", bucket["name"])
+            return {"reached": False, "status": None, "empty": None, "scope": None, "error": str(exc)}
+        expected = probe["scope"] == SCOPE_SCHEMATICS
+        reached = probe["status"] == HTTP_OK
+        logger.info("Schematics %s the bucket %s during the quarantine (HTTP %s, scope %s)",
+                    "can list" if reached else "CANNOT list", bucket["name"], probe["status"], probe["scope"])
+        return {"reached": reached, "expected": expected, **probe}
+
+    @step
+    def lift_quarantine(
+        bucket: dict,
+        schematics: dict,
         tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> bool:
@@ -196,14 +222,17 @@ def bucket_quarantine_test() -> None:
         api_key: str,
         lifted: bool,
         blocked: dict,
+        schematics: dict,
         state_manager: StateManager = depends(state_manager_dependency),
     ) -> dict:
-        """Sonde jusqu'au retour du 200, puis écrit le compte rendu complet dans le state."""
+        """Sonde jusqu'au retour du 200, puis écrit le compte rendu complet dans le state.
+        Verdict ok : Airflow bloqué, Schematics passé si la zone le prévoit, accès rendu."""
         from cos_service.services.ibm_iam_service import get_iam_access_token
 
         restored = probe_until(get_iam_access_token(api_key), bucket, HTTP_OK)
-        report = {"blocked": blocked, "restored": restored,
-                  "verdict": "ok" if blocked["reached"] and restored["reached"] else "ko"}
+        schematics_ok = schematics["reached"] or not schematics.get("expected")
+        report = {"blocked": blocked, "schematics": schematics, "restored": restored,
+                  "verdict": "ok" if blocked["reached"] and schematics_ok and restored["reached"] else "ko"}
         state_manager.push_state({"quarantine_test": report})
         logger.info("quarantine test of %s: %s", bucket["name"], report["verdict"])
         if not restored["reached"]:
@@ -217,8 +246,9 @@ def bucket_quarantine_test() -> None:
     access_before = check_access_before(bucket=bucket, api_key=api_key)
     workspace_id = set_quarantine(bucket=bucket, access_before=access_before)
     blocked = wait_until_blocked(bucket=bucket, api_key=api_key, workspace_id=workspace_id)
-    lifted = lift_quarantine(bucket=bucket, blocked=blocked)
-    wait_until_restored(bucket=bucket, api_key=api_key, lifted=lifted, blocked=blocked)
+    schematics = check_schematics_access(bucket=bucket, blocked=blocked, workspace_id=workspace_id)
+    lifted = lift_quarantine(bucket=bucket, schematics=schematics)
+    wait_until_restored(bucket=bucket, api_key=api_key, lifted=lifted, blocked=blocked, schematics=schematics)
 
 
 bucket_quarantine_test()

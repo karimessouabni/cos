@@ -124,7 +124,7 @@ Ce qu'il faut savoir :
 | Restaurer | `cos.bucket.v1.restore` | Restaure le contenu depuis un backup vault, à un point dans le temps choisi |
 | Nettoyer | `cos.bucket.v1.clean`, `force_clean` | Vérifie la date de fin des verrous (listing), programme le vidage à J+7, met le bucket en quarantaine (règle CBR dans un workspace séparé), puis le vide via une règle d'expiration S3 |
 | Annuler un nettoyage | `cos.bucket.v1.cancel_clean` | Pendant la période de grâce : lève la quarantaine, rien n'a été supprimé |
-| Tester la quarantaine | `cos.bucket.v1.quarantine_test` | Pose la règle CBR, attend le 403, la retire, attend le retour de l'accès, compte rendu dans le state (INT) |
+| Tester la quarantaine | `cos.bucket.v1.quarantine_test` | Pose la règle CBR, attend le 403 d'Airflow, vérifie que Schematics liste encore le bucket, la retire, attend le retour de l'accès, compte rendu dans le state (INT) |
 | Règles de cycle de vie | `create/update/delete_lifecycle_policy_rule` | Gère les règles d'expiration du bucket |
 | Recovery ranges | `refresh_restore_ranges` | Rafraîchit les fenêtres de restauration disponibles |
 
@@ -483,7 +483,8 @@ contre un jeton, et les informations de connexion (nom du bucket, endpoint, rég
 formes ont exactement les mêmes droits : ceux du Service ID du rôle. L'application lit le
 secret avec sa propre politique Vault applicative ; l'orchestrateur ne le renvoie jamais
 dans le state ni dans l'API. Pendant la période de grâce d'un clean, la règle CBR bloque ces
-clés comme toutes les autres (ADR 0003).
+clés comme toutes les autres ; seul Schematics du compte hub passe, pour vider le bucket
+fermé (ADR 0003).
 
 À savoir : les secrets HMAC et clés API des resource keys figurent aussi dans le `tfstate`
 du workspace Schematics, chiffré au repos mais lisible par qui a les droits sur le workspace.

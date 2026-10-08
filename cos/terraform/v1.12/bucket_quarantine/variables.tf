@@ -55,3 +55,27 @@ variable "ibm_visibility" {
     error_message = "ibm_visibility : public, private ou public-and-private."
   }
 }
+
+variable "hub_account_id" {
+  description = "Identifiant du compte hub (celui des workspaces Schematics de l'orchestrateur) : la zone CBR laisse passer son Schematics. Vide : la règle bloque tout."
+  type        = string
+  default     = ""
+}
+
+variable "probe_enabled" {
+  description = "Lister le bucket depuis Schematics à chaque plan/apply (probe.tf) : sorties probe_status_code et bucket_empty."
+  type        = bool
+  default     = false
+}
+
+variable "probe_endpoint" {
+  description = "URL du bucket pour la sonde (https://<host>/<bucket>). Vide : endpoint privé de la région."
+  type        = string
+  default     = ""
+}
+
+variable "probe_versions" {
+  description = "Bucket versionné : la sonde liste les versions et les delete markers."
+  type        = bool
+  default     = false
+}

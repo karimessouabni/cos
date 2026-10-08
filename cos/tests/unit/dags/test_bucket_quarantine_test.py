@@ -1,5 +1,6 @@
-"""Tests du DAG ``cos.bucket.v1.quarantine_test`` : pose la règle, attend le 403,
-lève, attend le 200, compte rendu dans le state."""
+"""Tests du DAG ``cos.bucket.v1.quarantine_test`` : pose la règle, attend le 403
+côté Airflow, vérifie le 200 côté Schematics, lève, attend le 200, compte rendu
+dans le state."""
 from unittest.mock import MagicMock
 
 import pytest
@@ -47,7 +48,7 @@ def test_dag_identity(qt_dag):
     assert qt_dag.module.bucket_quarantine_test.config.options == {"lock_subscription_on_failure": False}
     assert list(qt_dag.steps) == [
         "validate_bucket", "get_cos_api_key", "check_access_before", "set_quarantine",
-        "wait_until_blocked", "lift_quarantine", "wait_until_restored",
+        "wait_until_blocked", "check_schematics_access", "lift_quarantine", "wait_until_restored",
     ]
 
 
@@ -142,11 +143,51 @@ class TestWaitUntilBlocked:
         assert result["reached"] is False and result["status"] == 200
 
 
+SCHEMATICS_OK = {"reached": True, "expected": True, "status": 200, "empty": True, "scope": "schematics"}
+
+
+class TestCheckSchematicsAccess:
+    def run(self, qt_dag, tf):
+        return qt_dag.steps["check_schematics_access"](
+            bucket=bucket_row(), blocked={"reached": True}, workspace_id="ws-cbr-1", tf=tf, vault="vault", reader="reader"
+        )
+
+    def test_schematics_lists_the_bucket_while_airflow_is_blocked(self, qt_dag, services, tf):
+        services.quarantine_service.SCOPE_SCHEMATICS = "schematics"
+        services.quarantine_service.probe_bucket_via_schematics.return_value = {"status": 200, "empty": True, "scope": "schematics"}
+
+        assert self.run(qt_dag, tf) == SCHEMATICS_OK
+        services.quarantine_service.probe_bucket_via_schematics.assert_called_once_with(
+            tf=tf, bucket=bucket_row(), workspace_id="ws-cbr-1", vault="vault", reader="reader"
+        )
+
+    def test_blocked_schematics_is_reported_not_raised(self, qt_dag, services, tf):
+        services.quarantine_service.SCOPE_SCHEMATICS = "schematics"
+        services.quarantine_service.probe_bucket_via_schematics.return_value = {"status": 403, "empty": None, "scope": "schematics"}
+
+        result = self.run(qt_dag, tf)
+
+        assert result["reached"] is False and result["expected"] is True and result["status"] == 403
+
+    def test_without_hub_account_schematics_is_not_expected_to_pass(self, qt_dag, services, tf):
+        services.quarantine_service.SCOPE_SCHEMATICS = "schematics"
+        services.quarantine_service.probe_bucket_via_schematics.return_value = {"status": 403, "empty": None, "scope": "none"}
+
+        assert self.run(qt_dag, tf)["expected"] is False
+
+    def test_a_failing_workspace_never_prevents_the_lift(self, qt_dag, services, tf):
+        services.quarantine_service.probe_bucket_via_schematics.side_effect = RuntimeError("apply failed")
+
+        result = self.run(qt_dag, tf)
+
+        assert result["reached"] is False and result["error"] == "apply failed"
+
+
 class TestLiftQuarantine:
     def test_lifts_the_workspace_recorded_in_db(self, qt_dag, services, tf):
         services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id="ws-cbr-1")
 
-        assert qt_dag.steps["lift_quarantine"](bucket=bucket_row(), blocked={"reached": True}, tf=tf, session="session") is True
+        assert qt_dag.steps["lift_quarantine"](bucket=bucket_row(), schematics=SCHEMATICS_OK, tf=tf, session="session") is True
 
         services.quarantine_service.lift_bucket_quarantine.assert_called_once_with(tf=tf, workspace_id="ws-cbr-1")
         services.bucketService.set_bucket_clean_workspace.assert_called_once_with("sub-1", None, "session")
@@ -154,15 +195,16 @@ class TestLiftQuarantine:
     def test_nothing_to_lift_without_a_workspace(self, qt_dag, services, tf):
         services.bucketService.get_bucket_by_sub_id.return_value = bucket_row()
 
-        assert qt_dag.steps["lift_quarantine"](bucket=bucket_row(), blocked={"reached": False}, tf=tf, session="session") is True
+        assert qt_dag.steps["lift_quarantine"](bucket=bucket_row(), schematics=SCHEMATICS_OK, tf=tf, session="session") is True
 
         services.quarantine_service.lift_bucket_quarantine.assert_not_called()
 
 
 class TestWaitUntilRestored:
-    def run(self, qt_dag, state_manager, blocked):
+    def run(self, qt_dag, state_manager, blocked, schematics=SCHEMATICS_OK):
         return qt_dag.steps["wait_until_restored"](
-            bucket=bucket_row(), api_key="api-key", lifted=True, blocked=blocked, state_manager=state_manager
+            bucket=bucket_row(), api_key="api-key", lifted=True, blocked=blocked, schematics=schematics,
+            state_manager=state_manager,
         )
 
     def test_full_report_in_the_state_when_everything_went_well(self, qt_dag, s3, state_manager, monkeypatch):
@@ -173,8 +215,25 @@ class TestWaitUntilRestored:
         report = self.run(qt_dag, state_manager, blocked)
 
         assert report["verdict"] == "ok"
+        assert report["schematics"] == SCHEMATICS_OK
         assert report["restored"] == {"reached": True, "status": 200, "attempts": 2, "seconds": 30}
         state_manager.push_state.assert_called_once_with({"quarantine_test": report})
+
+    def test_schematics_blocked_despite_the_hub_zone_gives_ko(self, qt_dag, s3, state_manager):
+        s3.bucketService.bucket_access_status.return_value = 200
+        blocked = {"reached": True, "status": 403, "attempts": 4, "seconds": 90}
+
+        report = self.run(qt_dag, state_manager, blocked, {**SCHEMATICS_OK, "reached": False, "status": 403})
+
+        assert report["verdict"] == "ko"
+
+    def test_schematics_blocked_without_hub_zone_is_expected(self, qt_dag, s3, state_manager):
+        s3.bucketService.bucket_access_status.return_value = 200
+        blocked = {"reached": True, "status": 403, "attempts": 4, "seconds": 90}
+
+        report = self.run(qt_dag, state_manager, blocked, {"reached": False, "expected": False, "status": 403, "scope": "none"})
+
+        assert report["verdict"] == "ok"
 
     def test_never_blocked_gives_ko_but_the_lift_is_verified(self, qt_dag, s3, state_manager):
         s3.bucketService.bucket_access_status.return_value = 200

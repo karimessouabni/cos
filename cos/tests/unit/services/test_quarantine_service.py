@@ -1,5 +1,6 @@
 """Tests de ``quarantine_service`` : la quarantaine est un workspace Schematics
-séparé du bucket (zone + règle CBR seulement), créé à la pose, détruit à la levée."""
+séparé du bucket (zone + règle CBR seulement), créé à la pose, détruit à la levée.
+Sa zone laisse passer Schematics du compte hub, d'où l'orchestrateur sonde le bucket."""
 import sys
 from unittest.mock import MagicMock
 
@@ -11,6 +12,7 @@ BUCKET = {
     "subscription_id": "sub-1",
     "name": "bucket-a",
     "region": "eu-de",
+    "object_versioning_enabled": False,
     "cos": {"crn": "crn:v1:bluemix:public:cloud-object-storage:global:a/acc:guid-cos::", "name": "cos-a",
             "context": {"realm": "realm-a", "app_code": "AP1"}},
 }
@@ -33,6 +35,7 @@ def deps(monkeypatch):
     mocks["contextService"].get_realm.return_value.model_dump.return_value = {"name": "realm-a", "wklapp_account_number": "wk-123"}
     mocks["schematics_service"].setting.side_effect = lambda name, default: {
         "cos_quarantine_enforcement_mode": "report",
+        "cos_hub_account_id": "hub-456",
     }.get(name, default)
     # create_or_update_ws / run_workspace sont importés au chargement du module : patchés sur lui.
     monkeypatch.setattr(svc, "create_or_update_ws", MagicMock(return_value={"id": "ws-cbr-1"}))
@@ -46,13 +49,13 @@ def test_workspace_name_is_derived_from_the_subscription():
 
 
 def test_settings_come_from_airflow_variables_or_env(deps):
-    assert svc.quarantine_settings() == {"enforcement_mode": "report"}
+    assert svc.quarantine_settings() == {"enforcement_mode": "report", "hub_account_id": "hub-456", "probe_endpoint": ""}
 
 
-def test_settings_default_to_enforcement_enabled(deps):
+def test_settings_default_to_enforcement_enabled_and_no_hub_account(deps):
     deps["schematics_service"].setting.side_effect = lambda name, default: default
 
-    assert svc.quarantine_settings() == {"enforcement_mode": "enabled"}
+    assert svc.quarantine_settings() == {"enforcement_mode": "enabled", "hub_account_id": "", "probe_endpoint": ""}
 
 
 def test_set_creates_the_separate_workspace_from_database_values_and_applies(deps):
@@ -74,10 +77,50 @@ def test_set_creates_the_separate_workspace_from_database_values_and_applies(dep
     assert variables["cos_instance_crn"] == BUCKET["cos"]["crn"]
     assert variables["wklapp_account_id"] == "wk-123"
     assert variables["app_code"] == "AP1"
-    assert "allowed_vpc_crns" not in variables  # la règle bloque tout, aucune zone à tailler
+    assert "allowed_vpc_crns" not in variables  # aucune zone réseau à tailler : une référence de service
+    assert variables["hub_account_id"] == "hub-456"  # Schematics du hub passe la règle
     assert variables["enforcement_mode"] == "report"
+    assert (variables["probe_enabled"], variables["probe_versions"]) == ("false", "false")  # sonde inactive à la pose
     assert variables["vault_read_token"].value == "rt" and variables["vault_read_token"].sensitive is True
     svc.run_workspace.assert_called_once_with("tf", "ws-cbr-1")
+
+
+def test_variables_sent_as_strings_terraform_converts_the_booleans(deps):
+    bucket = {**BUCKET, "object_versioning_enabled": True}
+
+    variables = svc.quarantine_variables(bucket, SECRETS, {"wklapp_account_number": "wk-123"}, probe=True)
+
+    assert (variables["probe_enabled"], variables["probe_versions"]) == ("true", "true")
+
+
+class TestProbeViaSchematics:
+    def run(self, deps, outputs):
+        svc.run_workspace.return_value = outputs
+        return svc.probe_bucket_via_schematics(tf="tf", bucket=BUCKET, workspace_id="ws-cbr-1", vault="vault", reader="reader")
+
+    def test_enables_the_probe_reapplies_and_reads_the_outputs(self, deps):
+        result = self.run(deps, {
+            "probe_status_code": {"value": 200}, "bucket_empty": {"value": True}, "quarantine_scope": {"value": "schematics"},
+        })
+
+        assert result == {"status": 200, "empty": True, "scope": "schematics"}
+        update = deps["schematics_service"].update_ws_variables
+        update.assert_called_once()
+        assert update.call_args.args[:2] == ("tf", "ws-cbr-1")
+        variables = update.call_args.args[2]
+        assert variables["probe_enabled"] == "true"
+        assert variables["bucket_name"] == "bucket-a" and variables["hub_account_id"] == "hub-456"  # jeu complet
+        svc.run_workspace.assert_called_once_with("tf", "ws-cbr-1")
+
+    def test_schematics_blocked_gives_the_status_and_no_emptiness(self, deps):
+        result = self.run(deps, {
+            "probe_status_code": {"value": "403"}, "bucket_empty": {"value": None}, "quarantine_scope": {"value": "none"},
+        })
+
+        assert result == {"status": 403, "empty": None, "scope": "none"}
+
+    def test_missing_outputs_give_none(self, deps):
+        assert self.run(deps, {})["status"] is None
 
 
 def test_set_propagates_an_apply_failure(deps):

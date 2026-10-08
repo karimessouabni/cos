@@ -34,15 +34,21 @@ Contraintes établies :
    finale. Une variante « règle d'expiration datée à J+7 » a été écartée :
    si la levée échoue à J+6, COS détruit quand même.
 2. **La quarantaine est une règle Context-Based Restrictions sur le seul
-   bucket, qui bloque tout.** Son seul contexte est une zone réseau qui ne
-   correspond à rien (une adresse de documentation, RFC 5737). Personne n'a
-   besoin du bucket pendant la grâce, ni le client ni l'orchestrateur : la
-   quarantaine est levée à la fin de la grâce, juste après la décision et
-   avant le vidage, qui se fait bucket ouvert. Plus de zone de l'orchestrateur
-   à tailler, plus de dépendance au type d'endpoint utilisé par Airflow. Le
-   prix : le client retrouve l'accès pendant le vidage (un à deux jours), et
-   les services qui lisent le bucket en interne (backup) sont bloqués pendant
-   la grâce.
+   bucket, dont la zone ne laisse passer que Schematics du compte hub.** La
+   zone est une référence de service (`serviceRef`, service `schematics`,
+   compte `cos_hub_account_id`) : aucun client n'en vient, et tous les
+   workspaces de l'orchestrateur en viennent, celui du bucket compris. Plus de
+   zone réseau à tailler, plus de dépendance au type d'endpoint d'Airflow, et
+   la règle n'a pas à être levée pour vider le bucket : le vidage et le
+   contrôle « bucket vide » se font depuis le workspace de quarantaine
+   (`probe.tf` : listing S3 par `hashicorp/http` avec le jeton IAM du
+   provider ; sorties `probe_status_code`, `bucket_empty`). Le client ne
+   retrouve l'accès qu'une fois le bucket vide. Une première version bloquait
+   tout, Schematics compris, et levait la règle avant le vidage : le client
+   pouvait écrire pendant le vidage, et un bucket alimenté en continu ne se
+   vidait jamais. Sans `cos_hub_account_id`, la zone retombe sur ce mode
+   (adresse RFC 5737, `quarantine_scope = none`). Les services qui lisent le
+   bucket en interne (backup) restent bloqués pendant la grâce.
 3. **La règle CBR est portée par un workspace Schematics séparé du bucket**
    (`terraform/v1.12/bucket_quarantine`, nom `ws_cbr_bucket_<subscription>`,
    identifiant gardé en base dans `clean_cbr_workspace_id`). Son state ne
@@ -110,9 +116,18 @@ Contraintes établies :
 - Le succès n'est posé qu'après la levée de la quarantaine. Un échec après la
   décision laisse le bucket en quarantaine et `failed` ; `cancel_clean` la lève.
 - `cos.bucket.v1.quarantine_test` éprouve le mécanisme seul, sans grâce ni
-  vidage : règle posée, listing attendu en 403, règle retirée, accès attendu
-  en 200, compte rendu (délais, statuts, mode CBR) dans le state. C'est le
-  premier passage à faire en INT, en `report` puis en `enabled`.
+  vidage : règle posée, listing d'Airflow attendu en 403, listing depuis
+  Schematics attendu en 200 (sonde du workspace), règle retirée, accès attendu
+  en 200, compte rendu (délais, statuts, mode CBR, portée) dans le state.
+  C'est le premier passage à faire en INT, en `report` puis en `enabled`.
+  Réglages : `cos_hub_account_id` (compte des workspaces Schematics),
+  `cos_quarantine_probe_endpoint` (URL du bucket vue de Schematics ; défaut
+  endpoint privé de la région). Prérequis : le provider `hashicorp/http`
+  accessible au miroir Terraform de Schematics.
+- Reste à faire pour le clean sur ce modèle : poser la règle d'expiration par
+  `ibm_cos_bucket_lifecycle_configuration` dans le workspace de quarantaine
+  (variable `clean_enabled`) après la décision, remplacer le listing S3 du
+  sensor par un apply + lecture de `bucket_empty`, et lever à la fin seulement.
 - Points à surveiller en exploitation : la propagation d'une règle CBR prend
   quelques minutes (quarantaine et levée ne sont pas instantanées) ; le
   nombre de règles CBR par compte est plafonné (une par bucket en grâce,
