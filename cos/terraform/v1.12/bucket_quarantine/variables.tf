@@ -45,3 +45,13 @@ variable "orchestrator_environment" {
 variable "region" {
   type = string
 }
+
+variable "ibm_visibility" {
+  description = "Endpoints du provider IBM : private (private.cbr.cloud.ibm.com), public, ou public-and-private"
+  type        = string
+  default     = "private"
+  validation {
+    condition     = contains(["public", "private", "public-and-private"], var.ibm_visibility)
+    error_message = "ibm_visibility : public, private ou public-and-private."
+  }
+}

@@ -35,5 +35,8 @@ locals {
 provider "ibm" {
   ibmcloud_api_key    = module.vault.secrets["api_key"]
   region              = var.region
+  # Depuis Schematics, l'endpoint public cbr.cloud.ibm.com ne répond pas (INT :
+  # "context deadline exceeded") : passage par private.cbr.cloud.ibm.com.
+  visibility          = var.ibm_visibility
   endpoints_file_path = fileexists("${path.module}/ibm_endpoints.json") ? "${path.module}/ibm_endpoints.json" : null
 }
