@@ -9,6 +9,8 @@ ci-dessous sont déduits des symboles utilisés (``SchematicsBackend``, ``VCS``,
 """
 import logging
 import os
+import re
+import time
 from typing import NamedTuple
 
 from bp2i_airflow_library.config import OrchestratorEnvironment
@@ -184,23 +186,74 @@ def update_ws_variables(tf: SchematicsBackend, workspace_id: str, variables: dic
     return tf.workspaces.update_variables(workspace_id=workspace_id, variables=variables)
 
 
+PLAN_SUMMARY_RE = re.compile(r"Plan:\s*(\d+) to add,\s*(\d+) to change,\s*(\d+) to destroy", re.IGNORECASE)
+NO_CHANGES_RE = re.compile(r"No changes\.|Your infrastructure matches the configuration", re.IGNORECASE)
+
+
+def _activity_logs(activity) -> dict:
+    """Journaux d'une activité Schematics par template ; {} si l'objet n'en expose pas
+    (ancienne version de bp2i_terraform pour ``plan``)."""
+    get_logs = getattr(activity, "get_logs", None)
+    if get_logs is None:
+        return {}
+    try:
+        return dict(get_logs() or {})
+    except Exception as exc:  # les logs ne doivent jamais faire échouer le run
+        logger.warning("could not read Schematics activity logs: %s", exc)
+        return {}
+
+
+def plan_summary(template_logs: str) -> str | None:
+    """La ligne ``Plan: X to add, Y to change, Z to destroy`` ou ``No changes`` du plan."""
+    match = PLAN_SUMMARY_RE.search(template_logs)
+    if match:
+        add, change, destroy = match.groups()
+        return f"{add} to add, {change} to change, {destroy} to destroy"
+    if NO_CHANGES_RE.search(template_logs):
+        return "no changes"
+    return None
+
+
+def _log_activity(kind: str, workspace_id: str, activity) -> dict:
+    """Journalise les logs Terraform d'une activité, avec un résumé du plan et la durée."""
+    logs = _activity_logs(activity)
+    for template_id, template_logs in logs.items():
+        logger.info("%s logs of workspace %s, template %s:\n%s", kind, workspace_id, template_id, template_logs)
+        summary = plan_summary(template_logs)
+        if summary:
+            logger.info("%s of workspace %s, template %s: %s", kind, workspace_id, template_id, summary)
+        match = PLAN_SUMMARY_RE.search(template_logs)
+        if kind == "plan" and match and int(match.group(3)) > 0:
+            logger.warning("plan of workspace %s destroys %s resource(s)", workspace_id, match.group(3))
+    return logs
+
+
 def run_workspace(tf: SchematicsBackend, workspace_id: str) -> dict:
     """Plan puis apply, et renvoie les outputs Terraform du premier template.
 
-    Lève une ``RuntimeError`` lisible si l'apply n'a produit aucun output, au
-    lieu d'un ``IndexError`` anonyme chez l'appelant.
+    Journalise les logs du plan (avec son résumé ajouts / changements /
+    destructions, et un warning s'il détruit), puis ceux de l'apply, la durée
+    de chaque phase et les noms des outputs. Lève une ``RuntimeError`` lisible
+    si l'apply n'a produit aucun output, au lieu d'un ``IndexError`` anonyme.
     """
     workspace = tf.workspaces.get_by_id(workspace_id)
-    workspace.plan()
-    apply_activity = workspace.apply()
+    logger.info("plan of workspace %s (%s) starting", workspace_id, getattr(workspace, "name", "?"))
+    started = time.monotonic()
+    plan_activity = workspace.plan()
+    _log_activity("plan", workspace_id, plan_activity)
+    logger.info("plan of workspace %s done in %.0f s", workspace_id, time.monotonic() - started)
 
-    for template_id, template_logs in apply_activity.get_logs().items():
-        logger.info("apply logs of workspace %s, template %s:\n%s", workspace_id, template_id, template_logs)
+    started = time.monotonic()
+    apply_activity = workspace.apply()
+    _log_activity("apply", workspace_id, apply_activity)
+    logger.info("apply of workspace %s done in %.0f s", workspace_id, time.monotonic() - started)
 
     outputs = workspace.get_outputs()
     if not outputs or not outputs[0].output_values:
         raise RuntimeError(f"workspace {workspace_id} produced no Terraform outputs after apply")
-    return dict(outputs[0].output_values[0])
+    values = dict(outputs[0].output_values[0])
+    logger.info("outputs of workspace %s: %s", workspace_id, sorted(values))  # noms seulement, jamais les valeurs
+    return values
 
 
 _setting = setting  # ancien nom, gardé pour les tests et les appels existants

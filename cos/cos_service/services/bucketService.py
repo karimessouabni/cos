@@ -289,6 +289,12 @@ def _execute(session: SASession, statement) -> None:
     session.commit()
 
 
+def retention_unit_of(payload) -> str | None:
+    """Unité de rétention saisie par le client ("days" / "years"), None sans rétention dans le payload."""
+    retention = getattr(payload, "retention", None)
+    return getattr(retention, "unit", None) if retention is not None else None
+
+
 def process_bucket_creation(
     payload,
     immutability: dict,
@@ -299,7 +305,10 @@ def process_bucket_creation(
     session: SASession,
 ) -> dict:
     """Insère la ligne bucket et son workspace. ``cos`` et ``backup_vault`` sont
-    des lignes ORM (relations), ``backup_vault`` pouvant être None."""
+    des lignes ORM (relations), ``backup_vault`` pouvant être None.
+
+    ``retention_unit`` : unité saisie par le client ("days" / "years", ADR 0001),
+    lue sur ``payload.retention`` ; les bornes, elles, sont stockées en jours."""
     bucket = Bucket(
         subscription_id=payload.subscription_id,
         description=description,
@@ -318,6 +327,7 @@ def process_bucket_creation(
         retention_default=immutability["retention"]["default"],
         retention_minimum=immutability["retention"]["minimum"],
         retention_maximum=immutability["retention"]["maximum"],
+        retention_unit=retention_unit_of(payload),
         enable_custom_permissions=payload.enable_custom_permissions,
         object_lock_duration_days=immutability["object_lock_duration_days"],
         object_lock_duration_years=immutability["object_lock_duration_years"],
@@ -457,7 +467,10 @@ def process_bucket_update(
     enable_custom_permissions: bool,
     description: str,
     session: SASession,
+    retention_unit: str | None = None,
 ) -> None:
+    """``retention_unit`` : unité saisie dans la demande ; None la laisse inchangée
+    (mise à jour sans rétention dans le payload)."""
     from cos_service.services.backup_vault_service import get_backup_vault_by_sub_id
 
     backup_vault_sub_id = immutability["backup"]["backup_vault_sub_id"]
@@ -472,6 +485,7 @@ def process_bucket_update(
             retention_default=immutability["retention"]["default"],
             retention_minimum=immutability["retention"]["minimum"],
             retention_maximum=immutability["retention"]["maximum"],
+            **({"retention_unit": retention_unit} if retention_unit is not None else {}),
             object_lock_duration_days=immutability["object_lock_duration_days"],
             object_lock_duration_years=immutability["object_lock_duration_years"],
             object_versioning_enabled=immutability["object_versioning_enabled"],

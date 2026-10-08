@@ -60,6 +60,13 @@ confirmer avec les clients identifiés en base par `retention_enabled = true`). 
 
 ## Conséquences
 
+- `bucket.retention_unit` (2026-10-08) : l'unité saisie par le client, `days` ou
+  `years`, est gardée en base à la création et à chaque mise à jour qui porte
+  une rétention. Les bornes restent en jours. Ferme le point ouvert sur la
+  colonne d'unité : le state peut rendre l'unité même quand la demande en
+  cours ne contient pas de rétention.
+
+
 - Aucun client existant n'a de changement à faire pour continuer à créer ou mettre à jour
   des buckets.
 - Point à vérifier dans le provider `orchestrator` : si son Read compare le `payload` au

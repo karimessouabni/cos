@@ -436,9 +436,11 @@ cos_service/
 │   ├── schematics_service.py      workspaces Terraform
 │   ├── recovery_range_service.py  choix du point de restauration
 │   └── vault_service.py           secrets
-├── models/ repository/     SQLAlchemy
+├── models/                 SQLAlchemy : Bucket.py (colonnes, to_dict/__iter__), base.py, __init__ qui charge tout
+├── repository/             accès aux tables de restauration
 └── sql/                    scripts de schéma
-terraform/                  Terraform exécuté par Schematics (bucket, backup vault) + README
+alembic/versions/           migrations (20261008 : grâce du clean, unité de rétention)
+terraform/                  Terraform exécuté par Schematics (bucket, backup vault, bucket_quarantine) + README
 cos-subscriptions/          script de nettoyage des souscriptions
 tests/                      tests unitaires exécutables hors plateforme
 tests/toolchain_tests/      tests OpenTofu de la toolchain (tofu test) + toolchain_env.py

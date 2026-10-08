@@ -242,6 +242,7 @@ class TestRunWorkspace:
 
     def test_plans_applies_and_returns_the_first_outputs(self, tf, workspace, caplog):
         caplog.set_level("INFO", logger=svc.logger.name)
+        workspace.plan.return_value.get_logs.return_value = {"tpl-1": "...\nPlan: 3 to add, 1 to change, 0 to destroy.\n"}
 
         result = svc.run_workspace(tf, "ws-1")
 
@@ -249,7 +250,46 @@ class TestRunWorkspace:
         tf.workspaces.get_by_id.assert_called_once_with("ws-1")
         workspace.plan.assert_called_once()
         workspace.apply.assert_called_once()
+        assert "plan logs of workspace ws-1" in caplog.text
+        assert "plan of workspace ws-1, template tpl-1: 3 to add, 1 to change, 0 to destroy" in caplog.text
         assert "apply logs" in caplog.text
+        assert "plan of workspace ws-1 done in" in caplog.text and "apply of workspace ws-1 done in" in caplog.text
+        assert "outputs of workspace ws-1: ['bucket_name']" in caplog.text
+        assert "bucket-a" not in caplog.text.split("outputs of workspace")[1]  # noms des outputs, pas leurs valeurs
+        assert "WARNING" not in caplog.text
+
+    def test_a_destroying_plan_is_a_warning(self, tf, workspace, caplog):
+        caplog.set_level("INFO", logger=svc.logger.name)
+        workspace.plan.return_value.get_logs.return_value = {"tpl-1": "Plan: 0 to add, 0 to change, 2 to destroy."}
+
+        svc.run_workspace(tf, "ws-1")
+
+        assert "plan of workspace ws-1 destroys 2 resource(s)" in caplog.text
+        assert caplog.records[-1].levelname == "INFO"  # le warning n'empêche rien
+        assert any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_no_changes_plan_is_summarised(self, tf, workspace, caplog):
+        caplog.set_level("INFO", logger=svc.logger.name)
+        workspace.plan.return_value.get_logs.return_value = {"tpl-1": "No changes. Your infrastructure matches the configuration."}
+
+        svc.run_workspace(tf, "ws-1")
+
+        assert "plan of workspace ws-1, template tpl-1: no changes" in caplog.text
+
+    def test_plan_without_logs_api_still_runs(self, tf, workspace, caplog):
+        """Ancienne bp2i_terraform : plan() ne renvoie pas d'activité avec get_logs."""
+        caplog.set_level("INFO", logger=svc.logger.name)
+        workspace.plan.return_value = None
+
+        assert svc.run_workspace(tf, "ws-1") == {"bucket_name": {"value": "bucket-a"}}
+        assert "plan logs" not in caplog.text
+
+    def test_unreadable_logs_never_fail_the_run(self, tf, workspace, caplog):
+        caplog.set_level("INFO", logger=svc.logger.name)
+        workspace.apply.return_value.get_logs.side_effect = RuntimeError("logs api down")
+
+        assert svc.run_workspace(tf, "ws-1") == {"bucket_name": {"value": "bucket-a"}}
+        assert "could not read Schematics activity logs: logs api down" in caplog.text
 
     def test_no_outputs_is_an_explicit_error(self, tf, workspace):
         workspace.get_outputs.return_value = []

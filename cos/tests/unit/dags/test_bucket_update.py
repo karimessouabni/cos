@@ -274,8 +274,10 @@ class TestSaveBucketInDb:
             "immutability_choice": "object_lock",
             "deprecations": [],
         })
+        # retention_unit_of (mocké avec bucketService) : l'unité saisie suit la mise à jour.
         services.bucketService.process_bucket_update.assert_called_once_with(
-            "sub-1", data["immutability"], False, "my bucket", "session"
+            "sub-1", data["immutability"], False, "my bucket", "session",
+            retention_unit=services.bucketService.retention_unit_of.return_value,
         )
         services.bucketService.update_bucket_workspace_status.assert_called_once_with("sub-1", Status.SUCCESS, "session")
 

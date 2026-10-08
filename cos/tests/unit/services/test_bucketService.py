@@ -449,3 +449,36 @@ class TestBucketAccessStatus:
         assert call.args[0] == "https://s3.direct.eu-de.example/bucket-a?list-type=2&max-keys=1"
         assert call.kwargs["headers"]["Resource-Crn"] == "crn:cos"
         assert call.kwargs["timeout"] == svc.S3_TIMEOUT_SECONDS
+
+
+class TestRetentionUnit:
+    def test_read_from_the_payload_retention(self):
+        from types import SimpleNamespace
+
+        assert svc.retention_unit_of(SimpleNamespace(retention=SimpleNamespace(unit="years"))) == "years"
+        assert svc.retention_unit_of(SimpleNamespace(retention=None)) is None
+        assert svc.retention_unit_of(SimpleNamespace()) is None
+
+    def test_stored_at_creation(self, session):
+        from types import SimpleNamespace
+
+        payload = SimpleNamespace(
+            subscription_id="sub-1", requestor="karim", region="eu-de", storage_class="standard",
+            environment="dev", enable_custom_permissions=False, retention=SimpleNamespace(unit="days"),
+        )
+
+        svc.process_bucket_creation(payload, fresh_immutability(), {}, "d", object(), None, session)
+
+        assert session.add.call_args.args[0].retention_unit == "days"
+
+    @pytest.mark.parametrize("unit, expected", [("years", {"retention_unit": "years"}), (None, {})])
+    def test_update_changes_the_unit_only_when_given(self, session, monkeypatch, unit, expected):
+        import sys
+        from unittest.mock import MagicMock
+
+        monkeypatch.setitem(sys.modules, "cos_service.services.backup_vault_service", MagicMock())
+
+        svc.process_bucket_update("sub-1", fresh_immutability(), True, "desc", session, retention_unit=unit)
+
+        values = executed(session)[0].values_
+        assert {k: v for k, v in values.items() if k == "retention_unit"} == expected

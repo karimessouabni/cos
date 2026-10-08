@@ -206,7 +206,11 @@ def bucket_update():
         state_manager: StateManager = depends(state_manager_dependency),
         session: SASession = depends(sqlalchemy_session_dependency),
     ) -> dict:
-        from cos_service.services.bucketService import process_bucket_update, update_bucket_workspace_status
+        from cos_service.services.bucketService import (
+            process_bucket_update,
+            retention_unit_of,
+            update_bucket_workspace_status,
+        )
         from cos_service.services.immutability_service import deprecations_for_client, retention_state_for_client
 
         immutability = validated["immutability"]
@@ -234,6 +238,7 @@ def bucket_update():
             enable_custom_permissions,
             state_manager.get_subscription().description,
             session,
+            retention_unit=retention_unit_of(payload),
         )
         update_bucket_workspace_status(payload.subscription_id, Status.SUCCESS, session)
         return {"subscription_id": payload.subscription_id}

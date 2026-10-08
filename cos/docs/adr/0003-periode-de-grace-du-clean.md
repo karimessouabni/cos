@@ -118,8 +118,10 @@ Contraintes établies :
   toujours retirée) ; le timeout Airflow du sensor de vidage est levé
   hors du `try` et ne pose pas `failed` (callback d'échec à ajouter si
   `step.sensor` le transmet).
-- Reste à faire hors de ce dépôt : la migration des trois colonnes
-  (`clean_requested_at`, `clean_execute_at`, `clean_cbr_workspace_id`), le
+- Modèle `cos_service/models/Bucket.py` et migration
+  `alembic/versions/20261008_bucket_clean_grace_and_retention_unit.py` dans
+  ce dépôt (`down_revision` à renseigner avec `alembic heads`).
+- Reste à faire hors de ce dépôt : jouer cette migration, le
   `providers.tf` du module de quarantaine aligné sur celui du bucket, le rôle
   CBR sur l'identité Schematics, le réglage de quarantaine en INT, les
   actions `cancel_clean` dans le provider, et la notification du demandeur à
