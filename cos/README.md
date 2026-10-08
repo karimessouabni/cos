@@ -387,6 +387,107 @@ workspace, qui garde son `tfstate`.
 Chaîne complète, versions des modules, provenance de chaque variable et points d'attention :
 [`terraform/README.md`](terraform/README.md).
 
+### 8.1 Les clés : qui s'authentifie, avec quoi, et où les trouver
+
+Deux familles de clés cohabitent dans `terraform/v1.12/bucket/main.tf`, et elles ne se
+croisent jamais : celle avec laquelle **Schematics agit**, et celles que **le bucket
+fabrique pour l'application** cliente.
+
+```mermaid
+flowchart TB
+    subgraph Hub["Compte hub (orchestrateur)"]
+        DAG["DAG Airflow"]
+        SCH["Workspace Schematics<br/>terraform/v1.12/bucket"]
+    end
+
+    subgraph Vault["HashiCorp Vault"]
+        VK["<b>apcode/ibm/&lt;compte workload&gt;</b><br/>api_key du Service ID orchestrateur<br/><i>déposée à l'onboarding, lue par Terraform</i>"]
+        VW["<b>apcode/objsto/&lt;instance&gt;/&lt;bucket&gt;/writer</b><br/>HMAC + api_key, rôle Writer"]
+        VR["<b>apcode/objsto/&lt;instance&gt;/&lt;bucket&gt;/reader</b><br/>HMAC + api_key, rôle Reader"]
+    end
+
+    subgraph Wkl["Compte workload (apcode)"]
+        SIDO["Service ID orchestrateur<br/>droits larges sur le compte"]
+        SIDW["Service ID sid-&lt;bucket&gt;-Writer<br/>politique : Writer sur ce bucket"]
+        SIDR["Service ID sid-&lt;bucket&gt;-Reader<br/>politique : Reader sur ce bucket"]
+        RKW["Resource key hmac-&lt;bucket&gt;-writer<br/>HMAC + api_key du Service ID Writer"]
+        RKR["Resource key hmac-&lt;bucket&gt;-reader<br/>HMAC + api_key du Service ID Reader"]
+        BKT[("Bucket")]
+    end
+
+    APP["Application cliente"]
+
+    DAG -->|"vault_read_token, vault_write_token<br/>(courte durée)"| SCH
+    SCH -->|"1. lit (provider vault.read)"| VK
+    VK -.->|"identité de Terraform :<br/>jeton IAM = Service ID orchestrateur"| SIDO
+    SIDO -->|"2. crée"| SIDW
+    SIDO -->|"2. crée"| SIDR
+    SIDO -->|"3. crée le bucket"| BKT
+    SIDO -->|"4. crée les resource keys<br/>generate_hmac_credentials"| RKW
+    SIDO -->|"4."| RKR
+    RKW -.->|"authentifie comme"| SIDW
+    RKR -.->|"authentifie comme"| SIDR
+    SCH -->|"5. écrit (provider vault.write)"| VW
+    SCH -->|"5. écrit"| VR
+    APP -->|"lit avec sa politique Vault"| VW
+    APP -->|"lit"| VR
+    APP -->|"S3 : signature HMAC<br/>ou SDK IBM : api_key → jeton IAM"| BKT
+```
+
+**La clé de l'orchestrateur** (étape 1). Le module `vault` lit `apcode/ibm/<compte workload>`
+et son champ `api_key` nourrit le provider IBM. Cette clé appartient au Service ID de
+l'orchestrateur **dans le compte workload**, créé à l'onboarding du compte avec des droits
+larges : administrer l'instance COS, créer des Service IDs et leurs politiques, lier des VPE,
+et depuis la quarantaine du clean, administrer les règles CBR. Terraform ne la crée jamais,
+il la lit : le DAG ne lui passe que l'adresse de Vault et un token de lecture à durée
+courte. Le provider l'échange contre un jeton IAM, et tous les appels qui suivent sont faits
+*en tant que* ce Service ID, dans le compte workload. Il n'y a donc pas de lien de confiance
+IAM entre les deux comptes : le hub se fait passer pour une identité du workload. Le module
+de quarantaine (`bucket_quarantine`) lit la même clé, par le même chemin, et rien d'autre.
+
+**Les clés HMAC de l'application** (étapes 2 à 5), seulement si `enable_custom_permissions`
+est vrai :
+
+1. **Une identité par rôle.** Pour chaque rôle de `local.service_id_roles` (Reader, Writer),
+   un Service ID `sid-<bucket>-<rôle>` est créé dans le compte workload avec une seule
+   politique IAM : ce rôle, sur le service COS, type `bucket`, nom égal au bucket. Les droits
+   vivent ici et ne dépassent pas ce bucket.
+2. **Une resource key par identité.** Le module COS crée sur l'instance une
+   `ibm_resource_key` avec `generate_hmac_credentials = true` et `service_id_crn` pointant
+   sur le Service ID du rôle. IBM y génère deux choses : une clé API IAM du Service ID et une
+   paire HMAC `access_key_id` / `secret_access_key`. Les deux authentifient comme ce Service
+   ID, donc avec sa politique. Le `role = local.bucket_role_none` est volontaire : une
+   resource key porte normalement son propre rôle sur toute l'instance ; en le neutralisant,
+   le seul droit qui reste est celui du Service ID, limité au bucket.
+3. **Dépôt dans Vault.** `local.bucket_writer_credentials` et `local.bucket_reader_credentials`
+   (`locals.tf`) assemblent ces sorties, et les modules `vault_write_*` les écrivent avec le
+   provider `vault.write`, dont le token vient aussi du DAG.
+
+| | Clé de l'orchestrateur | Clés HMAC du bucket |
+|---|---|---|
+| Créée par | l'onboarding du compte workload | le workspace du bucket, à chaque bucket |
+| Identité IBM | Service ID orchestrateur | Service ID `sid-<bucket>-Reader` / `-Writer` |
+| Portée | tout le compte workload | un bucket, un rôle |
+| Chemin Vault | `apcode/ibm/<compte workload>` | `apcode/objsto/<instance COS>/<bucket>/reader` et `/writer` |
+| Sens pour Terraform | lue | écrite |
+| Fin de vie | rotation externe | détruites avec le bucket : resource key, Service ID, secret Vault |
+
+**Pour l'application cliente : où trouver ses accès.** Dans Vault, sous son apcode, au
+chemin `apcode/objsto/<nom de l'instance COS>/<nom du bucket>/writer` (lecture et écriture)
+ou `/reader` (lecture seule). Le nom de l'instance et celui du bucket sont ceux du state de
+la ressource `orchestrator_subscription_cosbucket_v1` (`cos_instance_name`, `bucket_name`).
+Chaque secret contient, selon `locals.tf` du module bucket (noms de champs à vérifier là) :
+la paire HMAC (`access_key_id`, `secret_access_key`) pour tout client S3 (AWS SDK, boto3,
+rclone, signature SigV4), la clé API IAM (`api_key`) pour le SDK IBM COS, qui l'échange
+contre un jeton, et les informations de connexion (nom du bucket, endpoint, région). Les deux
+formes ont exactement les mêmes droits : ceux du Service ID du rôle. L'application lit le
+secret avec sa propre politique Vault applicative ; l'orchestrateur ne le renvoie jamais
+dans le state ni dans l'API. Pendant la période de grâce d'un clean, la règle CBR bloque ces
+clés comme toutes les autres (ADR 0003).
+
+À savoir : les secrets HMAC et clés API des resource keys figurent aussi dans le `tfstate`
+du workspace Schematics, chiffré au repos mais lisible par qui a les droits sur le workspace.
+
 ## 9. Ce qui est en base
 
 `bucketService.py` porte la persistance SQLAlchemy et les appels S3 directs.
@@ -503,7 +604,10 @@ complet avec la vraie librairie. Tout est décrit dans [`tests/unit/README.md`](
 | **Schematics** | Service IBM qui exécute du Terraform dans un workspace hébergé |
 | **KMS** | Key Management Service, la clé qui chiffre le bucket |
 | **VPE** | Virtual Private Endpoint, accès privé au bucket depuis le réseau BNPP |
-| **HMAC** | Paire de clés d'accès S3, stockée dans Vault pour l'application |
+| **HMAC** | Paire de clés d'accès S3 (`access_key_id` / `secret_access_key`), stockée dans Vault pour l'application (§ 8.1) |
+| **Service ID** | Identité IAM non humaine ; porte des politiques et possède des clés API |
+| **Resource key** | Identifiants générés par IBM sur une instance de service ; pour COS, clé API et paire HMAC d'un Service ID |
+| **CBR** | Context-Based Restrictions, règles IBM qui limitent l'accès à une ressource selon le contexte réseau (quarantaine du clean) |
 | **Backup vault** | Coffre IBM qui reçoit les copies de sauvegarde d'un bucket versionné |
 | **Recovery range** | Fenêtre de temps sur laquelle un backup vault peut restaurer |
 | **Immutabilité** | Terme générique du produit pour rétention et object lock |
