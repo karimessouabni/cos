@@ -24,6 +24,8 @@ locals {
 resource "ibm_cbr_zone" "quarantine" {
   name        = "quarantine-${var.bucket_name}"
   description = "Zone vide (adresse de documentation) : aucune requête ne la satisfait"
+  # Compte de la clé API lue dans Vault, donc le compte workload qui possède le bucket.
+  account_id  = data.ibm_iam_account_settings.quarantine.account_id
 
   addresses {
     type  = "ipAddress"
