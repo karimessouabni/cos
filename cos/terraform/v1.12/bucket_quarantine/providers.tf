@@ -1,9 +1,9 @@
 # Aligné sur terraform/v1.12/bucket/providers.tf : même lecture de la clé API du
 # compte workload dans Vault (sortie `secrets` du module de lecture), même
-# provider ibm. Le fichier `ibm_endpoints.json` du module bucket n'est pas
-# repris : la règle CBR ne parle qu'à IAM et à l'API CBR, par leurs endpoints
-# par défaut. S'il s'avère nécessaire depuis Schematics, le copier ici et
-# ajouter `endpoints_file_path = "ibm_endpoints.json"` au provider ibm.
+# provider ibm. Le fichier `ibm_endpoints.json` du module bucket est pris s'il
+# est copié ici ; sans lui, le provider plante au plan ("Unable to open
+# Endpoints File"), d'où le test d'existence. La règle CBR ne parle qu'à l'API
+# CBR, jointe par son endpoint par défaut si le fichier ne la liste pas.
 terraform {
   required_providers {
     ibm   = { source = "IBM-Cloud/ibm" }
@@ -33,6 +33,7 @@ locals {
 }
 
 provider "ibm" {
-  ibmcloud_api_key = module.vault.secrets["api_key"]
-  region           = var.region
+  ibmcloud_api_key    = module.vault.secrets["api_key"]
+  region              = var.region
+  endpoints_file_path = fileexists("${path.module}/ibm_endpoints.json") ? "${path.module}/ibm_endpoints.json" : null
 }
