@@ -31,8 +31,10 @@ QUARANTINE_TF_DIRECTORY = f"terraform/v{TERRAFORM_VERSION}/bucket_quarantine"
 # mode CBR, ``report`` pour valider sur les premiers clients, puis ``enabled``.
 ENFORCEMENT_SETTING = "cos_quarantine_enforcement_mode"
 DEFAULT_ENFORCEMENT = "enabled"
-# URL du bucket pour la sonde depuis Schematics (https://<host>/<bucket>) ;
-# vide : endpoint privé de la région, construit par le module.
+# URL du bucket pour la sonde depuis Schematics (https://<host>/<bucket>).
+# Surcharge seulement : sans elle, la sonde prend l'endpoint du bucket en base
+# (``virtual_server_endpoint``, celui du clean) ; à défaut, le module construit
+# l'endpoint privé de la région.
 PROBE_ENDPOINT_SETTING = "cos_quarantine_probe_endpoint"
 # Destruction des ressources : Schematics est interrogé toutes les 5 s, au plus 120 fois (10 min).
 DESTROY_POLL_DELAY_SECONDS = 5
@@ -73,6 +75,11 @@ def quarantine_variables(bucket: dict, secrets: dict, realm: dict, probe: bool =
     ``probe`` active le listing du bucket depuis Schematics (probe.tf)."""
     from bp2i_terraform.backends.schematics import TerraformVar
 
+    settings = quarantine_settings()
+    # Le réglage est une URL complète, donc propre à un bucket : il ne sert que
+    # de surcharge. Par défaut, l'endpoint du bucket lui-même.
+    settings["probe_endpoint"] = settings["probe_endpoint"] or bucket.get("virtual_server_endpoint") or ""
+
     return {
         "bucket_name": bucket["name"],
         "cos_instance_crn": bucket["cos"]["crn"],
@@ -86,7 +93,7 @@ def quarantine_variables(bucket: dict, secrets: dict, realm: dict, probe: bool =
         "vault_read_token": TerraformVar(secrets["vault_read_token"], True),
         "probe_enabled": _tf_bool(probe),
         "probe_versions": _tf_bool(bucket.get("object_versioning_enabled")),
-        **quarantine_settings(),
+        **settings,
     }
 
 

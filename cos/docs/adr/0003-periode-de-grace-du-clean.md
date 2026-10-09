@@ -120,8 +120,9 @@ Contraintes établies :
   Schematics attendu en 200 (sonde du workspace), règle retirée, accès attendu
   en 200, compte rendu (délais, statuts, mode CBR) dans le state.
   C'est le premier passage à faire en INT, en `report` puis en `enabled`.
-  Réglage : `cos_quarantine_probe_endpoint` (URL du bucket vue de Schematics ; défaut
-  endpoint privé de la région). Prérequis : le provider `hashicorp/http`
+  La sonde appelle l'endpoint du bucket en base (`virtual_server_endpoint`,
+  celui du clean) ; `cos_quarantine_probe_endpoint` le surcharge (URL complète
+  du bucket vue de Schematics, donc pour un bucket donné). Prérequis : le provider `hashicorp/http`
   accessible au miroir Terraform de Schematics.
 - Reste à faire pour le clean sur ce modèle : poser la règle d'expiration par
   `ibm_cos_bucket_lifecycle_configuration` dans le workspace de quarantaine

@@ -77,6 +77,27 @@ class TestRealmAccounts:
         svc.create_or_update_ws.assert_not_called()
 
 
+class TestProbeEndpoint:
+    VIP = "https://s3.direct.eu-fr2.cloud-object-storage.appdomain.cloud/bucket-a"
+
+    def test_defaults_to_the_endpoint_of_the_bucket(self, deps):
+        variables = svc.quarantine_variables({**BUCKET, "virtual_server_endpoint": self.VIP}, SECRETS, REALM)
+
+        assert variables["probe_endpoint"] == self.VIP
+
+    def test_the_setting_overrides_the_endpoint_of_the_bucket(self, deps):
+        deps["schematics_service"].setting.side_effect = lambda name, default: {
+            "cos_quarantine_probe_endpoint": "https://override/bucket-a",
+        }.get(name, default)
+
+        variables = svc.quarantine_variables({**BUCKET, "virtual_server_endpoint": self.VIP}, SECRETS, REALM)
+
+        assert variables["probe_endpoint"] == "https://override/bucket-a"
+
+    def test_without_either_the_module_builds_its_default(self, deps):
+        assert svc.quarantine_variables(BUCKET, SECRETS, REALM)["probe_endpoint"] == ""
+
+
 class TestProbeViaSchematics:
     def run(self, deps, outputs):
         svc.run_workspace.return_value = outputs
