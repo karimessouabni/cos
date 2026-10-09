@@ -62,7 +62,7 @@ variable "ibm_visibility" {
 }
 
 variable "hub_account_id" {
-  description = "Identifiant du compte hub, celui des workspaces Schematics de l'orchestrateur : la zone CBR ne laisse passer que son Schematics."
+  description = "Identifiant du compte hub, celui des workspaces Schematics de l'orchestrateur. Plus utilisé par la zone CBR (une référence de service doit porter le compte de la zone) ; conservé car l'orchestrateur l'envoie toujours."
   type        = string
   validation {
     condition     = can(regex("^[0-9a-f]{32}$", var.hub_account_id))

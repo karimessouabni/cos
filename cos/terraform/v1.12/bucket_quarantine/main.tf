@@ -8,21 +8,27 @@
 # possible. Le bucket n'est jamais lu ici, son nom et son instance arrivent en
 # variables depuis la base de l'orchestrateur.
 #
-# La règle ne laisse passer que Schematics du compte hub (référence de
-# service) : le client est bloqué, et l'orchestrateur regarde et vide le bucket
-# depuis ce workspace, bucket toujours fermé (probe.tf).
+# La règle ne laisse passer que la référence de service Schematics : le client
+# est bloqué, et l'orchestrateur regarde et vide le bucket depuis ce workspace,
+# bucket toujours fermé (probe.tf).
+#
+# CBR refuse une référence de service d'un autre compte que celui de la zone
+# ("Invalid `serviceRef` value: `account_id` ... Expected value is: <compte de
+# la zone>") : elle porte donc le compte workload, pas le compte hub. À valider
+# avec la sonde (probe_status_code) : si les jobs de l'agent Schematics du hub
+# ne sont pas reconnus (403), passer à une adresse vpc ou IP.
 
 resource "ibm_cbr_zone" "quarantine" {
   name        = "quarantine-${var.bucket_name}"
-  description = "Quarantaine du bucket ${var.bucket_name} : seul Schematics du compte hub passe"
+  description = "Quarantaine du bucket ${var.bucket_name} : seul Schematics passe"
   account_id  = var.cbr_account_id
 
-  # Les requêtes émises par IBM Schematics depuis le compte hub : les
-  # workspaces de l'orchestrateur, celui-ci et celui du bucket compris.
+  # Les requêtes émises par IBM Schematics. Le compte de la référence est
+  # obligatoirement celui de la zone (compte workload).
   addresses {
     type = "serviceRef"
     ref {
-      account_id   = var.hub_account_id
+      account_id   = var.cbr_account_id
       service_name = "schematics"
     }
   }
