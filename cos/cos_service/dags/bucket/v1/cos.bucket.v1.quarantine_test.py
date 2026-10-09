@@ -186,18 +186,17 @@ def bucket_quarantine_test() -> None:
     ) -> dict:
         """L'autre face de la règle : Schematics doit lister le bucket (200) pendant
         qu'Airflow est bloqué. Ne lève pas : la levée doit avoir lieu quoi qu'il arrive."""
-        from cos_service.services.quarantine_service import SCOPE_SCHEMATICS, probe_bucket_via_schematics
+        from cos_service.services.quarantine_service import probe_bucket_via_schematics
 
         try:
             probe = probe_bucket_via_schematics(tf=tf, bucket=bucket, workspace_id=workspace_id, vault=vault, reader=reader)
         except Exception as exc:  # un workspace en échec ne doit pas laisser le bucket en quarantaine
             logger.exception("probe of %s from Schematics failed", bucket["name"])
-            return {"reached": False, "status": None, "empty": None, "scope": None, "error": str(exc)}
-        expected = probe["scope"] == SCOPE_SCHEMATICS
+            return {"reached": False, "status": None, "empty": None, "error": str(exc)}
         reached = probe["status"] == HTTP_OK
-        logger.info("Schematics %s the bucket %s during the quarantine (HTTP %s, scope %s)",
-                    "can list" if reached else "CANNOT list", bucket["name"], probe["status"], probe["scope"])
-        return {"reached": reached, "expected": expected, **probe}
+        logger.info("Schematics %s the bucket %s during the quarantine (HTTP %s)",
+                    "can list" if reached else "CANNOT list", bucket["name"], probe["status"])
+        return {"reached": reached, **probe}
 
     @step
     def lift_quarantine(
@@ -226,13 +225,12 @@ def bucket_quarantine_test() -> None:
         state_manager: StateManager = depends(state_manager_dependency),
     ) -> dict:
         """Sonde jusqu'au retour du 200, puis écrit le compte rendu complet dans le state.
-        Verdict ok : Airflow bloqué, Schematics passé si la zone le prévoit, accès rendu."""
+        Verdict ok : Airflow bloqué, Schematics passé, accès rendu."""
         from cos_service.services.ibm_iam_service import get_iam_access_token
 
         restored = probe_until(get_iam_access_token(api_key), bucket, HTTP_OK)
-        schematics_ok = schematics["reached"] or not schematics.get("expected")
         report = {"blocked": blocked, "schematics": schematics, "restored": restored,
-                  "verdict": "ok" if blocked["reached"] and schematics_ok and restored["reached"] else "ko"}
+                  "verdict": "ok" if blocked["reached"] and schematics["reached"] and restored["reached"] else "ko"}
         state_manager.push_state({"quarantine_test": report})
         logger.info("quarantine test of %s: %s", bucket["name"], report["verdict"])
         if not restored["reached"]:

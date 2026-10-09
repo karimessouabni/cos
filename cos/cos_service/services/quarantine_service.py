@@ -4,7 +4,7 @@ Une règle Context-Based Restrictions (CBR) sur le bucket ne laisse passer que
 Schematics du compte hub (référence de service, réglage ``cos_hub_account_id``) :
 le client est bloqué, et l'orchestrateur regarde le bucket depuis le workspace
 de quarantaine lui-même (``probe_bucket_via_schematics``), bucket toujours
-fermé. Sans identifiant du compte hub, la règle bloque tout, Schematics compris.
+fermé. Le réglage est obligatoire : sans compte hub, pas de quarantaine.
 
 La règle vit dans un **workspace Schematics séparé** du bucket
 (``terraform/v1.12/bucket_quarantine``, nom ``ws_cbr_bucket_<subscription>``),
@@ -31,13 +31,12 @@ QUARANTINE_TF_DIRECTORY = f"terraform/v{TERRAFORM_VERSION}/bucket_quarantine"
 # mode CBR, ``report`` pour valider sur les premiers clients, puis ``enabled``.
 ENFORCEMENT_SETTING = "cos_quarantine_enforcement_mode"
 DEFAULT_ENFORCEMENT = "enabled"
-# Compte hub : celui des workspaces Schematics de l'orchestrateur. Vide : la
-# zone CBR n'a pas de référence de service et la règle bloque tout.
+# Compte hub : celui des workspaces Schematics de l'orchestrateur, seul
+# contexte que la zone CBR laisse passer. Obligatoire.
 HUB_ACCOUNT_SETTING = "cos_hub_account_id"
 # URL du bucket pour la sonde depuis Schematics (https://<host>/<bucket>) ;
 # vide : endpoint privé de la région, construit par le module.
 PROBE_ENDPOINT_SETTING = "cos_quarantine_probe_endpoint"
-SCOPE_SCHEMATICS = "schematics"
 # Destruction des ressources : Schematics est interrogé toutes les 5 s, au plus 120 fois (10 min).
 DESTROY_POLL_DELAY_SECONDS = 5
 DESTROY_MAX_ATTEMPTS = 120
@@ -51,9 +50,15 @@ def quarantine_workspace_name(subscription_id: str) -> str:
 def quarantine_settings() -> dict:
     from cos_service.services.schematics_service import setting
 
+    hub_account_id = setting(HUB_ACCOUNT_SETTING, "").strip()
+    if not hub_account_id:
+        raise ValueError(
+            f"the quarantine needs the hub account id ({HUB_ACCOUNT_SETTING}): "
+            "its CBR zone only lets Schematics of that account through"
+        )
     return {
         "enforcement_mode": setting(ENFORCEMENT_SETTING, DEFAULT_ENFORCEMENT),
-        "hub_account_id": setting(HUB_ACCOUNT_SETTING, ""),
+        "hub_account_id": hub_account_id,
         "probe_endpoint": setting(PROBE_ENDPOINT_SETTING, ""),
     }
 
@@ -115,29 +120,23 @@ def set_bucket_quarantine(*, tf, bucket: dict, payload, vault, reader) -> str:
     )
     workspace_id = created["id"]
     outputs = run_workspace(tf, workspace_id)
-    logger.info("quarantine of bucket %s set: CBR rule %s, scope %s", bucket["name"],
-                _output(outputs, "cbr_rule_id"), _output(outputs, "quarantine_scope"))
+    logger.info("quarantine of bucket %s set: CBR rule %s", bucket["name"], _output(outputs, "cbr_rule_id"))
     return workspace_id
 
 
 def probe_bucket_via_schematics(*, tf, bucket: dict, workspace_id: str, vault, reader) -> dict:
     """Liste le bucket depuis le workspace de quarantaine (seul endroit qui passe
     la règle) : active la sonde dans les variables, ré-applique, lit les sorties.
-    Renvoie ``status`` (HTTP vu par Schematics), ``empty`` (None si refusé) et
-    ``scope`` de la règle. La sonde reste active : chaque apply suivant la relit."""
+    Renvoie ``status`` (HTTP vu par Schematics) et ``empty`` (None si refusé).
+    La sonde reste active : chaque apply suivant la relit."""
     from cos_service.services.schematics_service import update_ws_variables
 
     secrets, realm = _workspace_context(bucket, vault, reader)
     update_ws_variables(tf, workspace_id, quarantine_variables(bucket, secrets, realm, probe=True))
     outputs = run_workspace(tf, workspace_id)
     status = _output(outputs, "probe_status_code")
-    result = {
-        "status": int(status) if status is not None else None,
-        "empty": _output(outputs, "bucket_empty"),
-        "scope": _output(outputs, "quarantine_scope"),
-    }
-    logger.info("probe of bucket %s from Schematics: HTTP %s, empty=%s, scope=%s",
-                bucket["name"], result["status"], result["empty"], result["scope"])
+    result = {"status": int(status) if status is not None else None, "empty": _output(outputs, "bucket_empty")}
+    logger.info("probe of bucket %s from Schematics: HTTP %s, empty=%s", bucket["name"], result["status"], result["empty"])
     return result
 
 

@@ -143,7 +143,7 @@ class TestWaitUntilBlocked:
         assert result["reached"] is False and result["status"] == 200
 
 
-SCHEMATICS_OK = {"reached": True, "expected": True, "status": 200, "empty": True, "scope": "schematics"}
+SCHEMATICS_OK = {"reached": True, "status": 200, "empty": True}
 
 
 class TestCheckSchematicsAccess:
@@ -153,8 +153,7 @@ class TestCheckSchematicsAccess:
         )
 
     def test_schematics_lists_the_bucket_while_airflow_is_blocked(self, qt_dag, services, tf):
-        services.quarantine_service.SCOPE_SCHEMATICS = "schematics"
-        services.quarantine_service.probe_bucket_via_schematics.return_value = {"status": 200, "empty": True, "scope": "schematics"}
+        services.quarantine_service.probe_bucket_via_schematics.return_value = {"status": 200, "empty": True}
 
         assert self.run(qt_dag, tf) == SCHEMATICS_OK
         services.quarantine_service.probe_bucket_via_schematics.assert_called_once_with(
@@ -162,18 +161,11 @@ class TestCheckSchematicsAccess:
         )
 
     def test_blocked_schematics_is_reported_not_raised(self, qt_dag, services, tf):
-        services.quarantine_service.SCOPE_SCHEMATICS = "schematics"
-        services.quarantine_service.probe_bucket_via_schematics.return_value = {"status": 403, "empty": None, "scope": "schematics"}
+        services.quarantine_service.probe_bucket_via_schematics.return_value = {"status": 403, "empty": None}
 
         result = self.run(qt_dag, tf)
 
-        assert result["reached"] is False and result["expected"] is True and result["status"] == 403
-
-    def test_without_hub_account_schematics_is_not_expected_to_pass(self, qt_dag, services, tf):
-        services.quarantine_service.SCOPE_SCHEMATICS = "schematics"
-        services.quarantine_service.probe_bucket_via_schematics.return_value = {"status": 403, "empty": None, "scope": "none"}
-
-        assert self.run(qt_dag, tf)["expected"] is False
+        assert result == {"reached": False, "status": 403, "empty": None}
 
     def test_a_failing_workspace_never_prevents_the_lift(self, qt_dag, services, tf):
         services.quarantine_service.probe_bucket_via_schematics.side_effect = RuntimeError("apply failed")
@@ -219,21 +211,13 @@ class TestWaitUntilRestored:
         assert report["restored"] == {"reached": True, "status": 200, "attempts": 2, "seconds": 30}
         state_manager.push_state.assert_called_once_with({"quarantine_test": report})
 
-    def test_schematics_blocked_despite_the_hub_zone_gives_ko(self, qt_dag, s3, state_manager):
+    def test_schematics_blocked_gives_ko(self, qt_dag, s3, state_manager):
         s3.bucketService.bucket_access_status.return_value = 200
         blocked = {"reached": True, "status": 403, "attempts": 4, "seconds": 90}
 
-        report = self.run(qt_dag, state_manager, blocked, {**SCHEMATICS_OK, "reached": False, "status": 403})
+        report = self.run(qt_dag, state_manager, blocked, {"reached": False, "status": 403, "empty": None})
 
         assert report["verdict"] == "ko"
-
-    def test_schematics_blocked_without_hub_zone_is_expected(self, qt_dag, s3, state_manager):
-        s3.bucketService.bucket_access_status.return_value = 200
-        blocked = {"reached": True, "status": 403, "attempts": 4, "seconds": 90}
-
-        report = self.run(qt_dag, state_manager, blocked, {"reached": False, "expected": False, "status": 403, "scope": "none"})
-
-        assert report["verdict"] == "ok"
 
     def test_never_blocked_gives_ko_but_the_lift_is_verified(self, qt_dag, s3, state_manager):
         s3.bucketService.bucket_access_status.return_value = 200

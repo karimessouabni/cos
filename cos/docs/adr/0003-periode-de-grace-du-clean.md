@@ -46,9 +46,9 @@ Contraintes établies :
    retrouve l'accès qu'une fois le bucket vide. Une première version bloquait
    tout, Schematics compris, et levait la règle avant le vidage : le client
    pouvait écrire pendant le vidage, et un bucket alimenté en continu ne se
-   vidait jamais. Sans `cos_hub_account_id`, la zone retombe sur ce mode
-   (adresse RFC 5737, `quarantine_scope = none`). Les services qui lisent le
-   bucket en interne (backup) restent bloqués pendant la grâce.
+   vidait jamais. Le compte hub (`cos_hub_account_id`) est obligatoire : sans
+   lui, la quarantaine est refusée avant tout appel Schematics. Les services
+   qui lisent le bucket en interne (backup) restent bloqués pendant la grâce.
 3. **La règle CBR est portée par un workspace Schematics séparé du bucket**
    (`terraform/v1.12/bucket_quarantine`, nom `ws_cbr_bucket_<subscription>`,
    identifiant gardé en base dans `clean_cbr_workspace_id`). Son state ne
@@ -118,7 +118,7 @@ Contraintes établies :
 - `cos.bucket.v1.quarantine_test` éprouve le mécanisme seul, sans grâce ni
   vidage : règle posée, listing d'Airflow attendu en 403, listing depuis
   Schematics attendu en 200 (sonde du workspace), règle retirée, accès attendu
-  en 200, compte rendu (délais, statuts, mode CBR, portée) dans le state.
+  en 200, compte rendu (délais, statuts, mode CBR) dans le state.
   C'est le premier passage à faire en INT, en `report` puis en `enabled`.
   Réglages : `cos_hub_account_id` (compte des workspaces Schematics),
   `cos_quarantine_probe_endpoint` (URL du bucket vue de Schematics ; défaut

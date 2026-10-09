@@ -57,9 +57,12 @@ variable "ibm_visibility" {
 }
 
 variable "hub_account_id" {
-  description = "Identifiant du compte hub (celui des workspaces Schematics de l'orchestrateur) : la zone CBR laisse passer son Schematics. Vide : la règle bloque tout."
+  description = "Identifiant du compte hub, celui des workspaces Schematics de l'orchestrateur : la zone CBR ne laisse passer que son Schematics."
   type        = string
-  default     = ""
+  validation {
+    condition     = can(regex("^[0-9a-f]{32}$", var.hub_account_id))
+    error_message = "hub_account_id : identifiant de compte IBM Cloud (32 caractères hexadécimaux)."
+  }
 }
 
 variable "probe_enabled" {
