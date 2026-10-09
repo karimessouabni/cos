@@ -1,6 +1,9 @@
 # ADR 0003 : période de grâce et quarantaine avant le clean d'un bucket
 
-- Statut : accepté, mis en œuvre par étapes
+- Statut : accepté, mis en œuvre par étapes ; **décision 2 remplacée par
+  l'ADR 0004** (la quarantaine ferme tout et s'ouvre brièvement quand
+  l'orchestrateur agit : aucune zone CBR ne sépare l'orchestrateur des clients
+  dans notre réseau)
 - Date : 2026-10-06
 - Étapes : **v1** (branche `feature/clean-grace-period-v1`) grâce réglable en
   minutes, annulation, contrôle des verrous par le listing, sans quarantaine ;

@@ -593,6 +593,7 @@ complet avec la vraie librairie. Tout est décrit dans [`tests/unit/README.md`](
 | [`docs/adr/0001-retention-unites-jours-annees.md`](docs/adr/0001-retention-unites-jours-annees.md) | Rétention jours/années sans rupture du contrat v1 |
 | [`docs/adr/0002-branche-terraform-suit-la-demande.md`](docs/adr/0002-branche-terraform-suit-la-demande.md) | Schematics clone la branche sur laquelle le DAG tourne |
 | [`docs/adr/0003-periode-de-grace-du-clean.md`](docs/adr/0003-periode-de-grace-du-clean.md) | Clean à J+7, annulable, bucket en quarantaine CBR pendant la grâce |
+| [`docs/adr/0004-quarantaine-cbr-blocage-total.md`](docs/adr/0004-quarantaine-cbr-blocage-total.md) | Quarantaine qui ferme tout, réouvertures courtes ; pistes réseau écartées et agent Schematics dédié pour plus tard |
 | `STRUCTURE.md` | Arborescence du projet d'origine |
 
 ## 15. Glossaire
