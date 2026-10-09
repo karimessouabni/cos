@@ -46,9 +46,8 @@ Contraintes établies :
    retrouve l'accès qu'une fois le bucket vide. Une première version bloquait
    tout, Schematics compris, et levait la règle avant le vidage : le client
    pouvait écrire pendant le vidage, et un bucket alimenté en continu ne se
-   vidait jamais. Le compte hub vient du realm (`hub_account.id` de l'API
-   realms v1 ; le réglage `cos_hub_account_id` le remplace) ; sans lui, la
-   quarantaine est refusée avant tout appel Schematics. Les services
+   vidait jamais. Le compte hub vient du realm (`hub_account_id`) ; sans lui,
+   la quarantaine est refusée avant tout appel Schematics. Les services
    qui lisent le bucket en interne (backup) restent bloqués pendant la grâce.
 3. **La règle CBR est portée par un workspace Schematics séparé du bucket**
    (`terraform/v1.12/bucket_quarantine`, nom `ws_cbr_bucket_<subscription>`,
@@ -121,8 +120,7 @@ Contraintes établies :
   Schematics attendu en 200 (sonde du workspace), règle retirée, accès attendu
   en 200, compte rendu (délais, statuts, mode CBR) dans le state.
   C'est le premier passage à faire en INT, en `report` puis en `enabled`.
-  Réglages : `cos_hub_account_id` (remplace le compte hub du realm),
-  `cos_quarantine_probe_endpoint` (URL du bucket vue de Schematics ; défaut
+  Réglage : `cos_quarantine_probe_endpoint` (URL du bucket vue de Schematics ; défaut
   endpoint privé de la région). Prérequis : le provider `hashicorp/http`
   accessible au miroir Terraform de Schematics.
 - Reste à faire pour le clean sur ce modèle : poser la règle d'expiration par

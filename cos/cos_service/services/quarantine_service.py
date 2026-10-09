@@ -4,8 +4,7 @@ Une règle Context-Based Restrictions (CBR) sur le bucket ne laisse passer que
 Schematics du compte hub (référence de service) : le client est bloqué, et
 l'orchestrateur regarde le bucket depuis le workspace de quarantaine lui-même
 (``probe_bucket_via_schematics``), bucket toujours fermé. Le compte hub vient
-du realm (``hub_account.id``), le réglage ``cos_hub_account_id`` le remplace ;
-sans compte hub, pas de quarantaine.
+du realm (``hub_account_id``) ; sans lui, pas de quarantaine.
 
 La règle vit dans un **workspace Schematics séparé** du bucket
 (``terraform/v1.12/bucket_quarantine``, nom ``ws_cbr_bucket_<subscription>``),
@@ -19,7 +18,6 @@ workspace supprimé à la levée (fin du clean ou annulation). Voir
 docs/adr/0003-periode-de-grace-du-clean.md.
 """
 import logging
-import re
 
 from bp2i_airflow_library.config import ENVIRONMENT
 from bp2i_terraform.components.cooldown_policies import LinearCooldownPolicy
@@ -33,11 +31,6 @@ QUARANTINE_TF_DIRECTORY = f"terraform/v{TERRAFORM_VERSION}/bucket_quarantine"
 # mode CBR, ``report`` pour valider sur les premiers clients, puis ``enabled``.
 ENFORCEMENT_SETTING = "cos_quarantine_enforcement_mode"
 DEFAULT_ENFORCEMENT = "enabled"
-# Compte hub : celui des workspaces Schematics de l'orchestrateur, seul
-# contexte que la zone CBR laisse passer. Lu dans le realm ; ce réglage, s'il
-# est posé, le remplace (tests, realm incomplet).
-HUB_ACCOUNT_SETTING = "cos_hub_account_id"
-IBM_ACCOUNT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 # URL du bucket pour la sonde depuis Schematics (https://<host>/<bucket>) ;
 # vide : endpoint privé de la région, construit par le module.
 PROBE_ENDPOINT_SETTING = "cos_quarantine_probe_endpoint"
@@ -60,45 +53,14 @@ def quarantine_settings() -> dict:
     }
 
 
-def hub_account_id_of(realm: dict) -> str:
-    """Identifiant IBM (32 hexadécimaux) du compte hub : le réglage
-    ``cos_hub_account_id`` s'il est posé, sinon ``hub_account.id`` du realm
-    (API realms v1), sinon ses variantes à plat. Lève si rien n'est utilisable :
-    la zone CBR ne laisserait passer personne, Schematics compris."""
-    from cos_service.services.schematics_service import setting
 
-    hub = realm.get("hub_account") or {}
-    candidates = [
-        ("setting " + HUB_ACCOUNT_SETTING, setting(HUB_ACCOUNT_SETTING, "")),
-        ("realm buhub_account_id", realm.get("buhub_account_id")),  # modèle du reader (model_dump)
-        ("realm hub_account.id", hub.get("id") if isinstance(hub, dict) else None),  # API realms v1 brute
-        ("realm hub_account_id", realm.get("hub_account_id")),
-    ]
-    for source, value in candidates:
-        value = str(value or "").strip()
-        if IBM_ACCOUNT_ID_RE.match(value):
-            logger.info("hub account for the quarantine zone taken from %s", source)
-            return value
-    raise ValueError(
-        f"no hub account id for the quarantine of realm {realm.get('name')!r}: "
-        f"set {HUB_ACCOUNT_SETTING} or give hub_account.id in the realm "
-        "(the CBR zone only lets Schematics of that account through)"
-    )
-
-
-def cbr_account_id_of(realm: dict) -> str:
-    """Compte workload pour les ressources CBR : l'identifiant IBM (32 hexadécimaux),
-    ``wklapp_account_id`` du modèle du reader. À défaut, le numéro de compte
-    ``wklapp_account_number`` tel que le module bucket le reçoit déjà, avec un
-    avertissement : CBR attend l'identifiant."""
-    for key in ("wklapp_account_id", "wklapp_account_number"):
-        value = str(realm.get(key) or "").strip()
-        if IBM_ACCOUNT_ID_RE.match(value):
-            return value
-    fallback = str(realm.get("wklapp_account_number") or "").strip()
-    logger.warning("realm %r gives no IBM account id for the workload account, CBR will get %r",
-                   realm.get("name"), fallback)
-    return fallback
+def _realm_account(realm: dict, key: str) -> str:
+    """Identifiant IBM d'un compte du realm (modèle du reader : ``hub_account_id``,
+    ``wklapp_account_id``). Lève si absent : la zone CBR ne laisserait passer personne."""
+    value = str(realm.get(key) or "").strip()
+    if not value:
+        raise ValueError(f"realm {realm.get('name')!r} has no {key}: the quarantine cannot build its CBR zone")
+    return value
 
 
 def _tf_bool(value) -> str:
@@ -117,11 +79,11 @@ def quarantine_variables(bucket: dict, secrets: dict, realm: dict, probe: bool =
         "region": bucket["region"],
         "app_code": bucket["cos"]["context"]["app_code"],
         "wklapp_account_id": realm.get("wklapp_account_number"),  # chemin Vault, comme le module bucket
-        "cbr_account_id": cbr_account_id_of(realm),
+        "cbr_account_id": _realm_account(realm, "wklapp_account_id"),  # propriétaire de la zone et de la règle
+        "hub_account_id": _realm_account(realm, "hub_account_id"),  # seul contexte que la règle laisse passer
         "orchestrator_environment": ENVIRONMENT,
         "vault_read_addr": secrets["vault_read_addr"],
         "vault_read_token": TerraformVar(secrets["vault_read_token"], True),
-        "hub_account_id": hub_account_id_of(realm),
         "probe_enabled": _tf_bool(probe),
         "probe_versions": _tf_bool(bucket.get("object_versioning_enabled")),
         **quarantine_settings(),
@@ -145,20 +107,26 @@ def _output(outputs: dict, name: str):
 def set_bucket_quarantine(*, tf, bucket: dict, payload, vault, reader) -> str:
     """Crée (ou met à jour) le workspace de quarantaine du bucket et l'applique.
     Renvoie l'identifiant du workspace, à garder en base pour la levée."""
+    from cos_service.services.schematics_service import update_ws_variables
+
     secrets, realm = _workspace_context(bucket, vault, reader)
     workspace_name = quarantine_workspace_name(bucket["subscription_id"])
+    variables = quarantine_variables(bucket, secrets, realm)
     logger.info("setting quarantine on bucket %s (workspace %s)", bucket["name"], workspace_name)
     created = create_or_update_ws(
         tf,
         workspace_name=workspace_name,
         orchestrator_env=ENVIRONMENT,
         tf_directory=QUARANTINE_TF_DIRECTORY,
-        variables=quarantine_variables(bucket, secrets, realm),
+        variables=variables,
         description=f"Quarantine of bucket {bucket['name']} during the clean grace period",
         gitlab_token=secrets["gitlab_token"],
         product_branch=getattr(payload, "product_branch", None),
     )
     workspace_id = created["id"]
+    # Un workspace retrouvé par son nom (run précédent) garde ses anciennes variables :
+    # le jeu complet est réécrit pour qu'aucune variable ajoutée depuis ne manque au plan.
+    update_ws_variables(tf, workspace_id, variables)
     outputs = run_workspace(tf, workspace_id)
     logger.info("quarantine of bucket %s set: CBR rule %s", bucket["name"], _output(outputs, "cbr_rule_id"))
     return workspace_id

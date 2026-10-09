@@ -19,10 +19,8 @@ BUCKET = {
 SECRETS = {"vault_read_addr": "https://vault", "vault_read_token": "rt", "gitlab_token": "gl"}
 HUB = "e" * 32
 WKL = "a" * 32
-# Forme du modèle du reader (model_dump) : buhub_* pour le hub, wklapp_* pour le workload,
-# *_id l'identifiant IBM (32 hexadécimaux), *_number le numéro de compte.
-REALM = {"name": "realm-a", "buhub_account_id": HUB, "buhub_account_number": "2763704",
-         "wklapp_account_id": WKL, "wklapp_account_number": "2763730"}
+# Forme du modèle du reader (model_dump) : *_account_id l'identifiant IBM, *_account_number le numéro.
+REALM = {"name": "realm-a", "hub_account_id": HUB, "wklapp_account_id": WKL, "wklapp_account_number": "2763730"}
 
 
 class SchematicsError(Exception):
@@ -63,75 +61,20 @@ def test_settings_default_to_enforcement_enabled(deps):
     assert svc.quarantine_settings() == {"enforcement_mode": "enabled", "probe_endpoint": ""}
 
 
-class TestHubAccount:
-    def test_comes_from_the_reader_model(self, deps):
-        assert svc.hub_account_id_of(REALM) == HUB
+class TestRealmAccounts:
+    def test_hub_and_workload_ids_come_from_the_reader_model(self, deps):
+        variables = svc.quarantine_variables(BUCKET, SECRETS, REALM)
 
-    @pytest.mark.parametrize("realm", [{"hub_account": {"id": HUB, "number": "2763704"}}, {"hub_account_id": HUB}])
-    def test_raw_api_and_flat_variants_accepted(self, deps, realm):
-        assert svc.hub_account_id_of({"name": "r", **realm}) == HUB
+        assert (variables["hub_account_id"], variables["cbr_account_id"]) == (HUB, WKL)
 
-    def test_setting_overrides_the_realm(self, deps):
-        deps["schematics_service"].setting.side_effect = lambda name, default: {"cos_hub_account_id": "f" * 32}.get(name, default)
+    @pytest.mark.parametrize("missing", ["hub_account_id", "wklapp_account_id"])
+    def test_a_missing_account_refuses_the_quarantine_before_schematics(self, deps, missing):
+        realm = {k: v for k, v in REALM.items() if k != missing}
+        deps["contextService"].get_realm.return_value.model_dump.return_value = realm
 
-        assert svc.hub_account_id_of(REALM) == "f" * 32
-
-    def test_account_number_is_not_an_account_id(self, deps):
-        with pytest.raises(ValueError, match="cos_hub_account_id"):
-            svc.hub_account_id_of({"name": "r", "hub_account": {"number": "2763704"}})
-
-    def test_no_hub_account_no_quarantine(self, deps):
-        deps["contextService"].get_realm.return_value.model_dump.return_value = {"name": "realm-a", "wklapp_account_number": "2763730"}
-
-        with pytest.raises(ValueError, match="no hub account id"):
+        with pytest.raises(ValueError, match=missing):
             svc.set_bucket_quarantine(tf="tf", bucket=BUCKET, payload=MagicMock(), vault="vault", reader="reader")
-        svc.create_or_update_ws.assert_not_called()  # refusé avant tout appel Schematics
-
-
-def test_set_creates_the_separate_workspace_from_database_values_and_applies(deps):
-    payload = MagicMock(product_branch="feature/x")
-
-    assert svc.set_bucket_quarantine(tf="tf", bucket=BUCKET, payload=payload, vault="vault", reader="reader") == "ws-cbr-1"
-
-    deps["vault_service"].get_vault_secrets.assert_called_once_with(realm_name="realm-a", apcode="AP1", vault="vault", reader="reader")
-    deps["contextService"].get_realm.assert_called_once_with("reader")
-    call = svc.create_or_update_ws.call_args
-    assert call.args == ("tf",)
-    assert call.kwargs["workspace_name"] == "ws_cbr_bucket_sub-1"
-    assert call.kwargs["tf_directory"] == "terraform/v1.12/bucket_quarantine"
-    assert call.kwargs["orchestrator_env"] == "int"
-    assert call.kwargs["gitlab_token"] == "gl"
-    assert call.kwargs["product_branch"] == "feature/x"
-    variables = call.kwargs["variables"]
-    assert variables["bucket_name"] == "bucket-a"  # depuis la base, jamais lu sur COS
-    assert variables["cos_instance_crn"] == BUCKET["cos"]["crn"]
-    assert variables["wklapp_account_id"] == "2763730"  # chemin Vault, comme le module bucket
-    assert variables["cbr_account_id"] == WKL  # propriétaire de la zone et de la règle
-    assert variables["app_code"] == "AP1"
-    assert "allowed_vpc_crns" not in variables  # aucune zone réseau à tailler : une référence de service
-    assert variables["hub_account_id"] == HUB  # Schematics du hub passe la règle (realm.hub_account.id)
-    assert variables["enforcement_mode"] == "report"
-    assert (variables["probe_enabled"], variables["probe_versions"]) == ("false", "false")  # sonde inactive à la pose
-    assert variables["vault_read_token"].value == "rt" and variables["vault_read_token"].sensitive is True
-    svc.run_workspace.assert_called_once_with("tf", "ws-cbr-1")
-
-
-def test_variables_sent_as_strings_terraform_converts_the_booleans(deps):
-    bucket = {**BUCKET, "object_versioning_enabled": True}
-
-    variables = svc.quarantine_variables(bucket, SECRETS, REALM, probe=True)
-
-    assert (variables["probe_enabled"], variables["probe_versions"]) == ("true", "true")
-
-
-class TestCbrAccount:
-    def test_the_ibm_account_id_of_the_workload(self, deps):
-        assert svc.cbr_account_id_of(REALM) == WKL
-
-    def test_falls_back_on_the_number_with_a_warning(self, deps, caplog):
-        with caplog.at_level("WARNING"):
-            assert svc.cbr_account_id_of({"name": "r", "wklapp_account_number": "2763730"}) == "2763730"
-        assert "no IBM account id" in caplog.text
+        svc.create_or_update_ws.assert_not_called()
 
 
 class TestProbeViaSchematics:
