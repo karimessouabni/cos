@@ -4,7 +4,7 @@ Une règle Context-Based Restrictions (CBR) sur le bucket ne laisse passer que
 Schematics du compte hub (référence de service) : le client est bloqué, et
 l'orchestrateur regarde le bucket depuis le workspace de quarantaine lui-même
 (``probe_bucket_via_schematics``), bucket toujours fermé. Le compte hub vient
-du realm (``hub_account_id``) ; sans lui, pas de quarantaine.
+du realm (``buhub_account_id``) ; sans lui, pas de quarantaine.
 
 La règle vit dans un **workspace Schematics séparé** du bucket
 (``terraform/v1.12/bucket_quarantine``, nom ``ws_cbr_bucket_<subscription>``),
@@ -55,7 +55,7 @@ def quarantine_settings() -> dict:
 
 
 def _realm_account(realm: dict, key: str) -> str:
-    """Identifiant IBM d'un compte du realm (modèle du reader : ``hub_account_id``,
+    """Identifiant IBM d'un compte du realm (modèle du reader : ``buhub_account_id``,
     ``wklapp_account_id``). Lève si absent : la zone CBR ne laisserait passer personne."""
     value = str(realm.get(key) or "").strip()
     if not value:
@@ -80,7 +80,7 @@ def quarantine_variables(bucket: dict, secrets: dict, realm: dict, probe: bool =
         "app_code": bucket["cos"]["context"]["app_code"],
         "wklapp_account_id": realm.get("wklapp_account_number"),  # chemin Vault, comme le module bucket
         "cbr_account_id": _realm_account(realm, "wklapp_account_id"),  # propriétaire de la zone et de la règle
-        "hub_account_id": _realm_account(realm, "hub_account_id"),  # seul contexte que la règle laisse passer
+        "hub_account_id": _realm_account(realm, "buhub_account_id"),  # seul contexte que la règle laisse passer
         "orchestrator_environment": ENVIRONMENT,
         "vault_read_addr": secrets["vault_read_addr"],
         "vault_read_token": TerraformVar(secrets["vault_read_token"], True),

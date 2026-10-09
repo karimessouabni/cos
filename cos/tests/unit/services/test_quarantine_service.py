@@ -20,7 +20,7 @@ SECRETS = {"vault_read_addr": "https://vault", "vault_read_token": "rt", "gitlab
 HUB = "e" * 32
 WKL = "a" * 32
 # Forme du modèle du reader (model_dump) : *_account_id l'identifiant IBM, *_account_number le numéro.
-REALM = {"name": "realm-a", "hub_account_id": HUB, "wklapp_account_id": WKL, "wklapp_account_number": "2763730"}
+REALM = {"name": "realm-a", "buhub_account_id": HUB, "wklapp_account_id": WKL, "wklapp_account_number": "2763730"}
 
 
 class SchematicsError(Exception):
@@ -67,7 +67,7 @@ class TestRealmAccounts:
 
         assert (variables["hub_account_id"], variables["cbr_account_id"]) == (HUB, WKL)
 
-    @pytest.mark.parametrize("missing", ["hub_account_id", "wklapp_account_id"])
+    @pytest.mark.parametrize("missing", ["buhub_account_id", "wklapp_account_id"])
     def test_a_missing_account_refuses_the_quarantine_before_schematics(self, deps, missing):
         realm = {k: v for k, v in REALM.items() if k != missing}
         deps["contextService"].get_realm.return_value.model_dump.return_value = realm

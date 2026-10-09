@@ -46,7 +46,7 @@ Contraintes établies :
    retrouve l'accès qu'une fois le bucket vide. Une première version bloquait
    tout, Schematics compris, et levait la règle avant le vidage : le client
    pouvait écrire pendant le vidage, et un bucket alimenté en continu ne se
-   vidait jamais. Le compte hub vient du realm (`hub_account_id`) ; sans lui,
+   vidait jamais. Le compte hub vient du realm (`buhub_account_id`) ; sans lui,
    la quarantaine est refusée avant tout appel Schematics. Les services
    qui lisent le bucket en interne (backup) restent bloqués pendant la grâce.
 3. **La règle CBR est portée par un workspace Schematics séparé du bucket**
