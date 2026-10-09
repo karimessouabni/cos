@@ -9,12 +9,12 @@ variable "cos_instance_crn" {
 }
 
 variable "enforcement_mode" {
-  description = "enabled : bloque ; report : journalise seulement (CBR), pour valider la zone sur les premiers clients."
+  description = "Mode de la règle quand elle est active : enabled bloque ; report journalise seulement (CBR), pour valider sur les premiers clients."
   type        = string
   default     = "enabled"
   validation {
-    condition     = contains(["enabled", "report", "disabled"], var.enforcement_mode)
-    error_message = "enforcement_mode doit valoir enabled, report ou disabled."
+    condition     = contains(["enabled", "report"], var.enforcement_mode)
+    error_message = "enforcement_mode doit valoir enabled ou report (la désactivation passe par rule_active)."
   }
 }
 
@@ -61,29 +61,8 @@ variable "ibm_visibility" {
   }
 }
 
-variable "hub_account_id" {
-  description = "Identifiant du compte hub, celui des workspaces Schematics de l'orchestrateur. Plus utilisé par la zone CBR (une référence de service doit porter le compte de la zone) ; conservé car l'orchestrateur l'envoie toujours."
-  type        = string
-  validation {
-    condition     = can(regex("^[0-9a-f]{32}$", var.hub_account_id))
-    error_message = "hub_account_id : identifiant de compte IBM Cloud (32 caractères hexadécimaux)."
-  }
-}
-
-variable "probe_enabled" {
-  description = "Lister le bucket depuis Schematics à chaque plan/apply (probe.tf) : sorties probe_status_code et bucket_empty."
+variable "rule_active" {
+  description = "true : la règle bloque (bucket fermé) ; false : la règle est désactivée le temps d'une action de l'orchestrateur (poser la règle de vidage, vérifier le vidage, supprimer le bucket)."
   type        = bool
-  default     = false
-}
-
-variable "probe_endpoint" {
-  description = "URL du bucket pour la sonde (https://<host>/<bucket>). Vide : endpoint privé de la région."
-  type        = string
-  default     = ""
-}
-
-variable "probe_versions" {
-  description = "Bucket versionné : la sonde liste les versions et les delete markers."
-  type        = bool
-  default     = false
+  default     = true
 }

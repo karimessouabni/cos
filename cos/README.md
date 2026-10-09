@@ -122,9 +122,9 @@ Ce qu'il faut savoir :
 | Mettre à jour | `cos.bucket.v1.update` | Change la protection, le versioning, le backup ou les permissions, planifiable à une date |
 | Supprimer | `cos.bucket.v1.delete` | Détruit les ressources Terraform, puis le workspace, puis marque `TERMINATED` |
 | Restaurer | `cos.bucket.v1.restore` | Restaure le contenu depuis un backup vault, à un point dans le temps choisi |
-| Nettoyer | `cos.bucket.v1.clean`, `force_clean` | Vérifie la date de fin des verrous (listing), programme le vidage à J+7, met le bucket en quarantaine (règle CBR dans un workspace séparé), puis le vide via une règle d'expiration S3 |
+| Nettoyer | `cos.bucket.v1.clean`, `force_clean` | Vérifie la date de fin des verrous (listing), programme le vidage à J+7, met le bucket en quarantaine (règle CBR qui bloque tout, dans un workspace séparé), puis le vide via une règle d'expiration S3, en n'ouvrant la quarantaine que quelques minutes par action (ADR 0004) |
 | Annuler un nettoyage | `cos.bucket.v1.cancel_clean` | Pendant la période de grâce : lève la quarantaine, rien n'a été supprimé |
-| Tester la quarantaine | `cos.bucket.v1.quarantine_test` | Pose la règle CBR, attend le 403 d'Airflow, vérifie que Schematics liste encore le bucket, la retire, attend le retour de l'accès, compte rendu dans le state (INT) |
+| Tester la quarantaine | `cos.bucket.v1.quarantine_test` | Éprouve le cycle du clean : ferme (403), sonde l'API de configuration, ouvre (200), referme (403), lève (200) ; délais de propagation dans le state (INT) |
 | Règles de cycle de vie | `create/update/delete_lifecycle_policy_rule` | Gère les règles d'expiration du bucket |
 | Recovery ranges | `refresh_restore_ranges` | Rafraîchit les fenêtres de restauration disponibles |
 
@@ -482,9 +482,9 @@ rclone, signature SigV4), la clé API IAM (`api_key`) pour le SDK IBM COS, qui l
 contre un jeton, et les informations de connexion (nom du bucket, endpoint, région). Les deux
 formes ont exactement les mêmes droits : ceux du Service ID du rôle. L'application lit le
 secret avec sa propre politique Vault applicative ; l'orchestrateur ne le renvoie jamais
-dans le state ni dans l'API. Pendant la période de grâce d'un clean, la règle CBR bloque ces
-clés comme toutes les autres ; seul Schematics du compte hub passe, pour vider le bucket
-fermé (ADR 0003).
+dans le state ni dans l'API. Pendant un clean, la règle CBR bloque ces clés comme
+toutes les autres, et l'orchestrateur aussi : il ne l'ouvre que quelques minutes, le temps
+de poser la règle de vidage puis de contrôler le vidage (ADR 0004).
 
 À savoir : les secrets HMAC et clés API des resource keys figurent aussi dans le `tfstate`
 du workspace Schematics, chiffré au repos mais lisible par qui a les droits sur le workspace.

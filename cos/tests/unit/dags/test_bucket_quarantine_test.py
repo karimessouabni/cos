@@ -1,6 +1,6 @@
-"""Tests du DAG ``cos.bucket.v1.quarantine_test`` : pose la règle, attend le 403
-côté Airflow, vérifie le 200 côté Schematics, lève, attend le 200, compte rendu
-dans le state."""
+"""Tests du DAG ``cos.bucket.v1.quarantine_test`` : éprouve le cycle du clean
+(fermer, ouvrir, refermer, lever) et l'API de configuration pendant le blocage,
+compte rendu dans le state."""
 from unittest.mock import MagicMock
 
 import pytest
@@ -48,31 +48,9 @@ def test_dag_identity(qt_dag):
     assert qt_dag.module.bucket_quarantine_test.config.options == {"lock_subscription_on_failure": False}
     assert list(qt_dag.steps) == [
         "validate_bucket", "get_cos_api_key", "check_access_before", "set_quarantine",
-        "wait_until_blocked", "check_schematics_access", "lift_quarantine", "wait_until_restored",
+        "wait_until_blocked", "check_config_api", "reopen_quarantine", "reclose_quarantine",
+        "lift_quarantine", "wait_until_restored",
     ]
-
-
-class TestProbeUntil:
-    def test_stops_at_the_expected_status_and_reports_the_delay(self, qt_dag, s3):
-        s3.bucketService.bucket_access_status.side_effect = [200, 200, 403]
-        sleep = MagicMock()
-
-        result = qt_dag.module.probe_until("tok", bucket_row(), 403, sleep=sleep, interval=30, attempts=5)
-
-        assert result == {"reached": True, "status": 403, "attempts": 3, "seconds": 60}
-        assert sleep.call_count == 2
-
-    def test_gives_up_after_the_attempts_without_raising(self, qt_dag, s3):
-        s3.bucketService.bucket_access_status.side_effect = [200, 500, 200]
-        sleep = MagicMock()
-
-        result = qt_dag.module.probe_until("tok", bucket_row(), 403, sleep=sleep, interval=30, attempts=3)
-
-        assert result == {"reached": False, "status": 200, "attempts": 3, "seconds": 60, "statuses_seen": [200, 500]}
-        assert sleep.call_count == 2  # pas d'attente après le dernier essai
-
-    def test_defaults_bound_the_wait_to_twenty_minutes(self, qt_dag):
-        assert qt_dag.module.PROBE_INTERVAL_SECONDS * (qt_dag.module.PROBE_MAX_ATTEMPTS - 1) == 19.5 * 60
 
 
 class TestValidateBucket:
@@ -132,54 +110,86 @@ class TestSetQuarantine:
         )
 
 
+REACHED_403 = {"reached": True, "status": 403, "attempts": 4, "seconds": 90}
+REACHED_200 = {"reached": True, "status": 200, "attempts": 3, "seconds": 60}
+
+
 class TestWaitUntilBlocked:
-    def test_reports_without_raising_even_when_never_blocked(self, qt_dag, s3, monkeypatch):
-        monkeypatch.setattr(qt_dag.module, "PROBE_MAX_ATTEMPTS", 2)
-        monkeypatch.setattr(qt_dag.module.time, "sleep", lambda s: None)
-        s3.bucketService.bucket_access_status.return_value = 200
+    def test_reports_without_raising_even_when_never_blocked(self, qt_dag, s3):
+        s3.quarantine_service.probe_bucket_until.return_value = {"reached": False, "status": 200, "attempts": 40, "seconds": 1170}
 
         result = qt_dag.steps["wait_until_blocked"](bucket=bucket_row(), api_key="api-key", workspace_id="ws-cbr-1")
 
         assert result["reached"] is False and result["status"] == 200
+        s3.quarantine_service.probe_bucket_until.assert_called_once_with("tok", bucket_row(), 403)
 
 
-SCHEMATICS_OK = {"reached": True, "status": 200, "empty": True}
+class TestCheckConfigApi:
+    def run(self, qt_dag):
+        return qt_dag.steps["check_config_api"](bucket=bucket_row(), api_key="api-key", blocked=REACHED_403)
+
+    def test_reports_whether_the_configuration_api_passes_the_rule(self, qt_dag, s3):
+        s3.schematics_service.setting.side_effect = lambda name, default: default
+        s3.bucketService.COS_CONFIG_API = "https://config.direct.example/v1"
+        s3.bucketService.bucket_config_metadata.return_value = {"status": 200, "object_count": 3}
+
+        assert self.run(qt_dag) == {"endpoint": "https://config.direct.example/v1", "status": 200, "object_count": 3}
+        s3.bucketService.bucket_config_metadata.assert_called_once_with("tok", bucket_row(), "https://config.direct.example/v1")
+
+    def test_an_unreachable_api_is_reported_not_raised(self, qt_dag, s3):
+        s3.schematics_service.setting.side_effect = lambda name, default: "https://config.private.example/v1"
+        s3.bucketService.bucket_config_metadata.side_effect = RuntimeError("timeout")
+
+        assert self.run(qt_dag) == {"endpoint": "https://config.private.example/v1", "status": None, "error": "timeout"}
 
 
-class TestCheckSchematicsAccess:
-    def run(self, qt_dag, tf):
-        return qt_dag.steps["check_schematics_access"](
-            bucket=bucket_row(), blocked={"reached": True}, workspace_id="ws-cbr-1", tf=tf, vault="vault", reader="reader"
+class TestReopenAndReclose:
+    def reopen(self, qt_dag, tf):
+        return qt_dag.steps["reopen_quarantine"](
+            bucket=bucket_row(), api_key="api-key", workspace_id="ws-cbr-1", config_api={"status": 403},
+            tf=tf, vault="vault", reader="reader",
         )
 
-    def test_schematics_lists_the_bucket_while_airflow_is_blocked(self, qt_dag, services, tf):
-        services.quarantine_service.probe_bucket_via_schematics.return_value = {"status": 200, "empty": True}
+    def reclose(self, qt_dag, tf):
+        return qt_dag.steps["reclose_quarantine"](
+            bucket=bucket_row(), api_key="api-key", workspace_id="ws-cbr-1", reopened=REACHED_200,
+            tf=tf, vault="vault", reader="reader",
+        )
 
-        assert self.run(qt_dag, tf) == SCHEMATICS_OK
-        services.quarantine_service.probe_bucket_via_schematics.assert_called_once_with(
+    def test_reopen_uses_the_clean_opening(self, qt_dag, s3, tf):
+        s3.quarantine_service.open_bucket_quarantine.return_value = REACHED_200
+
+        assert self.reopen(qt_dag, tf) == REACHED_200
+        s3.quarantine_service.open_bucket_quarantine.assert_called_once_with(
+            tf=tf, bucket=bucket_row(), workspace_id="ws-cbr-1", vault="vault", reader="reader", access_token="tok"
+        )
+
+    def test_a_failed_reopen_is_reported_not_raised(self, qt_dag, s3, tf):
+        s3.quarantine_service.open_bucket_quarantine.side_effect = RuntimeError("still answers HTTP 403")
+
+        assert self.reopen(qt_dag, tf) == {"reached": False, "status": None, "error": "still answers HTTP 403"}
+
+    def test_reclose_enables_the_rule_and_waits_for_the_403(self, qt_dag, s3, tf):
+        s3.quarantine_service.probe_bucket_until.return_value = REACHED_403
+
+        assert self.reclose(qt_dag, tf) == REACHED_403
+        s3.quarantine_service.close_bucket_quarantine.assert_called_once_with(
             tf=tf, bucket=bucket_row(), workspace_id="ws-cbr-1", vault="vault", reader="reader"
         )
+        s3.quarantine_service.probe_bucket_until.assert_called_once_with("tok", bucket_row(), 403)
 
-    def test_blocked_schematics_is_reported_not_raised(self, qt_dag, services, tf):
-        services.quarantine_service.probe_bucket_via_schematics.return_value = {"status": 403, "empty": None}
+    def test_a_failed_reclose_is_reported_not_raised(self, qt_dag, s3, tf):
+        s3.quarantine_service.close_bucket_quarantine.side_effect = RuntimeError("apply failed")
 
-        result = self.run(qt_dag, tf)
-
-        assert result == {"reached": False, "status": 403, "empty": None}
-
-    def test_a_failing_workspace_never_prevents_the_lift(self, qt_dag, services, tf):
-        services.quarantine_service.probe_bucket_via_schematics.side_effect = RuntimeError("apply failed")
-
-        result = self.run(qt_dag, tf)
-
-        assert result["reached"] is False and result["error"] == "apply failed"
+        assert self.reclose(qt_dag, tf) == {"reached": False, "status": None, "error": "apply failed"}
+        s3.quarantine_service.probe_bucket_until.assert_not_called()
 
 
 class TestLiftQuarantine:
     def test_lifts_the_workspace_recorded_in_db(self, qt_dag, services, tf):
         services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id="ws-cbr-1")
 
-        assert qt_dag.steps["lift_quarantine"](bucket=bucket_row(), schematics=SCHEMATICS_OK, tf=tf, session="session") is True
+        assert qt_dag.steps["lift_quarantine"](bucket=bucket_row(), reclosed=REACHED_403, tf=tf, session="session") is True
 
         services.quarantine_service.lift_bucket_quarantine.assert_called_once_with(tf=tf, workspace_id="ws-cbr-1")
         services.bucketService.set_bucket_clean_workspace.assert_called_once_with("sub-1", None, "session")
@@ -187,50 +197,41 @@ class TestLiftQuarantine:
     def test_nothing_to_lift_without_a_workspace(self, qt_dag, services, tf):
         services.bucketService.get_bucket_by_sub_id.return_value = bucket_row()
 
-        assert qt_dag.steps["lift_quarantine"](bucket=bucket_row(), schematics=SCHEMATICS_OK, tf=tf, session="session") is True
+        assert qt_dag.steps["lift_quarantine"](bucket=bucket_row(), reclosed=REACHED_403, tf=tf, session="session") is True
 
         services.quarantine_service.lift_bucket_quarantine.assert_not_called()
 
 
 class TestWaitUntilRestored:
-    def run(self, qt_dag, state_manager, blocked, schematics=SCHEMATICS_OK):
+    CONFIG = {"endpoint": "https://config/v1", "status": 403}
+
+    def run(self, qt_dag, state_manager, blocked=REACHED_403, reopened=REACHED_200, reclosed=REACHED_403):
         return qt_dag.steps["wait_until_restored"](
-            bucket=bucket_row(), api_key="api-key", lifted=True, blocked=blocked, schematics=schematics,
-            state_manager=state_manager,
+            bucket=bucket_row(), api_key="api-key", lifted=True, blocked=blocked, config_api=self.CONFIG,
+            reopened=reopened, reclosed=reclosed, state_manager=state_manager,
         )
 
-    def test_full_report_in_the_state_when_everything_went_well(self, qt_dag, s3, state_manager, monkeypatch):
-        monkeypatch.setattr(qt_dag.module.time, "sleep", lambda s: None)
-        s3.bucketService.bucket_access_status.side_effect = [403, 200]
-        blocked = {"reached": True, "status": 403, "attempts": 4, "seconds": 90}
+    def test_full_report_in_the_state_when_every_transition_happened(self, qt_dag, s3, state_manager):
+        s3.quarantine_service.probe_bucket_until.return_value = REACHED_200
 
-        report = self.run(qt_dag, state_manager, blocked)
+        report = self.run(qt_dag, state_manager)
 
-        assert report["verdict"] == "ok"
-        assert report["schematics"] == SCHEMATICS_OK
-        assert report["restored"] == {"reached": True, "status": 200, "attempts": 2, "seconds": 30}
+        assert report == {"blocked": REACHED_403, "config_api": self.CONFIG, "reopened": REACHED_200,
+                          "reclosed": REACHED_403, "restored": REACHED_200, "verdict": "ok"}
         state_manager.push_state.assert_called_once_with({"quarantine_test": report})
 
-    def test_schematics_blocked_gives_ko(self, qt_dag, s3, state_manager):
-        s3.bucketService.bucket_access_status.return_value = 200
-        blocked = {"reached": True, "status": 403, "attempts": 4, "seconds": 90}
+    @pytest.mark.parametrize("missed", ["blocked", "reopened", "reclosed"])
+    def test_any_missed_transition_gives_ko(self, qt_dag, s3, state_manager, missed):
+        s3.quarantine_service.probe_bucket_until.return_value = REACHED_200
 
-        report = self.run(qt_dag, state_manager, blocked, {"reached": False, "status": 403, "empty": None})
+        report = self.run(qt_dag, state_manager, **{missed: {"reached": False, "status": None}})
 
         assert report["verdict"] == "ko"
 
-    def test_never_blocked_gives_ko_but_the_lift_is_verified(self, qt_dag, s3, state_manager):
-        s3.bucketService.bucket_access_status.return_value = 200
-
-        report = self.run(qt_dag, state_manager, {"reached": False, "status": 200, "attempts": 40, "seconds": 1170})
-
-        assert report["verdict"] == "ko" and report["restored"]["reached"] is True
-
-    def test_access_not_restored_is_a_failure(self, qt_dag, s3, state_manager, monkeypatch):
-        monkeypatch.setattr(qt_dag.module, "PROBE_MAX_ATTEMPTS", 1)
-        s3.bucketService.bucket_access_status.return_value = 403
+    def test_access_not_restored_is_a_failure(self, qt_dag, s3, state_manager):
+        s3.quarantine_service.probe_bucket_until.return_value = {"reached": False, "status": 403, "attempts": 40, "seconds": 1170}
 
         with pytest.raises(RuntimeError, match="still answers HTTP 403 after the quarantine was lifted"):
-            self.run(qt_dag, state_manager, {"reached": True, "status": 403, "attempts": 1, "seconds": 0})
+            self.run(qt_dag, state_manager)
 
         state_manager.push_state.assert_called_once()  # le compte rendu est quand même écrit

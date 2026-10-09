@@ -1,6 +1,7 @@
 # ADR 0004 : la quarantaine ferme tout, et s'ouvre brièvement quand l'orchestrateur agit
 
-- Statut : accepté, mise en œuvre à faire (voir « Travail restant »)
+- Statut : accepté ; mis en œuvre sur `main` le 2026-10-09, à valider en INT
+  par `cos.bucket.v1.quarantine_test` (voir « Mise en œuvre »)
 - Date : 2026-10-09
 - Remplace : la décision 2 de l'ADR 0003 (zone qui laisse passer Schematics) ;
   le reste de l'ADR 0003 (grâce, annulation, décision atomique, contrôle des
@@ -107,8 +108,14 @@ brièvement chaque fois qu'il doit agir sur le bucket, puis la remet.**
   (`ws_cbr_bucket_<subscription>`, ADR 0003) : son refresh n'appelle que l'API
   CBR, qu'une règle sur COS ne bloque jamais. Lever la règle reste donc
   toujours possible, quoi que la règle bloque.
-- Une variable du workspace pose ou lève la règle sans détruire le workspace ;
-  la destruction du workspace reste la levée définitive.
+- La variable `rule_active` du workspace **ouvre** la quarantaine (règle en
+  mode `disabled`) ou la **referme** (règle en mode `enabled`) sans rien
+  détruire : la règle et son identifiant restent. La destruction du workspace
+  reste la levée définitive.
+- Une ouverture n'est considérée faite que quand Airflow obtient de nouveau un
+  200 sur le bucket (sondage toutes les 30 s, 20 min au plus). Sinon la
+  quarantaine est refermée et l'action n'a pas lieu : agir sur un bucket
+  encore bloqué lirait un 403 comme une réponse.
 - La propagation d'une règle CBR prend quelques minutes : chaque réouverture
   dure le temps de la propagation, plus l'action.
 
@@ -123,18 +130,18 @@ sequenceDiagram
     D->>Q: pose la règle (tout bloqué)
     Note over B: Grâce : 7 jours, annulable (cancel_clean lève la règle)
     D->>D: décision atomique scheduled → in_progress
-    D->>Q: lève la règle
-    D->>B: pose la règle d'expiration (1 jour)
-    D->>Q: remet la règle
+    D->>Q: ouvre (règle disabled), attend le 200
+    D->>B: bucket vide ? sinon pose la règle d'expiration (1 jour)
+    D->>Q: referme (règle enabled)
     Note over B: COS expire les objets en interne, bucket fermé
-    loop une fois par jour
-        D->>Q: lève la règle
+    loop une fois par jour (sensor)
+        D->>Q: ouvre, attend le 200
         D->>B: le bucket est-il vide ?
         alt vide
             D->>B: retire la règle d'expiration
             D->>Q: détruit le workspace (levée définitive)
         else reste des objets
-            D->>Q: remet la règle
+            D->>Q: referme
         end
     end
 ```
@@ -144,6 +151,19 @@ en interne, sans passer par le réseau, donc la règle CBR ne la gêne pas. Ce
 qu'un client écrirait pendant une réouverture de quelques minutes a plus d'un
 jour au passage suivant de l'expiration, et part aussi.
 
+Rythme des contrôles : un par jour (`$COS_CLEAN_CHECK_MINUTES`, défaut 1440,
+lu au chargement du DAG), le rythme auquel COS applique l'expiration ; un
+contrôle plus fréquent rouvrirait le bucket pour rien. Le premier sondage du
+sensor, juste après la pose de la règle, ne contrôle rien.
+
+Erreurs : avant la pose de la règle d'expiration, un échec referme la
+quarantaine et marque `failed` (rien n'a été supprimé, `cancel_clean` lève
+la quarantaine). Après la pose, le clean est décidé et le bucket se vide
+quoi qu'il arrive : un contrôle qui échoue (ouverture, listing) referme le
+bucket et attend le contrôle suivant, une refermeture qui échoue est
+retentée au contrôle suivant ; le timeout du sensor (7 jours) borne
+l'ensemble.
+
 ### Annulation (`cancel_clean`)
 
 Inchangée : acceptée tant que la décision n'est pas prise, elle détruit le
@@ -152,29 +172,37 @@ workspace de quarantaine, ce qui rend l'accès.
 ### Suppression du bucket (`delete`)
 
 La suppression passe par Schematics et par l'API COS : elle serait bloquée
-par la règle. Le DAG `delete` lève donc la quarantaine **avant** de détruire le
-bucket (aujourd'hui il la lève après). Le bucket disparaît ensuite : pas de
-règle à remettre.
+par la règle. Le DAG `delete` refuse donc la demande tant qu'un clean est
+programmé ou en cours (l'annuler, ou attendre sa fin), et lève une
+quarantaine restée en place (clean échoué, test interrompu) **avant** de
+contrôler le contenu et de détruire le bucket. Le bucket disparaît ensuite :
+pas de règle à remettre. Pour la même raison, `update` refuse la demande
+pendant un clean : le refresh Terraform du bucket répondrait 403.
 
 ### Test (`quarantine_test`)
 
-Pose la règle, vérifie le 403 depuis Airflow, la lève, vérifie le retour du
-200. Il mesure aussi les délais de propagation, qui fixent la durée des
-réouvertures. À ajouter : pendant le blocage, appeler l'API de configuration
-COS (`object_count`). Si la règle CBR ne la bloque pas, le contrôle quotidien
-du vidage se fait bucket fermé, et il ne reste qu'une réouverture, à la fin de
-la grâce. La documentation IBM ne le dit pas : le test le dira.
+Éprouve le cycle exact du clean et mesure chaque transition : pose (403
+attendu), ouverture (200), refermeture (403), levée (200). Les délais
+mesurés fixent la durée réelle des ouvertures. Pendant le blocage, il appelle
+aussi l'API de configuration COS (`object_count`, endpoint réglable par
+`cos_config_api_endpoint`) : si la règle CBR ne la bloque pas, le contrôle
+quotidien du vidage pourra se faire bucket fermé (voir « Peut-on faire
+mieux ? »). La documentation IBM ne le dit pas : le test le dira.
 
 ## Conséquences
 
 - Le client voit des 403 pendant toute la grâce et tout le vidage, avec des
   éclaircies de quelques minutes. Ce qu'il écrit pendant ces éclaircies est
   détruit : la notice du state (`clean_notice`) le dit.
-- Un échec pendant une réouverture laisse le bucket du côté sûr : si la remise
-  échoue, le bucket reste ouvert et le clean passe en `failed` avec une alerte ;
-  si la levée échoue, il reste fermé. `cancel_clean` et la sortie de secours
-  (`ibmcloud cbr rule-delete <id>`, identifiant en sortie du workspace) restent
-  disponibles.
+- Un échec laisse autant que possible le bucket fermé : une ouverture qui
+  n'aboutit pas referme la règle. Seule une refermeture qui échoue laisse le
+  bucket ouvert, jusqu'au contrôle suivant qui la retente. `cancel_clean` et
+  la sortie de secours (`ibmcloud cbr rule-delete <id>`, identifiant en
+  sortie du workspace) restent disponibles.
+- Le contrôle du contenu d'un bucket (`check_bucket_has_contents`) lève
+  désormais sur un statut d'erreur : il lisait une réponse 403 comme un bucket
+  vide, ce qui, sous quarantaine, aurait fait conclure un clean ou laissé
+  détruire un bucket plein.
 - Les services qui lisent le bucket en interne (backup) sont bloqués pendant la
   grâce et le vidage, comme le client.
 - Le nombre de règles CBR par compte est plafonné : une par bucket en
@@ -230,19 +258,62 @@ Pour ne pas les retrouver : chacun a coûté un passage en INT.
 | `No value for required variable` après l'ajout d'une variable | Le workspace retrouvé par son nom gardait ses anciennes variables | Le service réécrit le jeu complet de variables avant chaque run |
 | `realm has no hub_account_id` | Le modèle du reader préfixe les comptes : `buhub_account_id`, `wklapp_account_id` | Lecture des noms exacts du `model_dump()` |
 
-## Travail restant
+## Peut-on faire mieux ? Analyse d'architecture
 
-- Module `terraform/v1.12/bucket_quarantine` : zone revenue à l'adresse
-  192.0.2.1 ; retrait de la référence de service, de la sonde (`probe.tf`) et
-  du provider `http` ; variable pour poser ou lever la règle sans détruire le
-  workspace.
-- `quarantine_service` : retrait de `buhub_account_id` et de
-  `probe_bucket_via_schematics` ; `set` et `lift` deviennent « poser / lever la
-  règle », la destruction du workspace reste la levée définitive.
-- DAG `clean` : le cycle levée, action, remise à la fin de la grâce et pour
-  chaque contrôle du vidage.
-- DAG `delete` : lever la quarantaine avant de détruire le bucket.
-- DAG `quarantine_test` : retrait de l'étape Schematics, ajout de l'appel à
-  l'API de configuration pendant le blocage.
+Dans les contraintes actuelles (VPE COS partagé, agent Schematics partagé),
+le blocage total avec ouvertures courtes est la seule solution qui bloque
+vraiment le client. Trois améliorations restent possibles, par ordre de
+rapport gain sur effort :
+
+1. **Contrôler le vidage sans ouvrir le bucket, par l'API de configuration**
+   (`GET /b/<bucket>`, `object_count`, `noncurrent_object_count`,
+   `delete_marker_count`). C'est l'API de gestion du bucket, pas son API S3 :
+   si la règle CBR ne la couvre pas, il ne reste plus qu'une ouverture à la
+   fin de la grâce et une à la fin du vidage, au lieu d'une par jour.
+   `quarantine_test` le mesure déjà ; si c'est confirmé, le sensor change en
+   quelques lignes. Ses compteurs sont mis à jour avec retard : un zéro serait
+   confirmé par un listing, quarantaine ouverte, avant de retirer la règle.
+2. **Le même contrôle par les métriques IBM Cloud Monitoring**
+   (`ibm_cos_bucket_object_count`), collectées par IBM hors du chemin réseau
+   du bucket. Utile seulement si l'API de configuration est bloquée et que les
+   buckets ont une instance de monitoring rattachée ; plus de dépendances.
+3. **Un agent Schematics dédié** (section précédente) : la vraie solution, qui
+   supprime toute ouverture, au prix d'un chantier d'infrastructure.
+
+Écartés après analyse : poser la règle d'expiration avant de fermer le bucket
+(destructif pendant la grâce, ADR 0003) ; une règle d'expiration datée (même
+risque si l'annulation échoue) ; IAM (voir « Alternatives écartées »).
+
+## Mise en œuvre (2026-10-09)
+
+- Module `terraform/v1.12/bucket_quarantine` : zone à l'adresse 192.0.2.1,
+  variable `rule_active` (règle `enabled` ou `disabled`), sortie
+  `enforcement_mode` ; plus de référence de service, de sonde ni de provider
+  `http`.
+- `quarantine_service` : `set_bucket_quarantine` (création, règle active),
+  `open_bucket_quarantine` (règle désactivée puis attente du 200, refermeture
+  si l'accès ne revient pas), `close_bucket_quarantine`,
+  `lift_bucket_quarantine` (destruction), `probe_bucket_until` (sondage).
+- DAG `clean` : étapes `open_quarantine` et `close_quarantine` autour de la
+  pose de la règle d'expiration ; le sensor ouvre, contrôle et referme une
+  fois par jour ; `complete_clean` lève définitivement la quarantaine avant
+  de marquer le succès.
+- DAG `delete` et `update` : refus pendant un clean ; `delete` lève une
+  quarantaine restée en place avant tout contrôle.
+- DAG `quarantine_test` : cycle fermer, ouvrir, refermer, lever, et sonde de
+  l'API de configuration.
+- `bucketService` : `check_bucket_has_contents` strict,
+  `bucket_config_metadata` pour l'API de configuration.
 - `terraform/v1.12/network_diagnostic` : gardé pour vérifier le chemin réseau
   d'une autre région ou d'un futur agent dédié.
+
+## Reste à faire
+
+- Passage INT de `quarantine_test`, en `report` puis en `enabled` : délais de
+  propagation, et réponse de l'API de configuration sous la règle.
+- Selon ce résultat, contrôle du vidage par l'API de configuration (point 1
+  ci-dessus).
+- `cancel_clean` sur un clean `failed` après la pose de la règle d'expiration :
+  il lève la quarantaine mais laisse la règle d'expiration, qui continuerait de
+  supprimer ce que le client écrit. À traiter à part.
+- `restore` : même refus pendant un clean que `update` et `delete`.

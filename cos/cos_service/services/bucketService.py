@@ -178,11 +178,16 @@ def _s3_get_xml(url: str, headers: dict, not_found_ok: bool = False) -> Optional
 def check_bucket_has_contents(access_token: str, bucket: dict) -> bool:
     """Vrai si le listing du bucket contient au moins un objet.
 
-    Le listing est parsé tel quel : une réponse d'erreur S3 (``<Error>``, sans
-    ``Contents``) est donc lue comme "bucket vide". Voir le test associé.
+    Un statut d'erreur lève (``HTTPError``). L'original parsait la réponse
+    d'erreur S3 (``<Error>``, sans ``Contents``) comme un bucket vide : un 403
+    d'une règle CBR de quarantaine aurait fait conclure le clean, ou laissé
+    détruire un bucket plein au delete.
     """
     headers = _s3_headers(access_token, bucket["cos"]["crn"])
-    response = requests.get(bucket["virtual_server_endpoint"], headers=headers, verify=S3_VERIFY_TLS)
+    response = requests.get(
+        bucket["virtual_server_endpoint"], headers=headers, verify=S3_VERIFY_TLS, timeout=S3_TIMEOUT_SECONDS
+    )
+    response.raise_for_status()
     root = ET.fromstring(response.content.decode("utf-8"))
     return len(root.findall("s3:Contents", S3_NAMESPACES)) > 0
 
@@ -237,6 +242,29 @@ def bucket_access_status(access_token: str, bucket: dict) -> int:
         headers=headers, verify=S3_VERIFY_TLS, timeout=S3_TIMEOUT_SECONDS,
     )
     return response.status_code
+
+
+# API de configuration COS (Read Bucket Metadata) : compteurs du bucket sans
+# passer par son API S3. Endpoint réglable par l'appelant.
+COS_CONFIG_API = "https://config.direct.cloud-object-storage.cloud.ibm.com/v1"
+
+
+def bucket_config_metadata(access_token: str, bucket: dict, endpoint: str = COS_CONFIG_API) -> dict:
+    """Statut HTTP et compteurs de l'API de configuration, sans lever sur un statut
+    HTTP : ``object_count``, ``noncurrent_object_count``, ``delete_marker_count``
+    quand la réponse est 200. Sert à savoir si une règle CBR la bloque aussi."""
+    response = requests.get(
+        f'{endpoint.rstrip("/")}/b/{bucket["name"]}',
+        headers={"Accept": "application/json", "Authorization": f"Bearer {access_token}"},
+        timeout=S3_TIMEOUT_SECONDS,
+    )
+    result = {"status": response.status_code}
+    if response.status_code == 200:
+        body = response.json()
+        for key in ("object_count", "noncurrent_object_count", "delete_marker_count"):
+            if key in body:
+                result[key] = body[key]
+    return result
 
 
 def is_versioning_enabled(access_token: str, bucket_vpe: str) -> bool:

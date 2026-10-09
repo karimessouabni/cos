@@ -5,6 +5,7 @@ import pytest
 
 from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
 from cos_service.schemas.action import Action
+from cos_service.schemas.clean_status import CleanStatus
 from cos_service.schemas.status import Status
 from cos_service.schemas.subscription_status import SubscriptionStatus
 
@@ -274,31 +275,70 @@ class TestDestroyTfWorkspace:
         services.bucketService.update_bucket_status.assert_called_once_with("sub-1", SubscriptionStatus.LOCKED, "session")
 
 
-class TestLeftoverQuarantine:
-    """Un clean interrompu peut laisser son workspace CBR : il part avec le bucket."""
+class TestCleanAndQuarantine:
+    """Une quarantaine CBR bloque tout accès au bucket, le contrôle du contenu et
+    le destroy compris (ADR 0004) : un clean en cours refuse la suppression, une
+    quarantaine restée en place est levée avant tout contrôle."""
 
-    def run(self, delete_dag, tf, workspace_id):
-        return delete_dag.steps["destroy_tf_workspace"](
-            bucket=bucket_row(clean_cbr_workspace_id=workspace_id), update_db_resources_task=True, tf=tf, session="session"
+    def run(self, delete_dag, payload, tf):
+        return delete_dag.steps["validate_request"](session="session", payload=payload, reader="reader", vault="vault", tf=tf)
+
+    @pytest.fixture
+    def reachable(self, services):
+        services.vault_service.get_cos_api_key.return_value = "api-key"
+        services.ibm_iam_service.get_iam_access_token.return_value = "tok"
+        services.bucketService.check_bucket_has_contents.return_value = False
+        return services
+
+    @pytest.mark.parametrize("status", [CleanStatus.SCHEDULED.value, CleanStatus.INPROGRESS.value])
+    def test_a_clean_scheduled_or_running_declines_the_deletion(self, delete_dag, reachable, payload, tf, status):
+        reachable.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_status=status, clean_cbr_workspace_id="ws-cbr-1")
+
+        with pytest.raises(DeclineDemandException, match=f"is {status}: cancel it"):
+            self.run(delete_dag, payload, tf)
+
+        reachable.quarantine_service.lift_bucket_quarantine.assert_not_called()
+        reachable.bucketService.check_bucket_has_contents.assert_not_called()
+        reachable.bucketService.update_bucket_status.assert_not_called()
+
+    def test_a_leftover_quarantine_is_lifted_before_the_content_check(self, delete_dag, reachable, payload, tf):
+        reachable.bucketService.get_bucket_by_sub_id.return_value = bucket_row(
+            clean_status=CleanStatus.FAILED.value, clean_cbr_workspace_id="ws-cbr-1"
         )
+        order = MagicMock()
+        order.attach_mock(reachable.quarantine_service.lift_bucket_quarantine, "lift")
+        order.attach_mock(reachable.bucketService.check_bucket_has_contents, "check")
 
-    def test_leftover_quarantine_workspace_is_removed(self, delete_dag, services, tf):
-        assert self.run(delete_dag, tf, "ws-cbr-1") is True
+        result = self.run(delete_dag, payload, tf)
 
-        services.quarantine_service.lift_bucket_quarantine.assert_called_once_with(tf=tf, workspace_id="ws-cbr-1")
+        assert [c[0] for c in order.mock_calls] == ["lift", "check"]
+        reachable.quarantine_service.lift_bucket_quarantine.assert_called_once_with(tf=tf, workspace_id="ws-cbr-1")
+        reachable.bucketService.set_bucket_clean_workspace.assert_called_once_with("sub-1", None, "session")
+        assert result["clean_cbr_workspace_id"] is None
 
-    def test_nothing_to_remove_without_a_quarantine(self, delete_dag, services, tf):
-        assert self.run(delete_dag, tf, None) is True
+    def test_without_a_quarantine_nothing_is_lifted(self, delete_dag, reachable, payload, tf):
+        reachable.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id=None)
 
-        services.quarantine_service.lift_bucket_quarantine.assert_not_called()
+        self.run(delete_dag, payload, tf)
 
-    def test_failure_locks_the_bucket_and_reraises(self, delete_dag, services, tf):
-        services.quarantine_service.lift_bucket_quarantine.side_effect = RuntimeError("cbr down")
+        reachable.quarantine_service.lift_bucket_quarantine.assert_not_called()
+
+    def test_a_lift_failure_stops_before_anything_is_destroyed(self, delete_dag, reachable, payload, tf):
+        reachable.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id="ws-cbr-1")
+        reachable.quarantine_service.lift_bucket_quarantine.side_effect = RuntimeError("cbr down")
 
         with pytest.raises(RuntimeError, match="cbr down"):
-            self.run(delete_dag, tf, "ws-cbr-1")
+            self.run(delete_dag, payload, tf)
 
-        services.bucketService.update_bucket_status.assert_called_once_with("sub-1", SubscriptionStatus.LOCKED, "session")
+        reachable.bucketService.check_bucket_has_contents.assert_not_called()
+        reachable.bucketService.update_bucket_status.assert_not_called()
+
+    def test_the_workspace_destroy_no_longer_handles_the_quarantine(self, delete_dag, services, tf):
+        delete_dag.steps["destroy_tf_workspace"](
+            bucket=bucket_row(clean_cbr_workspace_id="ws-cbr-1"), update_db_resources_task=True, tf=tf, session="session"
+        )
+
+        services.quarantine_service.lift_bucket_quarantine.assert_not_called()
 
 
 def test_update_db_for_workspace_terminates_the_bucket(delete_dag, services):

@@ -11,6 +11,7 @@ import pytest
 from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
 from cos_service.schemas.bucket_backup import BucketBackup
 from cos_service.schemas.bucket_retention import BucketRetention
+from cos_service.schemas.clean_status import CleanStatus
 from cos_service.schemas.status import Status
 from cos_service.schemas.subscription_status import SubscriptionStatus
 
@@ -135,6 +136,18 @@ class TestValidateRequest:
             self.run(update_dag, make_payload())
 
         services.vault_service.get_cos_api_key.assert_not_called()
+
+    @pytest.mark.parametrize("status", [CleanStatus.SCHEDULED.value, CleanStatus.INPROGRESS.value])
+    def test_a_clean_scheduled_or_running_declines_the_update(self, update_dag, empty_bucket, make_payload, status):
+        """La quarantaine du clean bloque tout accès au bucket, le refresh Terraform compris (ADR 0004)."""
+        empty_bucket.bucketService.get_bucket_by_sub_id.return_value = {
+            **empty_bucket.bucketService.get_bucket_by_sub_id.return_value, "clean_status": status,
+        }
+
+        with pytest.raises(DeclineDemandException, match=f"is {status}: cancel it"):
+            self.run(update_dag, make_payload())
+
+        empty_bucket.bucketService.check_bucket_has_contents.assert_not_called()
 
     def test_not_fully_created_bucket_reports_every_missing_piece(self, update_dag, services, make_payload):
         services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(

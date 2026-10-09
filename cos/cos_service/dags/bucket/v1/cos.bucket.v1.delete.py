@@ -38,6 +38,7 @@ from bp2i_airflow_library.schemas import ProductActionConfig, ProductActionPaylo
 from bp2i_terraform.components.cooldown_policies import LinearCooldownPolicy  # noqa: E402 - après add_project_to_path()
 
 from cos_service.schemas.action import Action  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.clean_status import CleanStatus  # noqa: E402 - après add_project_to_path()
 from cos_service.schemas.status import Status  # noqa: E402 - après add_project_to_path()
 from cos_service.schemas.subscription_status import SubscriptionStatus  # noqa: E402 - après add_project_to_path()
 
@@ -81,11 +82,17 @@ def bucket_delete():
         payload: BucketDeletePayload = depends(payload_dependency),
         reader: ReaderConnector = depends(reader_dependency),
         vault: Vault = depends(vault_dependency),
+        tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
     ) -> dict:
         """Checks everything the deletion needs and declines with all the errors at once.
 
         Returns the bucket row (relations included) the next steps work on.
         The bucket moves to TERMINATING only once every check has passed.
+
+        A clean scheduled or running owns the bucket: declined. A leftover
+        quarantine (failed or interrupted clean, quarantine test) blocks every
+        access to the bucket, the content check and the destroy included: it is
+        lifted first (ADR 0004).
         """
         from cos_service.services.bucketService import (
             check_bucket_has_contents,
@@ -98,6 +105,19 @@ def bucket_delete():
         bucket = get_bucket_by_sub_id(session, payload.subscription_id)
         if bucket is None:
             raise DeclineDemandException(f"the bucket doesn't exist for the sub id {payload.subscription_id}")
+        if bucket.get("clean_status") in [s.value for s in CleanStatus.busy()]:
+            raise DeclineDemandException(
+                f"a clean of the bucket {bucket['name']} is {bucket['clean_status']}: "
+                "cancel it (cos.bucket.v1.cancel_clean) or wait for its end before deleting the bucket"
+            )
+        if bucket.get("clean_cbr_workspace_id"):
+            from cos_service.services.bucketService import set_bucket_clean_workspace
+            from cos_service.services.quarantine_service import lift_bucket_quarantine
+
+            logger.info("lifting the leftover quarantine of %s before the deletion", bucket["name"])
+            lift_bucket_quarantine(tf=tf, workspace_id=bucket["clean_cbr_workspace_id"])
+            set_bucket_clean_workspace(bucket["subscription_id"], None, session)
+            bucket = {**bucket, "clean_cbr_workspace_id": None}
 
         logger.info(
             "bucket %s: workspace %r, cos loaded: %s, backup_vault %r",
@@ -242,18 +262,6 @@ def bucket_delete():
                 _mark_failed(bucket["subscription_id"], session)
                 raise
             logger.info("workspace %s is already deleted", workspace_id)
-
-        # Reliquat d'un clean : le workspace de quarantaine (règle CBR) part avec le bucket.
-        quarantine_workspace_id = bucket.get("clean_cbr_workspace_id")
-        if quarantine_workspace_id:
-            from cos_service.services.quarantine_service import lift_bucket_quarantine
-
-            try:
-                lift_bucket_quarantine(tf=tf, workspace_id=quarantine_workspace_id)
-            except Exception as exc:
-                logger.error("deleting quarantine workspace %s failed: %s", quarantine_workspace_id, exc)
-                _mark_failed(bucket["subscription_id"], session)
-                raise
 
         return True
 

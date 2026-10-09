@@ -37,21 +37,13 @@ Contraintes établies :
    finale. Une variante « règle d'expiration datée à J+7 » a été écartée :
    si la levée échoue à J+6, COS détruit quand même.
 2. **La quarantaine est une règle Context-Based Restrictions sur le seul
-   bucket, dont la zone ne laisse passer que Schematics du compte hub.** La
-   zone est une référence de service (`serviceRef`, service `schematics`,
-   compte `cos_hub_account_id`) : aucun client n'en vient, et tous les
-   workspaces de l'orchestrateur en viennent, celui du bucket compris. Plus de
-   zone réseau à tailler, plus de dépendance au type d'endpoint d'Airflow, et
-   la règle n'a pas à être levée pour vider le bucket : le vidage et le
-   contrôle « bucket vide » se font depuis le workspace de quarantaine
-   (`probe.tf` : listing S3 par `hashicorp/http` avec le jeton IAM du
-   provider ; sorties `probe_status_code`, `bucket_empty`). Le client ne
-   retrouve l'accès qu'une fois le bucket vide. Une première version bloquait
-   tout, Schematics compris, et levait la règle avant le vidage : le client
-   pouvait écrire pendant le vidage, et un bucket alimenté en continu ne se
-   vidait jamais. Le compte hub vient du realm (`buhub_account_id`) ; sans lui,
-   la quarantaine est refusée avant tout appel Schematics. Les services
-   qui lisent le bucket en interne (backup) restent bloqués pendant la grâce.
+   bucket, qui bloque tout.** *Remplacée et détaillée par l'ADR 0004.* Aucune
+   zone CBR ne sépare l'orchestrateur des clients dans notre réseau : ses jobs
+   et les applications arrivent chez COS par le même VPE (ADC). La règle bloque
+   donc aussi l'orchestrateur, qui la désactive quelques minutes à chaque fois
+   qu'il doit agir sur le bucket (poser la règle de vidage, contrôler le
+   vidage), puis la réactive. Les services qui lisent le bucket en interne
+   (backup) sont bloqués pendant la grâce et le vidage.
 3. **La règle CBR est portée par un workspace Schematics séparé du bucket**
    (`terraform/v1.12/bucket_quarantine`, nom `ws_cbr_bucket_<subscription>`,
    identifiant gardé en base dans `clean_cbr_workspace_id`). Son state ne
@@ -115,22 +107,17 @@ Contraintes établies :
   toolchain en INT la mettent à quelques minutes.
 - Ce que le client écrit pendant la grâce est supprimé aussi : le state le dit
   (`clean_notice`) avec la date d'exécution. En v2 il ne peut plus écrire,
-  la notice reste vraie pour ce qui passe avant la propagation de la règle.
-- Le succès n'est posé qu'après la levée de la quarantaine. Un échec après la
-  décision laisse le bucket en quarantaine et `failed` ; `cancel_clean` la lève.
+  sauf pendant les ouvertures de quelques minutes du vidage (ADR 0004) : ce
+  qui passe alors expire au passage suivant.
+- Le succès n'est posé qu'après la levée définitive de la quarantaine. Un
+  échec après la décision referme la quarantaine et marque `failed` ;
+  `cancel_clean` la lève.
 - `cos.bucket.v1.quarantine_test` éprouve le mécanisme seul, sans grâce ni
-  vidage : règle posée, listing d'Airflow attendu en 403, listing depuis
-  Schematics attendu en 200 (sonde du workspace), règle retirée, accès attendu
-  en 200, compte rendu (délais, statuts, mode CBR) dans le state.
-  C'est le premier passage à faire en INT, en `report` puis en `enabled`.
-  La sonde appelle l'endpoint du bucket en base (`virtual_server_endpoint`,
-  celui du clean) ; `cos_quarantine_probe_endpoint` le surcharge (URL complète
-  du bucket vue de Schematics, donc pour un bucket donné). Prérequis : le provider `hashicorp/http`
-  accessible au miroir Terraform de Schematics.
-- Reste à faire pour le clean sur ce modèle : poser la règle d'expiration par
-  `ibm_cos_bucket_lifecycle_configuration` dans le workspace de quarantaine
-  (variable `clean_enabled`) après la décision, remplacer le listing S3 du
-  sensor par un apply + lecture de `bucket_empty`, et lever à la fin seulement.
+  vidage, avec le cycle du clean : fermer (403), ouvrir (200), refermer (403),
+  lever (200), et l'API de configuration COS sondée pendant le blocage. Le
+  compte rendu (délais de chaque transition, statuts, mode CBR) est dans le
+  state. C'est le premier passage à faire en INT, en `report` puis en
+  `enabled`.
 - Points à surveiller en exploitation : la propagation d'une règle CBR prend
   quelques minutes (quarantaine et levée ne sont pas instantanées) ; le
   nombre de règles CBR par compte est plafonné (une par bucket en grâce,

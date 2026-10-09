@@ -32,6 +32,7 @@ from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_proje
 from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.schemas import Field, ProductActionPayload  # noqa: E402 - après add_project_to_path()
 
+from cos_service.schemas.clean_status import CleanStatus  # noqa: E402 - après add_project_to_path()
 from cos_service.schemas.bucket_backup import BucketBackup  # noqa: E402 - après add_project_to_path()
 from cos_service.schemas.bucket_retention import BucketRetention  # noqa: E402 - après add_project_to_path()
 from cos_service.schemas.status import Status  # noqa: E402 - après add_project_to_path()
@@ -76,6 +77,13 @@ def bucket_update():
         bucket = get_bucket_by_sub_id(session, payload.subscription_id)
         if bucket is None:
             raise DeclineDemandException(f"the bucket doesn't exist for the sub id {payload.subscription_id}")
+        # Un clean programmé ou en cours tient le bucket en quarantaine CBR : tout
+        # accès, refresh Terraform compris, répondrait 403 (ADR 0004).
+        if bucket.get("clean_status") in [s.value for s in CleanStatus.busy()]:
+            raise DeclineDemandException(
+                f"a clean of the bucket {bucket['name']} is {bucket['clean_status']}: "
+                "cancel it (cos.bucket.v1.cancel_clean) or wait for its end before updating the bucket"
+            )
 
         errors = []
 

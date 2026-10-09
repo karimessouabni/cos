@@ -126,13 +126,13 @@ class TestCheckBucketHasContents:
 
         assert svc.check_bucket_has_contents("tok", BUCKET) is False
 
-    def test_s3_error_response_is_read_as_empty(self, http):
-        """Comportement actuel, documenté : la réponse d'erreur S3 n'a pas de
-        ``Contents``, elle passe donc pour un bucket vide (point ouvert : un 403
-        lors d'un delete laisserait détruire un bucket qui a du contenu)."""
+    def test_s3_error_response_raises_instead_of_reading_as_empty(self, http):
+        """Un 403 (règle CBR de quarantaine, droits) n'est pas un bucket vide :
+        le lire ainsi ferait conclure un clean ou détruire un bucket plein."""
         http.get.return_value = xml_response("<Error><Code>AccessDenied</Code></Error>", status_code=403)
 
-        assert svc.check_bucket_has_contents("tok", BUCKET) is False
+        with pytest.raises(RuntimeError, match="HTTP 403"):
+            svc.check_bucket_has_contents("tok", BUCKET)
 
 
 class TestVersioningAndObjectLock:
@@ -449,6 +449,26 @@ class TestBucketAccessStatus:
         assert call.args[0] == "https://s3.direct.eu-de.example/bucket-a?list-type=2&max-keys=1"
         assert call.kwargs["headers"]["Resource-Crn"] == "crn:cos"
         assert call.kwargs["timeout"] == svc.S3_TIMEOUT_SECONDS
+
+
+class TestConfigMetadata:
+    def test_counters_of_the_bucket_when_the_api_answers(self, http):
+        http.get.return_value = MagicMock(status_code=200, json=lambda: {
+            "name": "bucket-a", "object_count": 3, "noncurrent_object_count": 1, "delete_marker_count": 0,
+        })
+
+        result = svc.bucket_config_metadata("tok", {**BUCKET, "name": "bucket-a"})
+
+        assert result == {"status": 200, "object_count": 3, "noncurrent_object_count": 1, "delete_marker_count": 0}
+        call = http.get.call_args
+        assert call.args[0] == "https://config.direct.cloud-object-storage.cloud.ibm.com/v1/b/bucket-a"
+        assert call.kwargs["headers"]["Authorization"] == "Bearer tok"
+
+    def test_a_refusal_is_reported_not_raised(self, http):
+        http.get.return_value = MagicMock(status_code=403)
+
+        assert svc.bucket_config_metadata("tok", {**BUCKET, "name": "bucket-a"}, endpoint="https://config.example/v1/") == {"status": 403}
+        assert http.get.call_args.args[0] == "https://config.example/v1/b/bucket-a"
 
 
 class TestRetentionUnit:

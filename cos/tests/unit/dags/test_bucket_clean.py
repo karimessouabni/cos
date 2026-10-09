@@ -1,4 +1,5 @@
-"""Tests des étapes du DAG ``cos.bucket.v1.clean`` (période de grâce + quarantaine CBR)."""
+"""Tests des étapes du DAG ``cos.bucket.v1.clean`` (période de grâce + quarantaine CBR
+qui bloque tout, ouverte le temps de chaque action de l'orchestrateur, ADR 0004)."""
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -49,6 +50,26 @@ def payload(clean_dag):
 
 
 @pytest.fixture
+def tf():
+    from unittest.mock import MagicMock
+
+    return MagicMock(name="tf")
+
+
+@pytest.fixture
+def quarantined(services):
+    """Le workspace de quarantaine est relu en base par les étapes qui l'ouvrent ou la ferment."""
+    services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id="ws-cbr-1")
+    return services
+
+
+def assert_closed(services, tf):
+    services.quarantine_service.close_bucket_quarantine.assert_called_once_with(
+        tf=tf, bucket=bucket_row(), workspace_id="ws-cbr-1", vault="vault", reader="reader"
+    )
+
+
+@pytest.fixture
 def s3(services):
     services.ibm_iam_service.get_iam_access_token.return_value = "tok"
     return services
@@ -68,11 +89,12 @@ def test_dag_identity(clean_dag):
         "schedule_clean",
         "quarantine_bucket",
         "claim_clean",
-        "lift_quarantine",
         "get_cos_api_key",
+        "open_quarantine",
         "is_bucket_empty",
         "create_expiration_rule",
         "save_create_expiration_rule_in_db",
+        "close_quarantine",
         "scheduler_clean_bucket",
         "delete_expiration_rule",
         "save_delete_expiration_rule_in_db",
@@ -93,16 +115,18 @@ def test_wiring_waits_for_the_grace_period_between_quarantine_and_claim(clean_da
     assert "schedule_clean(bucket=bucket, locked_until=lock_check)" in source
     assert "quarantine_bucket(bucket=bucket, execute_at=execute_at)" in source
     assert "claim_clean(bucket=bucket, quarantine_workspace_id=quarantine_workspace_id)" in source
-    assert "lifted = lift_quarantine(bucket=bucket, claimed=claimed)" in source
-    assert "get_cos_api_key(bucket=bucket, lifted=lifted)" in source
-    # Un step.sensor refuse un mot-clé supplémentaire : il consomme le drapeau renvoyé par la sauvegarde.
-    assert "scheduler_clean_bucket(bucket=bucket, api_key=api_key, is_expiration_created=rule_saved)" in source
+    assert "api_key = get_cos_api_key(bucket=bucket, claimed=claimed)" in source
+    assert "opened = open_quarantine(bucket=bucket, api_key=api_key)" in source
+    assert "is_bucket_empty(bucket=bucket, api_key=api_key, opened=opened)" in source
+    assert "closed = close_quarantine(bucket=bucket, rule_saved=rule_saved)" in source
+    # Un step.sensor refuse un mot-clé non déclaré : il consomme le drapeau renvoyé par la refermeture.
+    assert "scheduler_clean_bucket(bucket=bucket, api_key=api_key, is_expiration_created=closed)" in source
     assert "complete_clean(bucket=bucket, rules_saved=rules_saved)" in source
 
 
 def test_only_the_scheduler_is_a_sensor_with_a_bounded_wait(clean_dag):
     assert clean_dag.steps["scheduler_clean_bucket"].sensor_options == {
-        "exponential_backoff": False, "poke_interval": 3 * 3600, "timeout": 7 * 24 * 3600, "mode": "reschedule",
+        "exponential_backoff": False, "poke_interval": 24 * 3600, "timeout": 7 * 24 * 3600, "mode": "reschedule",
     }
     assert all(clean_dag.steps[name].sensor_options is None for name in clean_dag.steps if name != "scheduler_clean_bucket")
 
@@ -324,7 +348,7 @@ class TestClaimClean:
 class TestGetCosApiKey:
     def run(self, clean_dag, state_manager):
         return clean_dag.steps["get_cos_api_key"](
-            bucket=bucket_row(), lifted=True, session="session", state_manager=state_manager, reader="reader", vault="vault"
+            bucket=bucket_row(), claimed=True, session="session", state_manager=state_manager, reader="reader", vault="vault"
         )
 
     def test_reads_the_key_through_vault(self, clean_dag, services, state_manager):
@@ -344,64 +368,113 @@ class TestGetCosApiKey:
         assert_failed(services, state_manager)
 
 
-class TestIsBucketEmpty:
-    def run(self, clean_dag, state_manager):
-        return clean_dag.steps["is_bucket_empty"](
-            bucket=bucket_row(), api_key="api-key", state_manager=state_manager, session="session"
+class TestOpenQuarantine:
+    """Fin de la grâce : la quarantaine est ouverte le temps de regarder le bucket
+    et de poser la règle d'expiration."""
+
+    def run(self, clean_dag, tf, state_manager):
+        return clean_dag.steps["open_quarantine"](
+            bucket=bucket_row(), api_key="api-key", tf=tf, vault="vault", reader="reader",
+            state_manager=state_manager, session="session",
         )
 
-    @pytest.mark.parametrize("has_contents, expected", [(False, True), (True, False)])
-    def test_answers_from_the_bucket_listing(self, clean_dag, s3, state_manager, has_contents, expected):
-        s3.bucketService.check_bucket_has_contents.return_value = has_contents
+    def test_opens_the_quarantine_recorded_in_db(self, clean_dag, s3, quarantined, tf, state_manager):
+        assert self.run(clean_dag, tf, state_manager) is True
 
-        assert self.run(clean_dag, state_manager) is expected
+        s3.quarantine_service.open_bucket_quarantine.assert_called_once_with(
+            tf=tf, bucket=bucket_row(), workspace_id="ws-cbr-1", vault="vault", reader="reader", access_token="tok"
+        )
+        state_manager.push_state.assert_not_called()
 
-        s3.ibm_iam_service.get_iam_access_token.assert_called_once_with("api-key")
-        s3.bucketService.check_bucket_has_contents.assert_called_once_with("tok", bucket_row())
+    def test_nothing_to_open_without_a_recorded_workspace(self, clean_dag, s3, tf, state_manager):
+        s3.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id=None)
 
-    def test_listing_failure_marks_the_clean_failed_and_reraises(self, clean_dag, s3, state_manager):
-        s3.bucketService.check_bucket_has_contents.side_effect = RuntimeError("s3 down")
+        assert self.run(clean_dag, tf, state_manager) is True
 
-        with pytest.raises(RuntimeError, match="s3 down"):
-            self.run(clean_dag, state_manager)
+        s3.quarantine_service.open_bucket_quarantine.assert_not_called()
+
+    def test_access_not_back_fails_the_clean_with_the_bucket_closed(self, clean_dag, s3, quarantined, tf, state_manager):
+        """Le service a refermé la quarantaine avant de lever : rien n'a été posé,
+        cancel_clean (accepté sur failed) la lèvera."""
+        s3.quarantine_service.open_bucket_quarantine.side_effect = RuntimeError("still answers HTTP 403")
+
+        with pytest.raises(RuntimeError, match="still answers HTTP 403"):
+            self.run(clean_dag, tf, state_manager)
 
         assert_failed(s3, state_manager)
 
 
-class TestCreateExpirationRule:
-    def run(self, clean_dag, state_manager, is_bucket_empty):
-        return clean_dag.steps["create_expiration_rule"](
-            api_key="api-key", bucket=bucket_row(), is_bucket_empty=is_bucket_empty,
+class TestIsBucketEmpty:
+    def run(self, clean_dag, tf, state_manager):
+        return clean_dag.steps["is_bucket_empty"](
+            bucket=bucket_row(), api_key="api-key", opened=True, tf=tf, vault="vault", reader="reader",
             state_manager=state_manager, session="session",
         )
 
-    def test_non_empty_bucket_gets_the_rule(self, clean_dag, s3, state_manager):
+    @pytest.mark.parametrize("has_contents, expected", [(False, True), (True, False)])
+    def test_answers_from_the_bucket_listing(self, clean_dag, s3, tf, state_manager, has_contents, expected):
+        s3.bucketService.check_bucket_has_contents.return_value = has_contents
+
+        assert self.run(clean_dag, tf, state_manager) is expected
+
+        s3.ibm_iam_service.get_iam_access_token.assert_called_once_with("api-key")
+        s3.bucketService.check_bucket_has_contents.assert_called_once_with("tok", bucket_row())
+        s3.quarantine_service.close_bucket_quarantine.assert_not_called()
+
+    def test_listing_failure_closes_the_quarantine_then_fails_the_clean(self, clean_dag, s3, quarantined, tf, state_manager):
+        s3.bucketService.check_bucket_has_contents.side_effect = RuntimeError("s3 down")
+
+        with pytest.raises(RuntimeError, match="s3 down"):
+            self.run(clean_dag, tf, state_manager)
+
+        assert_closed(s3, tf)
+        assert_failed(s3, state_manager)
+
+
+class TestCreateExpirationRule:
+    def run(self, clean_dag, tf, state_manager, is_bucket_empty):
+        return clean_dag.steps["create_expiration_rule"](
+            api_key="api-key", bucket=bucket_row(), is_bucket_empty=is_bucket_empty,
+            tf=tf, vault="vault", reader="reader", state_manager=state_manager, session="session",
+        )
+
+    def test_non_empty_bucket_gets_the_rule(self, clean_dag, s3, tf, state_manager):
         s3.bucketService.create_expiration_rule.return_value = True
 
-        assert self.run(clean_dag, state_manager, is_bucket_empty=False) is True
+        assert self.run(clean_dag, tf, state_manager, is_bucket_empty=False) is True
 
         s3.bucketService.create_expiration_rule.assert_called_once_with("tok", bucket_row())
 
-    def test_empty_bucket_needs_no_rule(self, clean_dag, s3, state_manager):
-        assert self.run(clean_dag, state_manager, is_bucket_empty=True) is False
+    def test_empty_bucket_needs_no_rule(self, clean_dag, s3, tf, state_manager):
+        assert self.run(clean_dag, tf, state_manager, is_bucket_empty=True) is False
 
         s3.bucketService.create_expiration_rule.assert_not_called()
         s3.ibm_iam_service.get_iam_access_token.assert_not_called()
 
-    def test_failure_marks_the_clean_failed_and_reraises(self, clean_dag, s3, state_manager):
+    def test_failure_closes_the_quarantine_then_fails_the_clean(self, clean_dag, s3, quarantined, tf, state_manager):
         s3.bucketService.create_expiration_rule.side_effect = RuntimeError("s3 down")
 
         with pytest.raises(RuntimeError, match="s3 down"):
-            self.run(clean_dag, state_manager, is_bucket_empty=False)
+            self.run(clean_dag, tf, state_manager, is_bucket_empty=False)
+
+        assert_closed(s3, tf)
+        assert_failed(s3, state_manager)
+
+    def test_a_close_failure_does_not_hide_the_original_error(self, clean_dag, s3, quarantined, tf, state_manager):
+        s3.bucketService.create_expiration_rule.side_effect = RuntimeError("s3 down")
+        s3.quarantine_service.close_bucket_quarantine.side_effect = RuntimeError("schematics down")
+
+        with pytest.raises(RuntimeError, match="s3 down"):
+            self.run(clean_dag, tf, state_manager, is_bucket_empty=False)
 
         assert_failed(s3, state_manager)
 
 
 class TestSaveCreateExpirationRuleInDb:
-    def run(self, clean_dag, payload, created, state_manager=None):
+    def run(self, clean_dag, payload, created, state_manager=None, tf=None):
         return clean_dag.steps["save_create_expiration_rule_in_db"](
             is_expiration_created=created, bucket=bucket_row(), payload=payload,
-            state_manager=state_manager, session="session",
+            tf=tf, vault="vault", reader="reader", state_manager=state_manager, session="session",
         )
 
     def test_rule_created_is_recorded_after_disabling_the_previous_ones(self, clean_dag, services, payload):
@@ -421,45 +494,127 @@ class TestSaveCreateExpirationRuleInDb:
         services.lifecyclePolicyRuleService.disable_lifecycle_policy_rules_by_bucket_sub_id.assert_not_called()
         services.lifecyclePolicyRuleService.complete_lifecycle_policy_rule_creation.assert_not_called()
 
-    def test_db_failure_marks_the_clean_failed_and_reraises(self, clean_dag, services, payload, state_manager):
-        services.lifecyclePolicyRuleService.complete_lifecycle_policy_rule_creation.side_effect = RuntimeError("db")
+    def test_db_failure_closes_the_quarantine_then_fails_the_clean(self, clean_dag, quarantined, payload, tf, state_manager):
+        quarantined.lifecyclePolicyRuleService.complete_lifecycle_policy_rule_creation.side_effect = RuntimeError("db")
 
         with pytest.raises(RuntimeError, match="db"):
-            self.run(clean_dag, payload, created=True, state_manager=state_manager)
+            self.run(clean_dag, payload, created=True, state_manager=state_manager, tf=tf)
 
-        assert_failed(services, state_manager)
+        assert_closed(quarantined, tf)
+        assert_failed(quarantined, state_manager)
+
+
+class TestCloseQuarantine:
+    """La règle d'expiration posée, la quarantaine est refermée pendant le vidage."""
+
+    def run(self, clean_dag, tf, rule_saved):
+        return clean_dag.steps["close_quarantine"](
+            bucket=bucket_row(), rule_saved=rule_saved, tf=tf, vault="vault", reader="reader", session="session"
+        )
+
+    def test_closes_and_hands_the_flag_to_the_sensor(self, clean_dag, quarantined, tf):
+        assert self.run(clean_dag, tf, rule_saved=True) is True
+
+        assert_closed(quarantined, tf)
+
+    def test_without_a_rule_the_quarantine_stays_open_until_its_lift(self, clean_dag, quarantined, tf):
+        assert self.run(clean_dag, tf, rule_saved=False) is False
+
+        quarantined.quarantine_service.close_bucket_quarantine.assert_not_called()
+
+    def test_a_close_failure_does_not_stop_the_decided_clean(self, clean_dag, quarantined, tf):
+        """Le bucket se vide quand même ; le sensor retentera la refermeture."""
+        quarantined.quarantine_service.close_bucket_quarantine.side_effect = RuntimeError("schematics down")
+
+        assert self.run(clean_dag, tf, rule_saved=True) is True
+
+        quarantined.bucketService.update_bucket_clean_status.assert_not_called()
 
 
 class TestSchedulerCleanBucket:
-    def run(self, clean_dag, state_manager, created):
+    """Un contrôle par jour : ouvrir, regarder, refermer si le bucket n'est pas vide."""
+
+    EXECUTE_AT = utc(2026, 10, 1, 10, 0)
+
+    @pytest.fixture
+    def checking(self, s3):
+        s3.bucketService.get_bucket_by_sub_id.return_value = bucket_row(
+            clean_cbr_workspace_id="ws-cbr-1", clean_execute_at=self.EXECUTE_AT
+        )
+        return s3
+
+    def run(self, clean_dag, tf, state_manager, created=True):
         return clean_dag.steps["scheduler_clean_bucket"](
             bucket=bucket_row(), api_key="api-key", is_expiration_created=created,
-            state_manager=state_manager, session="session",
+            tf=tf, vault="vault", reader="reader", state_manager=state_manager, session="session",
         )
 
-    @pytest.mark.parametrize("has_contents, is_done", [(True, False), (False, True)])
-    def test_pokes_until_the_bucket_is_empty(self, clean_dag, s3, state_manager, has_contents, is_done):
-        s3.bucketService.check_bucket_has_contents.return_value = has_contents
+    def assert_opened(self, services, tf):
+        services.quarantine_service.open_bucket_quarantine.assert_called_once_with(
+            tf=tf, bucket=bucket_row(), workspace_id="ws-cbr-1", vault="vault", reader="reader", access_token="tok"
+        )
 
-        result = self.run(clean_dag, state_manager, created=True)
+    def test_not_empty_yet_the_quarantine_is_closed_again(self, clean_dag, checking, tf, state_manager):
+        checking.bucketService.check_bucket_has_contents.return_value = True
+
+        result = self.run(clean_dag, tf, state_manager)
 
         assert isinstance(result, PokeReturnValue)
-        assert (result.is_done, result.xcom_value) == (is_done, {"content": "clean"})
-        s3.bucketService.check_bucket_has_contents.assert_called_once_with("tok", bucket_row())
+        assert (result.is_done, result.xcom_value) == (False, {"content": "clean"})
+        self.assert_opened(checking, tf)
+        checking.bucketService.check_bucket_has_contents.assert_called_once_with("tok", bucket_row())
+        assert_closed(checking, tf)
 
-    def test_without_a_rule_the_sensor_is_done_at_once(self, clean_dag, s3, state_manager):
-        result = self.run(clean_dag, state_manager, created=False)
+    def test_empty_the_quarantine_stays_open_to_remove_the_rule(self, clean_dag, checking, tf, state_manager):
+        checking.bucketService.check_bucket_has_contents.return_value = False
+
+        result = self.run(clean_dag, tf, state_manager)
 
         assert (result.is_done, result.xcom_value) == (True, {"content": "clean"})
-        s3.bucketService.check_bucket_has_contents.assert_not_called()
+        self.assert_opened(checking, tf)
+        checking.quarantine_service.close_bucket_quarantine.assert_not_called()
 
-    def test_listing_failure_marks_the_clean_failed_and_reraises(self, clean_dag, s3, state_manager):
-        s3.bucketService.check_bucket_has_contents.side_effect = RuntimeError("s3 down")
+    def test_without_a_rule_the_sensor_is_done_at_once(self, clean_dag, checking, tf, state_manager):
+        result = self.run(clean_dag, tf, state_manager, created=False)
 
-        with pytest.raises(RuntimeError, match="s3 down"):
-            self.run(clean_dag, state_manager, created=True)
+        assert (result.is_done, result.xcom_value) == (True, {"content": "clean"})
+        checking.quarantine_service.open_bucket_quarantine.assert_not_called()
+        checking.bucketService.check_bucket_has_contents.assert_not_called()
 
-        assert_failed(s3, state_manager)
+    def test_the_first_poke_right_after_the_rule_checks_nothing(self, clean_dag, checking, tf, state_manager):
+        """COS n'a pas encore expiré : pas d'ouverture pour rien."""
+        checking.bucketService.get_bucket_by_sub_id.return_value = bucket_row(
+            clean_cbr_workspace_id="ws-cbr-1", clean_execute_at=datetime.now(timezone.utc).isoformat()
+        )
+
+        assert self.run(clean_dag, tf, state_manager).is_done is False
+
+        checking.quarantine_service.open_bucket_quarantine.assert_not_called()
+
+    def test_an_open_failure_waits_for_the_next_check(self, clean_dag, checking, tf, state_manager):
+        """Le service a refermé : bucket fermé, la règle continue de vider, rien n'échoue."""
+        checking.quarantine_service.open_bucket_quarantine.side_effect = RuntimeError("still answers HTTP 403")
+
+        assert self.run(clean_dag, tf, state_manager).is_done is False
+
+        checking.bucketService.check_bucket_has_contents.assert_not_called()
+        checking.bucketService.update_bucket_clean_status.assert_not_called()
+
+    def test_a_listing_failure_closes_and_waits_for_the_next_check(self, clean_dag, checking, tf, state_manager):
+        checking.bucketService.check_bucket_has_contents.side_effect = RuntimeError("s3 down")
+
+        assert self.run(clean_dag, tf, state_manager).is_done is False
+
+        assert_closed(checking, tf)
+        checking.bucketService.update_bucket_clean_status.assert_not_called()
+
+    def test_a_close_failure_is_retried_at_the_next_check(self, clean_dag, checking, tf, state_manager):
+        checking.bucketService.check_bucket_has_contents.return_value = True
+        checking.quarantine_service.close_bucket_quarantine.side_effect = RuntimeError("schematics down")
+
+        assert self.run(clean_dag, tf, state_manager).is_done is False
+
+        checking.bucketService.update_bucket_clean_status.assert_not_called()
 
 
 class TestDeleteExpirationRule:
@@ -538,13 +693,6 @@ class TestSaveDeleteExpirationRuleInDb:
         assert_failed(services, state_manager)
 
 
-@pytest.fixture
-def tf():
-    from unittest.mock import MagicMock
-
-    return MagicMock(name="tf")
-
-
 class TestQuarantineBucket:
     def run(self, clean_dag, payload, tf, state_manager):
         return clean_dag.steps["quarantine_bucket"](
@@ -573,48 +721,34 @@ class TestQuarantineBucket:
         services.bucketService.set_bucket_clean_workspace.assert_not_called()
 
 
-class TestLiftQuarantine:
-    """Levée à la fin de la grâce, avant le vidage : personne n'avait besoin du
-    bucket pendant la grâce, le vidage en a besoin."""
-
+class TestCompleteClean:
     def run(self, clean_dag, tf, state_manager):
-        return clean_dag.steps["lift_quarantine"](
-            bucket=bucket_row(), claimed=True, tf=tf, state_manager=state_manager, session="session"
+        return clean_dag.steps["complete_clean"](
+            bucket=bucket_row(), rules_saved=True, tf=tf, state_manager=state_manager, session="session"
         )
 
-    def test_lifts_the_quarantine_recorded_in_db(self, clean_dag, services, tf, state_manager):
-        # Le workspace est relu en base : le dict bucket date d'avant la quarantaine.
-        services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id="ws-cbr-1")
-
+    def test_lifts_the_quarantine_for_good_then_marks_the_success(self, clean_dag, quarantined, tf, state_manager):
         assert self.run(clean_dag, tf, state_manager) is True
 
-        services.quarantine_service.lift_bucket_quarantine.assert_called_once_with(tf=tf, workspace_id="ws-cbr-1")
-        services.bucketService.set_bucket_clean_workspace.assert_called_once_with("sub-1", None, "session")
-        services.bucketService.update_bucket_clean_status.assert_not_called()
-        state_manager.push_state.assert_called_once_with({"quarantine": False})
+        quarantined.quarantine_service.lift_bucket_quarantine.assert_called_once_with(tf=tf, workspace_id="ws-cbr-1")
+        quarantined.bucketService.set_bucket_clean_workspace.assert_called_once_with("sub-1", None, "session")
+        quarantined.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", CleanStatus.SUCCESS, "session")
+        state_manager.push_state.assert_called_once_with({"quarantine": False, "clean_status": CleanStatus.SUCCESS.value})
 
-    def test_without_a_recorded_workspace_nothing_to_lift(self, clean_dag, services, tf, state_manager):
+    def test_without_a_quarantine_only_the_success(self, clean_dag, services, tf, state_manager):
         services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id=None)
 
         assert self.run(clean_dag, tf, state_manager) is True
 
         services.quarantine_service.lift_bucket_quarantine.assert_not_called()
+        services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", CleanStatus.SUCCESS, "session")
 
-    def test_lift_failure_leaves_the_bucket_quarantined_and_failed(self, clean_dag, services, tf, state_manager):
-        """cancel_clean (accepté sur failed) lèvera la quarantaine."""
-        services.bucketService.get_bucket_by_sub_id.return_value = bucket_row(clean_cbr_workspace_id="ws-cbr-1")
-        services.quarantine_service.lift_bucket_quarantine.side_effect = RuntimeError("destroy failed")
+    def test_a_lift_failure_marks_the_clean_failed(self, clean_dag, quarantined, tf, state_manager):
+        """Le bucket est vide et ouvert ; cancel_clean (accepté sur failed) détruira le workspace."""
+        quarantined.quarantine_service.lift_bucket_quarantine.side_effect = RuntimeError("destroy failed")
 
         with pytest.raises(RuntimeError, match="destroy failed"):
             self.run(clean_dag, tf, state_manager)
 
-        assert_failed(services, state_manager)
-        services.bucketService.set_bucket_clean_workspace.assert_not_called()
-
-
-class TestCompleteClean:
-    def test_marks_the_clean_a_success_once_the_rule_is_gone(self, clean_dag, services, state_manager):
-        assert clean_dag.steps["complete_clean"](bucket=bucket_row(), rules_saved=True, state_manager=state_manager, session="session") is True
-
-        services.bucketService.update_bucket_clean_status.assert_called_once_with("sub-1", CleanStatus.SUCCESS, "session")
-        state_manager.push_state.assert_called_once_with({"clean_status": CleanStatus.SUCCESS.value})
+        assert_failed(quarantined, state_manager)
+        quarantined.bucketService.set_bucket_clean_workspace.assert_not_called()

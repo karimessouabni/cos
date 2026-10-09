@@ -1,10 +1,11 @@
-"""Quarantaine d'un bucket pendant la période de grâce d'un clean (v2).
+"""Quarantaine d'un bucket pendant un clean (ADR 0003 et 0004).
 
-Une règle Context-Based Restrictions (CBR) sur le bucket ne laisse passer que
-Schematics du compte hub (référence de service) : le client est bloqué, et
-l'orchestrateur regarde le bucket depuis le workspace de quarantaine lui-même
-(``probe_bucket_via_schematics``), bucket toujours fermé. Le compte hub vient
-du realm (``buhub_account_id``) ; sans lui, pas de quarantaine.
+Une règle Context-Based Restrictions (CBR) sur le bucket **bloque tout** :
+clients, Airflow et Schematics. Aucune zone CBR ne peut laisser passer
+l'orchestrateur sans laisser passer les clients, car ils arrivent chez COS par
+le même VPE (ADC). L'orchestrateur **ouvre** donc la quarantaine quelques
+minutes quand il doit agir sur le bucket (règle désactivée, puis attente du
+retour de l'accès), puis la **referme** (règle réactivée).
 
 La règle vit dans un **workspace Schematics séparé** du bucket
 (``terraform/v1.12/bucket_quarantine``, nom ``ws_cbr_bucket_<subscription>``),
@@ -13,11 +14,12 @@ l'API CBR, qu'une règle sur COS ne bloque jamais : il reste pilotable quoi que
 la règle bloque, et la lever est toujours possible. Le bucket n'y est jamais
 lu, son nom et son instance passent en variables depuis la base.
 
-Cycle de vie court : créé à la mise en quarantaine, ressources détruites puis
-workspace supprimé à la levée (fin du clean ou annulation). Voir
-docs/adr/0003-periode-de-grace-du-clean.md.
+Cycle de vie : ``set`` crée le workspace, règle active ; ``open`` / ``close``
+désactivent puis réactivent la règle ; ``lift`` détruit la zone, la règle et
+le workspace (fin du clean, annulation, suppression du bucket).
 """
 import logging
+import time
 
 from bp2i_airflow_library.config import ENVIRONMENT
 from bp2i_terraform.components.cooldown_policies import LinearCooldownPolicy
@@ -31,11 +33,11 @@ QUARANTINE_TF_DIRECTORY = f"terraform/v{TERRAFORM_VERSION}/bucket_quarantine"
 # mode CBR, ``report`` pour valider sur les premiers clients, puis ``enabled``.
 ENFORCEMENT_SETTING = "cos_quarantine_enforcement_mode"
 DEFAULT_ENFORCEMENT = "enabled"
-# URL du bucket pour la sonde depuis Schematics (https://<host>/<bucket>).
-# Surcharge seulement : sans elle, la sonde prend l'endpoint du bucket en base
-# (``virtual_server_endpoint``, celui du clean) ; à défaut, le module construit
-# l'endpoint privé de la région.
-PROBE_ENDPOINT_SETTING = "cos_quarantine_probe_endpoint"
+# Propagation d'une règle CBR : quelques minutes. Après une ouverture, le
+# bucket est sondé toutes les 30 s, 20 min au plus, jusqu'au retour de l'accès.
+PROBE_INTERVAL_SECONDS = 30
+PROBE_MAX_ATTEMPTS = 40
+HTTP_OK = 200
 # Destruction des ressources : Schematics est interrogé toutes les 5 s, au plus 120 fois (10 min).
 DESTROY_POLL_DELAY_SECONDS = 5
 DESTROY_MAX_ATTEMPTS = 120
@@ -49,16 +51,12 @@ def quarantine_workspace_name(subscription_id: str) -> str:
 def quarantine_settings() -> dict:
     from cos_service.services.schematics_service import setting
 
-    return {
-        "enforcement_mode": setting(ENFORCEMENT_SETTING, DEFAULT_ENFORCEMENT),
-        "probe_endpoint": setting(PROBE_ENDPOINT_SETTING, ""),
-    }
-
+    return {"enforcement_mode": setting(ENFORCEMENT_SETTING, DEFAULT_ENFORCEMENT)}
 
 
 def _realm_account(realm: dict, key: str) -> str:
-    """Identifiant IBM d'un compte du realm (modèle du reader : ``buhub_account_id``,
-    ``wklapp_account_id``). Lève si absent : la zone CBR ne laisserait passer personne."""
+    """Identifiant IBM d'un compte du realm (modèle du reader : ``wklapp_account_id``).
+    Lève si absent : la zone et la règle CBR appartiennent à ce compte."""
     value = str(realm.get(key) or "").strip()
     if not value:
         raise ValueError(f"realm {realm.get('name')!r} has no {key}: the quarantine cannot build its CBR zone")
@@ -70,15 +68,10 @@ def _tf_bool(value) -> str:
     return "true" if value else "false"
 
 
-def quarantine_variables(bucket: dict, secrets: dict, realm: dict, probe: bool = False) -> dict:
+def quarantine_variables(bucket: dict, secrets: dict, realm: dict, active: bool = True) -> dict:
     """Variables du workspace : le bucket vient de la base, jamais de COS.
-    ``probe`` active le listing du bucket depuis Schematics (probe.tf)."""
+    ``active`` : règle appliquée (bucket fermé) ou désactivée (bucket ouvert)."""
     from bp2i_terraform.backends.schematics import TerraformVar
-
-    settings = quarantine_settings()
-    # Le réglage est une URL complète, donc propre à un bucket : il ne sert que
-    # de surcharge. Par défaut, l'endpoint du bucket lui-même.
-    settings["probe_endpoint"] = settings["probe_endpoint"] or bucket.get("virtual_server_endpoint") or ""
 
     return {
         "bucket_name": bucket["name"],
@@ -87,13 +80,11 @@ def quarantine_variables(bucket: dict, secrets: dict, realm: dict, probe: bool =
         "app_code": bucket["cos"]["context"]["app_code"],
         "wklapp_account_id": realm.get("wklapp_account_number"),  # chemin Vault, comme le module bucket
         "cbr_account_id": _realm_account(realm, "wklapp_account_id"),  # propriétaire de la zone et de la règle
-        "hub_account_id": _realm_account(realm, "buhub_account_id"),  # seul contexte que la règle laisse passer
         "orchestrator_environment": ENVIRONMENT,
         "vault_read_addr": secrets["vault_read_addr"],
         "vault_read_token": TerraformVar(secrets["vault_read_token"], True),
-        "probe_enabled": _tf_bool(probe),
-        "probe_versions": _tf_bool(bucket.get("object_versioning_enabled")),
-        **settings,
+        "rule_active": _tf_bool(active),
+        **quarantine_settings(),
     }
 
 
@@ -139,20 +130,61 @@ def set_bucket_quarantine(*, tf, bucket: dict, payload, vault, reader) -> str:
     return workspace_id
 
 
-def probe_bucket_via_schematics(*, tf, bucket: dict, workspace_id: str, vault, reader) -> dict:
-    """Liste le bucket depuis le workspace de quarantaine (seul endroit qui passe
-    la règle) : active la sonde dans les variables, ré-applique, lit les sorties.
-    Renvoie ``status`` (HTTP vu par Schematics) et ``empty`` (None si refusé).
-    La sonde reste active : chaque apply suivant la relit."""
+def _apply_rule(*, tf, bucket: dict, workspace_id: str, vault, reader, active: bool) -> None:
+    """Réécrit les variables du workspace (tokens Vault frais) avec la règle
+    active ou non, puis applique. Ne passe jamais par COS."""
     from cos_service.services.schematics_service import update_ws_variables
 
     secrets, realm = _workspace_context(bucket, vault, reader)
-    update_ws_variables(tf, workspace_id, quarantine_variables(bucket, secrets, realm, probe=True))
+    update_ws_variables(tf, workspace_id, quarantine_variables(bucket, secrets, realm, active=active))
     outputs = run_workspace(tf, workspace_id)
-    status = _output(outputs, "probe_status_code")
-    result = {"status": int(status) if status is not None else None, "empty": _output(outputs, "bucket_empty")}
-    logger.info("probe of bucket %s from Schematics: HTTP %s, empty=%s", bucket["name"], result["status"], result["empty"])
+    logger.info("quarantine rule of bucket %s now %s", bucket["name"], _output(outputs, "enforcement_mode"))
+
+
+def probe_bucket_until(access_token: str, bucket: dict, expected: int,
+                       sleep=None, interval: int | None = None, attempts: int | None = None) -> dict:
+    """Liste le bucket jusqu'au statut HTTP attendu. Ne lève jamais : le compte
+    rendu dit si l'attente a abouti, en combien de temps, et sur quel statut.
+    Les défauts sont résolus à l'appel (les tests les remplacent sur le module)."""
+    from cos_service.services.bucketService import bucket_access_status
+
+    sleep = sleep or time.sleep
+    interval = PROBE_INTERVAL_SECONDS if interval is None else interval
+    attempts = PROBE_MAX_ATTEMPTS if attempts is None else attempts
+    seen = []
+    for attempt in range(1, attempts + 1):
+        status = bucket_access_status(access_token, bucket)
+        seen.append(status)
+        if status == expected:
+            return {"reached": True, "status": status, "attempts": attempt, "seconds": (attempt - 1) * interval}
+        if attempt < attempts:
+            sleep(interval)
+    return {"reached": False, "status": seen[-1], "attempts": attempts, "seconds": (attempts - 1) * interval,
+            "statuses_seen": sorted(set(seen))}
+
+
+def open_bucket_quarantine(*, tf, bucket: dict, workspace_id: str, vault, reader, access_token: str) -> dict:
+    """Désactive la règle et attend que le bucket réponde 200 depuis Airflow.
+    Lève si l'accès ne revient pas : agir sur un bucket encore bloqué lirait un
+    403 comme une réponse. La quarantaine est alors refermée avant de lever, le
+    bucket reste du côté sûr."""
+    _apply_rule(tf=tf, bucket=bucket, workspace_id=workspace_id, vault=vault, reader=reader, active=False)
+    result = probe_bucket_until(access_token, bucket, HTTP_OK)
+    if not result["reached"]:
+        logger.error("bucket %s still answers HTTP %s after the quarantine was opened, closing it again",
+                     bucket["name"], result["status"])
+        close_bucket_quarantine(tf=tf, bucket=bucket, workspace_id=workspace_id, vault=vault, reader=reader)
+        raise RuntimeError(
+            f"the bucket {bucket['name']} still answers HTTP {result['status']} {result['seconds']} s after "
+            "its quarantine rule was disabled; the rule is active again"
+        )
+    logger.info("quarantine of bucket %s open after %s s", bucket["name"], result["seconds"])
     return result
+
+
+def close_bucket_quarantine(*, tf, bucket: dict, workspace_id: str, vault, reader) -> None:
+    """Réactive la règle : le bucket est de nouveau fermé, après propagation."""
+    _apply_rule(tf=tf, bucket=bucket, workspace_id=workspace_id, vault=vault, reader=reader, active=True)
 
 
 def _is_not_found(exc: Exception) -> bool:

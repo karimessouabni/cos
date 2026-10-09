@@ -7,16 +7,7 @@ output "cbr_zone_id" {
   value = ibm_cbr_zone.quarantine.id
 }
 
-output "probe_url" {
-  value = var.probe_enabled ? local.probe_url : null
-}
-
-output "probe_status_code" {
-  description = "Statut HTTP du listing vu depuis Schematics (200 attendu : Schematics passe la règle)."
-  value       = local.probe_status
-}
-
-output "bucket_empty" {
-  description = "true si le listing a répondu 200 sans aucun objet, version ni delete marker ; null si la sonde est inactive ou refusée."
-  value       = local.probe_status == 200 ? !local.probe_has_objects : null
+output "enforcement_mode" {
+  description = "Mode appliqué à la règle : enabled (bucket fermé), report, ou disabled (bucket ouvert pour une action de l'orchestrateur)."
+  value       = ibm_cbr_rule.quarantine.enforcement_mode
 }
