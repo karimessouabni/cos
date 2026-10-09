@@ -17,6 +17,9 @@ BUCKET = {
             "context": {"realm": "realm-a", "app_code": "AP1"}},
 }
 SECRETS = {"vault_read_addr": "https://vault", "vault_read_token": "rt", "gitlab_token": "gl"}
+HUB = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+# Forme de l'API realms v1 : hub_account.id est l'identifiant IBM du compte hub.
+REALM = {"name": "realm-a", "wklapp_account_number": "wk-123", "hub_account": {"id": HUB, "number": "2763704"}}
 
 
 class SchematicsError(Exception):
@@ -32,10 +35,9 @@ def deps(monkeypatch):
         mocks[name] = MagicMock(name=name)
         monkeypatch.setitem(sys.modules, f"cos_service.services.{name}", mocks[name])
     mocks["vault_service"].get_vault_secrets.return_value = SECRETS
-    mocks["contextService"].get_realm.return_value.model_dump.return_value = {"name": "realm-a", "wklapp_account_number": "wk-123"}
+    mocks["contextService"].get_realm.return_value.model_dump.return_value = REALM
     mocks["schematics_service"].setting.side_effect = lambda name, default: {
         "cos_quarantine_enforcement_mode": "report",
-        "cos_hub_account_id": "hub-456",
     }.get(name, default)
     # create_or_update_ws / run_workspace sont importés au chargement du module : patchés sur lui.
     monkeypatch.setattr(svc, "create_or_update_ws", MagicMock(return_value={"id": "ws-cbr-1"}))
@@ -49,23 +51,37 @@ def test_workspace_name_is_derived_from_the_subscription():
 
 
 def test_settings_come_from_airflow_variables_or_env(deps):
-    assert svc.quarantine_settings() == {"enforcement_mode": "report", "hub_account_id": "hub-456", "probe_endpoint": ""}
+    assert svc.quarantine_settings() == {"enforcement_mode": "report", "probe_endpoint": ""}
 
 
 def test_settings_default_to_enforcement_enabled(deps):
-    deps["schematics_service"].setting.side_effect = lambda name, default: {"cos_hub_account_id": "hub-456"}.get(name, default)
-
-    assert svc.quarantine_settings() == {"enforcement_mode": "enabled", "hub_account_id": "hub-456", "probe_endpoint": ""}
-
-
-def test_no_hub_account_no_quarantine(deps):
     deps["schematics_service"].setting.side_effect = lambda name, default: default
 
-    with pytest.raises(ValueError, match="cos_hub_account_id"):
-        svc.quarantine_settings()
-    with pytest.raises(ValueError, match="cos_hub_account_id"):
-        svc.set_bucket_quarantine(tf="tf", bucket=BUCKET, payload=MagicMock(), vault="vault", reader="reader")
-    svc.create_or_update_ws.assert_not_called()  # refusé avant tout appel Schematics
+    assert svc.quarantine_settings() == {"enforcement_mode": "enabled", "probe_endpoint": ""}
+
+
+class TestHubAccount:
+    def test_comes_from_the_realm(self, deps):
+        assert svc.hub_account_id_of(REALM) == HUB
+
+    def test_flat_variant_accepted(self, deps):
+        assert svc.hub_account_id_of({"name": "r", "hub_account_id": HUB}) == HUB
+
+    def test_setting_overrides_the_realm(self, deps):
+        deps["schematics_service"].setting.side_effect = lambda name, default: {"cos_hub_account_id": "f" * 32}.get(name, default)
+
+        assert svc.hub_account_id_of(REALM) == "f" * 32
+
+    def test_account_number_is_not_an_account_id(self, deps):
+        with pytest.raises(ValueError, match="cos_hub_account_id"):
+            svc.hub_account_id_of({"name": "r", "hub_account": {"number": "2763704"}})
+
+    def test_no_hub_account_no_quarantine(self, deps):
+        deps["contextService"].get_realm.return_value.model_dump.return_value = {"name": "realm-a", "wklapp_account_number": "wk-123"}
+
+        with pytest.raises(ValueError, match="no hub account id"):
+            svc.set_bucket_quarantine(tf="tf", bucket=BUCKET, payload=MagicMock(), vault="vault", reader="reader")
+        svc.create_or_update_ws.assert_not_called()  # refusé avant tout appel Schematics
 
 
 def test_set_creates_the_separate_workspace_from_database_values_and_applies(deps):
@@ -88,7 +104,7 @@ def test_set_creates_the_separate_workspace_from_database_values_and_applies(dep
     assert variables["wklapp_account_id"] == "wk-123"
     assert variables["app_code"] == "AP1"
     assert "allowed_vpc_crns" not in variables  # aucune zone réseau à tailler : une référence de service
-    assert variables["hub_account_id"] == "hub-456"  # Schematics du hub passe la règle
+    assert variables["hub_account_id"] == HUB  # Schematics du hub passe la règle (realm.hub_account.id)
     assert variables["enforcement_mode"] == "report"
     assert (variables["probe_enabled"], variables["probe_versions"]) == ("false", "false")  # sonde inactive à la pose
     assert variables["vault_read_token"].value == "rt" and variables["vault_read_token"].sensitive is True
@@ -98,7 +114,7 @@ def test_set_creates_the_separate_workspace_from_database_values_and_applies(dep
 def test_variables_sent_as_strings_terraform_converts_the_booleans(deps):
     bucket = {**BUCKET, "object_versioning_enabled": True}
 
-    variables = svc.quarantine_variables(bucket, SECRETS, {"wklapp_account_number": "wk-123"}, probe=True)
+    variables = svc.quarantine_variables(bucket, SECRETS, REALM, probe=True)
 
     assert (variables["probe_enabled"], variables["probe_versions"]) == ("true", "true")
 
@@ -117,7 +133,7 @@ class TestProbeViaSchematics:
         assert update.call_args.args[:2] == ("tf", "ws-cbr-1")
         variables = update.call_args.args[2]
         assert variables["probe_enabled"] == "true"
-        assert variables["bucket_name"] == "bucket-a" and variables["hub_account_id"] == "hub-456"  # jeu complet
+        assert variables["bucket_name"] == "bucket-a" and variables["hub_account_id"] == HUB  # jeu complet
         svc.run_workspace.assert_called_once_with("tf", "ws-cbr-1")
 
     def test_schematics_blocked_gives_the_status_and_no_emptiness(self, deps):

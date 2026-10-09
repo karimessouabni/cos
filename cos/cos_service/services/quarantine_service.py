@@ -1,10 +1,11 @@
 """Quarantaine d'un bucket pendant la période de grâce d'un clean (v2).
 
 Une règle Context-Based Restrictions (CBR) sur le bucket ne laisse passer que
-Schematics du compte hub (référence de service, réglage ``cos_hub_account_id``) :
-le client est bloqué, et l'orchestrateur regarde le bucket depuis le workspace
-de quarantaine lui-même (``probe_bucket_via_schematics``), bucket toujours
-fermé. Le réglage est obligatoire : sans compte hub, pas de quarantaine.
+Schematics du compte hub (référence de service) : le client est bloqué, et
+l'orchestrateur regarde le bucket depuis le workspace de quarantaine lui-même
+(``probe_bucket_via_schematics``), bucket toujours fermé. Le compte hub vient
+du realm (``hub_account.id``), le réglage ``cos_hub_account_id`` le remplace ;
+sans compte hub, pas de quarantaine.
 
 La règle vit dans un **workspace Schematics séparé** du bucket
 (``terraform/v1.12/bucket_quarantine``, nom ``ws_cbr_bucket_<subscription>``),
@@ -18,6 +19,7 @@ workspace supprimé à la levée (fin du clean ou annulation). Voir
 docs/adr/0003-periode-de-grace-du-clean.md.
 """
 import logging
+import re
 
 from bp2i_airflow_library.config import ENVIRONMENT
 from bp2i_terraform.components.cooldown_policies import LinearCooldownPolicy
@@ -32,8 +34,10 @@ QUARANTINE_TF_DIRECTORY = f"terraform/v{TERRAFORM_VERSION}/bucket_quarantine"
 ENFORCEMENT_SETTING = "cos_quarantine_enforcement_mode"
 DEFAULT_ENFORCEMENT = "enabled"
 # Compte hub : celui des workspaces Schematics de l'orchestrateur, seul
-# contexte que la zone CBR laisse passer. Obligatoire.
+# contexte que la zone CBR laisse passer. Lu dans le realm ; ce réglage, s'il
+# est posé, le remplace (tests, realm incomplet).
 HUB_ACCOUNT_SETTING = "cos_hub_account_id"
+IBM_ACCOUNT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 # URL du bucket pour la sonde depuis Schematics (https://<host>/<bucket>) ;
 # vide : endpoint privé de la région, construit par le module.
 PROBE_ENDPOINT_SETTING = "cos_quarantine_probe_endpoint"
@@ -50,17 +54,35 @@ def quarantine_workspace_name(subscription_id: str) -> str:
 def quarantine_settings() -> dict:
     from cos_service.services.schematics_service import setting
 
-    hub_account_id = setting(HUB_ACCOUNT_SETTING, "").strip()
-    if not hub_account_id:
-        raise ValueError(
-            f"the quarantine needs the hub account id ({HUB_ACCOUNT_SETTING}): "
-            "its CBR zone only lets Schematics of that account through"
-        )
     return {
         "enforcement_mode": setting(ENFORCEMENT_SETTING, DEFAULT_ENFORCEMENT),
-        "hub_account_id": hub_account_id,
         "probe_endpoint": setting(PROBE_ENDPOINT_SETTING, ""),
     }
+
+
+def hub_account_id_of(realm: dict) -> str:
+    """Identifiant IBM (32 hexadécimaux) du compte hub : le réglage
+    ``cos_hub_account_id`` s'il est posé, sinon ``hub_account.id`` du realm
+    (API realms v1), sinon ses variantes à plat. Lève si rien n'est utilisable :
+    la zone CBR ne laisserait passer personne, Schematics compris."""
+    from cos_service.services.schematics_service import setting
+
+    hub = realm.get("hub_account") or {}
+    candidates = [
+        ("setting " + HUB_ACCOUNT_SETTING, setting(HUB_ACCOUNT_SETTING, "")),
+        ("realm hub_account.id", hub.get("id") if isinstance(hub, dict) else None),
+        ("realm hub_account_id", realm.get("hub_account_id")),
+    ]
+    for source, value in candidates:
+        value = str(value or "").strip()
+        if IBM_ACCOUNT_ID_RE.match(value):
+            logger.info("hub account for the quarantine zone taken from %s", source)
+            return value
+    raise ValueError(
+        f"no hub account id for the quarantine of realm {realm.get('name')!r}: "
+        f"set {HUB_ACCOUNT_SETTING} or give hub_account.id in the realm "
+        "(the CBR zone only lets Schematics of that account through)"
+    )
 
 
 def _tf_bool(value) -> str:
@@ -82,6 +104,7 @@ def quarantine_variables(bucket: dict, secrets: dict, realm: dict, probe: bool =
         "orchestrator_environment": ENVIRONMENT,
         "vault_read_addr": secrets["vault_read_addr"],
         "vault_read_token": TerraformVar(secrets["vault_read_token"], True),
+        "hub_account_id": hub_account_id_of(realm),
         "probe_enabled": _tf_bool(probe),
         "probe_versions": _tf_bool(bucket.get("object_versioning_enabled")),
         **quarantine_settings(),
