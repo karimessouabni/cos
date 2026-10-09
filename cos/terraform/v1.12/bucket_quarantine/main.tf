@@ -15,7 +15,7 @@
 resource "ibm_cbr_zone" "quarantine" {
   name        = "quarantine-${var.bucket_name}"
   description = "Quarantaine du bucket ${var.bucket_name} : seul Schematics du compte hub passe"
-  account_id  = var.wklapp_account_id
+  account_id  = var.cbr_account_id
 
   # Les requêtes émises par IBM Schematics depuis le compte hub : les
   # workspaces de l'orchestrateur, celui-ci et celui du bucket compris.
@@ -42,7 +42,7 @@ resource "ibm_cbr_rule" "quarantine" {
   resources {
     attributes {
       name  = "accountId"
-      value = var.wklapp_account_id
+      value = var.cbr_account_id
     }
     attributes {
       name  = "serviceName"

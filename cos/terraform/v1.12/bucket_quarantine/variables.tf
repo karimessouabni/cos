@@ -34,7 +34,12 @@ variable "app_code" {
 }
 
 variable "wklapp_account_id" {
-  description = "Identifiant du compte workload (realm.wklapp_account_number) : chemin Vault de la clé API et compte des ressources CBR"
+  description = "Compte workload tel que le module bucket le reçoit (realm.wklapp_account_number) : chemin Vault de la clé API."
+  type        = string
+}
+
+variable "cbr_account_id" {
+  description = "Identifiant IBM (32 hexadécimaux) du compte workload, propriétaire de la zone et de la règle CBR (realm.wklapp_account_id)."
   type        = string
 }
 

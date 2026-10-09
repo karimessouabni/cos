@@ -70,7 +70,8 @@ def hub_account_id_of(realm: dict) -> str:
     hub = realm.get("hub_account") or {}
     candidates = [
         ("setting " + HUB_ACCOUNT_SETTING, setting(HUB_ACCOUNT_SETTING, "")),
-        ("realm hub_account.id", hub.get("id") if isinstance(hub, dict) else None),
+        ("realm buhub_account_id", realm.get("buhub_account_id")),  # modèle du reader (model_dump)
+        ("realm hub_account.id", hub.get("id") if isinstance(hub, dict) else None),  # API realms v1 brute
         ("realm hub_account_id", realm.get("hub_account_id")),
     ]
     for source, value in candidates:
@@ -83,6 +84,21 @@ def hub_account_id_of(realm: dict) -> str:
         f"set {HUB_ACCOUNT_SETTING} or give hub_account.id in the realm "
         "(the CBR zone only lets Schematics of that account through)"
     )
+
+
+def cbr_account_id_of(realm: dict) -> str:
+    """Compte workload pour les ressources CBR : l'identifiant IBM (32 hexadécimaux),
+    ``wklapp_account_id`` du modèle du reader. À défaut, le numéro de compte
+    ``wklapp_account_number`` tel que le module bucket le reçoit déjà, avec un
+    avertissement : CBR attend l'identifiant."""
+    for key in ("wklapp_account_id", "wklapp_account_number"):
+        value = str(realm.get(key) or "").strip()
+        if IBM_ACCOUNT_ID_RE.match(value):
+            return value
+    fallback = str(realm.get("wklapp_account_number") or "").strip()
+    logger.warning("realm %r gives no IBM account id for the workload account, CBR will get %r",
+                   realm.get("name"), fallback)
+    return fallback
 
 
 def _tf_bool(value) -> str:
@@ -100,7 +116,8 @@ def quarantine_variables(bucket: dict, secrets: dict, realm: dict, probe: bool =
         "cos_instance_crn": bucket["cos"]["crn"],
         "region": bucket["region"],
         "app_code": bucket["cos"]["context"]["app_code"],
-        "wklapp_account_id": realm.get("wklapp_account_number"),
+        "wklapp_account_id": realm.get("wklapp_account_number"),  # chemin Vault, comme le module bucket
+        "cbr_account_id": cbr_account_id_of(realm),
         "orchestrator_environment": ENVIRONMENT,
         "vault_read_addr": secrets["vault_read_addr"],
         "vault_read_token": TerraformVar(secrets["vault_read_token"], True),
