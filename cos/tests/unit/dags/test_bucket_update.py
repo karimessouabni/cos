@@ -216,6 +216,69 @@ class TestValidateRequest:
         assert errors == ["Setting a retention is not possible when the bucket already contains objects."]
 
 
+class TestEmptyObjectsAreIgnored:
+    """Un objet ``retention`` ou ``backup`` envoyé vide ({} ou tout à null) ne
+    demande rien : il est ignoré, et le reste du payload s'applique."""
+
+    def run(self, update_dag, payload):
+        return update_dag.steps["validate_request"](session="session", payload=payload, vault="vault")
+
+    EMPTY = [{}, {"retention_enabled": None, "default_days": None}, BucketRetention()]
+
+    @pytest.mark.parametrize("empty_retention", EMPTY, ids=["{}", "all-null", "model"])
+    def test_object_locked_bucket_accepts_an_empty_retention(self, update_dag, empty_bucket, make_payload, empty_retention):
+        """Avant : refusé avec « Setting a retention is not possible when object-lock is already enabled »."""
+        empty_bucket.bucketService.get_bucket_by_sub_id.return_value = bucket_row(
+            object_lock_duration_days=30, object_versioning_enabled=True
+        )
+
+        result = self.run(update_dag, make_payload(retention=empty_retention, backup={}, object_lock_duration_days=60))
+
+        assert result["immutability"]["object_lock_duration_days"] == 60  # le reste du payload s'applique
+        assert result["immutability"]["retention"]["retention_enabled"] is False
+
+    def test_retention_bucket_accepts_an_empty_backup(self, update_dag, empty_bucket, make_payload):
+        empty_bucket.bucketService.get_bucket_by_sub_id.return_value = bucket_row(
+            retention_enabled=True, retention_default=30, retention_minimum=10, retention_maximum=60
+        )
+
+        result = self.run(update_dag, make_payload(retention={}, backup={}))
+
+        assert result["immutability"]["retention"] == {"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 60}
+        assert result["immutability"]["backup"]["backup_enabled"] is False
+        assert result["backup_vault_crn"] is None
+
+    def test_plain_bucket_applies_the_rest_of_the_payload(self, update_dag, empty_bucket, make_payload):
+        result = self.run(update_dag, make_payload(retention={}, backup={}, enable_versioning=True))
+
+        assert result["immutability"]["immutability_choice"] == "none"
+        assert result["immutability"]["object_versioning_enabled"] is True
+        assert result["immutability"]["retention"]["retention_enabled"] is False
+        assert result["immutability"]["backup"]["backup_enabled"] is False
+        empty_bucket.backup_vault_service.get_backup_vault_by_name.assert_not_called()
+
+    def test_a_real_retention_on_an_object_locked_bucket_is_still_refused(self, update_dag, empty_bucket, make_payload):
+        empty_bucket.bucketService.get_bucket_by_sub_id.return_value = bucket_row(
+            object_lock_duration_days=30, object_versioning_enabled=True
+        )
+        payload = make_payload(retention=BucketRetention(default_days=30, minimum_days=10, maximum_days=60))
+
+        with pytest.raises(DeclineDemandException, match="Setting a retention is not possible when object-lock"):
+            self.run(update_dag, payload)
+
+    def test_the_state_ignores_an_empty_retention(self, update_dag, services, make_payload, state_manager):
+        data = validated()
+
+        update_dag.steps["save_bucket_in_db"](
+            validated=data, is_update_ws_done=True, payload=make_payload(retention={}),
+            state_manager=state_manager, session="session",
+        )
+
+        pushed = state_manager.push_state.call_args.args[0]
+        assert pushed["retention"] == data["immutability"]["retention"]
+        assert pushed["deprecations"] == []
+
+
 def validated(**overrides) -> dict:
     data = {
         "bucket": bucket_row(),

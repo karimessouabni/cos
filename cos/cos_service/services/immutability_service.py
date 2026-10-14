@@ -1,5 +1,6 @@
 import logging
 
+from cos_service.schemas.payload_object import provided
 from cos_service.schemas.bucket_backup import BucketBackup
 from cos_service.schemas.immutability import Immutability
 from bp2i_airflow_library.exceptions.flow_control import (
@@ -628,8 +629,9 @@ def _update_object_locked_bucket(
     object_lock_duration_years,
     errors,
 ) -> None:
-    """Bucket déjà en object-lock : ni rétention ni arrêt du versioning, durée remplaçable."""
-    if retention is not None:
+    """Bucket déjà en object-lock : ni rétention ni arrêt du versioning, durée remplaçable.
+    Un objet rétention envoyé vide ne demande rien : il n'est pas refusé."""
+    if provided(retention) is not None:
         errors.append("Setting a retention is not possible when object-lock is already enabled.")
 
     if enable_versioning is False:

@@ -35,6 +35,7 @@ from bp2i_airflow_library.schemas import Field, ProductActionPayload  # noqa: E4
 from cos_service.schemas.clean_status import CleanStatus  # noqa: E402 - après add_project_to_path()
 from cos_service.schemas.bucket_backup import BucketBackup  # noqa: E402 - après add_project_to_path()
 from cos_service.schemas.bucket_retention import BucketRetention  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.payload_object import provided  # noqa: E402 - après add_project_to_path()
 from cos_service.schemas.status import Status  # noqa: E402 - après add_project_to_path()
 from cos_service.schemas.subscription_status import SubscriptionStatus  # noqa: E402 - après add_project_to_path()
 
@@ -99,7 +100,10 @@ def bucket_update():
             errors.append("the bucket is not linked to a cos instance")
 
         # --- backup vault (only when a backup is requested) -------------------
-        backup = payload.backup
+        # Un objet envoyé vide ({} ou tout à null) ne demande rien : il est ignoré,
+        # le reste du payload s'applique normalement.
+        retention = provided(payload.retention)
+        backup = provided(payload.backup)
         if backup is not None and backup.backup_enabled is True:
             if not backup.backup_vault_name:
                 errors.append("The Backup Vault name is required to enable bucket backup")
@@ -118,7 +122,7 @@ def bucket_update():
             try:
                 immutability = validate_immutability_for_update_bucket(
                     bucket,
-                    payload.retention,
+                    retention,
                     payload.object_lock_duration_days,
                     payload.object_lock_duration_years,
                     payload.enable_versioning,
@@ -223,12 +227,13 @@ def bucket_update():
 
         immutability = validated["immutability"]
         enable_custom_permissions = validated["enable_custom_permissions"]
+        retention = provided(payload.retention)
 
         # Le state reflète la configuration effective calculée par le service,
         # y compris le choix d'immutabilité qu'il a résolu.
         state_manager.push_state({
             # Clés historiques en jours conservées, unité et bornes saisies ajoutées.
-            "retention": retention_state_for_client(payload.retention, immutability["retention"]),
+            "retention": retention_state_for_client(retention, immutability["retention"]),
             "object_lock_duration_days": immutability["object_lock_duration_days"],
             "object_lock_duration_years": immutability["object_lock_duration_years"],
             "object_locking_enabled": immutability["object_locking_enabled"],
@@ -237,7 +242,7 @@ def bucket_update():
             "enable_custom_permissions": enable_custom_permissions,
             "immutability_choice": immutability["immutability_choice"],
             # Notices de dépréciation (format historique de rétention…), relues par le provider.
-            "deprecations": deprecations_for_client(payload.retention),
+            "deprecations": deprecations_for_client(retention),
         })
 
         process_bucket_update(
