@@ -93,14 +93,16 @@ def bucket_restore_backup_vault():
                 f"The source bucket doesn't exist or is not fully created for subscription_id "
                 f"{payload.subscription_id}."
             )
-        if source_bucket["clean_status"] == RestoreStatus.RUNNING.value:
-            errors.append(
-                "A clean-bucket operation on source bucket is already ongoing. Restore cannot be started meanwhile."
-            )
-        if source_bucket.get("object_versioning_enabled") is False:
-            errors.append(
-                "The source bucket must have versioning enabled."
-            )
+        else:
+            if source_bucket["clean_status"] == RestoreStatus.RUNNING.value:
+                errors.append(
+                    "A clean-bucket operation on source bucket is already ongoing. "
+                    "Restore cannot be started meanwhile."
+                )
+            if source_bucket.get("object_versioning_enabled") is False:
+                errors.append(
+                    "The source bucket must have versioning enabled."
+                )
 
         # validating target bucket bucket
         target_bucket = get_bucket_by_name(session, payload.target_bucket)
@@ -109,7 +111,7 @@ def bucket_restore_backup_vault():
                 f"The target bucket doesn't exist or is not fully created for subscription_id "
                 f"{payload.subscription_id}."
             )
-        if target_bucket["clean_status"] == RestoreStatus.RUNNING.value:
+        elif target_bucket["clean_status"] == RestoreStatus.RUNNING.value:
             errors.append(
                 "A clean-bucket operation on target bucket is already ongoing. Restore cannot be started meanwhile."
             )
@@ -282,7 +284,7 @@ def bucket_restore_backup_vault():
         try:
             if True:  # restore_backup_vault["workspace"]["workspace_id"] is None:
                 logger.info("Terraform create workspace")
-                stale_list = []
+                stale_list: List[Any] = []
                 stale_ws = None
                 try:
                     stale_list = tf.workspaces.get_by_name(ws_name) or []

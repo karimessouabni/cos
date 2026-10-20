@@ -46,7 +46,7 @@ def resolve_object_lock(days, years, errors):
 
 def apply_choice_unit(
     immutability_choice: Immutability,
-    payload_retention: BucketRetention,
+    payload_retention: BucketRetention | None,
     object_lock_duration_days,
     object_lock_duration_years,
 ):
@@ -106,12 +106,12 @@ def apply_choice_unit(
 
 def compute_bucket_new_immutability(
         immutability_choice: Immutability | None,
-        payload_retention: BucketRetention,
-        object_lock_duration_days: int,
-        object_lock_duration_years: int,
-        enable_versioning: bool,
+        payload_retention: BucketRetention | None,
+        object_lock_duration_days: int | None,
+        object_lock_duration_years: int | None,
+        enable_versioning: bool | None,
         immutability: dict,
-        backup: BucketBackup
+        backup: BucketBackup | None
 ) -> dict:
     """Construit le bloc immutability d'un bucket qui n'en avait pas encore.
 
@@ -261,12 +261,12 @@ def check_retention_bounds(unit, default, minimum, maximum, errors) -> None:
 
 def validate_immutability_for_update_bucket(
         bucket: dict,
-        retention: BucketRetention,
-        object_lock_duration_days: int,
-        object_lock_duration_years: int,
-        enable_versioning: bool,
+        retention: BucketRetention | None,
+        object_lock_duration_days: int | None,
+        object_lock_duration_years: int | None,
+        enable_versioning: bool | None,
         has_contents: bool,
-        backup: BucketBackup,
+        backup: BucketBackup | None,
         session: SASession
 ) -> dict:
     """Orchestration de l'update : valide la demande contre l'état actuel du bucket.

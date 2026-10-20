@@ -6,3 +6,7 @@ pydantic>=2.7
 python-dateutil
 # Le modèle cos_service.models.Bucket est testé sur SQLite avec le vrai SQLAlchemy (tests/unit/models)
 sqlalchemy>=1.4
+# Typage statique (job mypy de .gitlab-ci.standards.yml)
+mypy>=1.10
+types-python-dateutil
+types-requests

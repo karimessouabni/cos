@@ -145,6 +145,8 @@ def bucket_create():
 
         if errors:
             raise DeclineDemandException(" | ".join(errors))
+        # Un realm absent ou introuvable est déjà dans errors : ici il est résolu.
+        assert realm is not None
 
         return {"realm": realm.model_dump(), "cos_instance": cos_instance, "backup_vault": backup_vault}
 

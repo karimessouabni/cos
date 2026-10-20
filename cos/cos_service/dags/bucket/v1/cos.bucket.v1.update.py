@@ -137,6 +137,8 @@ def bucket_update():
 
         if errors:
             raise DeclineDemandException(" | ".join(errors))
+        # Sans endpoint, une erreur a été ajoutée ci-dessus : ici l'immutabilité est calculée.
+        assert immutability is not None
 
         backup_vault_sub_id = immutability["backup"]["backup_vault_sub_id"]
         backup_vault_crn = (

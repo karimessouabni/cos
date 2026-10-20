@@ -114,7 +114,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from dataclasses import dataclass
-from typing import Any, Callable, Sequence, TypeVar
+from typing import Any, Callable, Mapping, Sequence, TypeVar
 
 T = TypeVar("T")
 
@@ -308,11 +308,11 @@ MACOS_CA_KEYCHAINS = ("/Library/Keychains/System.keychain",
                       "/System/Library/Keychains/SystemRootCertificates.keychain")
 
 
-def ca_bundle_path(explicit: str | None = None, environ: dict[str, str] | None = None) -> str:
+def ca_bundle_path(explicit: str | None = None, environ: Mapping[str, str] | None = None) -> str:
     """Bundle PEM des CA internes : --ca-bundle, sinon $COS_TOOLCHAIN_CA_BUNDLE,
     sinon $SSL_CERT_FILE ; "" si aucun."""
-    environ = os.environ if environ is None else environ
-    return explicit or environ.get(CA_BUNDLE_ENV) or environ.get("SSL_CERT_FILE") or ""
+    env: Mapping[str, str] = os.environ if environ is None else environ
+    return explicit or env.get(CA_BUNDLE_ENV) or env.get("SSL_CERT_FILE") or ""
 
 
 def macos_keychain_cas() -> str:
@@ -376,7 +376,7 @@ class VaultClient:
         token n'expire pas. VaultError(403) si le token est invalide."""
         data = self._request(token, "auth/token/lookup-self").get("data") or {}
         ttl = data.get("ttl")
-        if ttl in (None, 0) and not data.get("expire_time"):
+        if ttl is None or (ttl == 0 and not data.get("expire_time")):
             return None
         try:
             return int(ttl)
@@ -451,7 +451,7 @@ def tcp_probe(host: str, port: int, timeout: float = 5) -> list[str]:
     for family, _, _, _, sockaddr in infos:
         label = "IPv6" if family == socket.AF_INET6 else "IPv4"
         try:
-            with socket.create_connection(sockaddr[:2], timeout=timeout):
+            with socket.create_connection((str(sockaddr[0]), port), timeout=timeout):
                 lines.append(f"{label} {sockaddr[0]}:{port} OK")
         except OSError as exc:
             lines.append(f"{label} {sockaddr[0]}:{port} {exc}")
@@ -997,11 +997,11 @@ def terraform_credentials_path() -> str:
     return terraform_credentials_paths()[-1]
 
 
-def terraform_logged_in(host: str, environ: dict[str, str] | None = None) -> bool:
+def terraform_logged_in(host: str, environ: Mapping[str, str] | None = None) -> bool:
     """Vrai si un token est enregistré pour `host` (TF_TOKEN_<host> ou
     credentials.tfrc.json écrit par `terraform login`)."""
-    environ = os.environ if environ is None else environ
-    if environ.get("TF_TOKEN_" + host.replace(".", "_").replace("-", "__")):
+    env: Mapping[str, str] = os.environ if environ is None else environ
+    if env.get("TF_TOKEN_" + host.replace(".", "_").replace("-", "__")):
         return True
     for path in terraform_credentials_paths():
         try:
@@ -1495,24 +1495,24 @@ def proxy_url(host_port: str, user: str, password: str) -> str:
 
 def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
                   ask_secret: Callable[[str], str] = getpass.getpass,
-                  environ: dict[str, str] | None = None, ignore_shell: bool = False) -> dict[str, str]:
+                  environ: Mapping[str, str] | None = None, ignore_shell: bool = False) -> dict[str, str]:
     """Variables http_proxy / https_proxy / no_proxy à utiliser : rien avec
     --no-proxy ; celles déjà exportées dans le shell si --proxy n'est pas passé
     explicitement ; sinon le proxy d'entreprise avec le user (--proxy-user,
     $PROXY_USER, mémorisé, ou demandé) et le mot de passe (option dédiée,
     variable d'environnement, ou demandé sans écho, jamais sauvegardé)."""
-    environ = os.environ if environ is None else environ
+    env: Mapping[str, str] = os.environ if environ is None else environ
     args.proxy_origin = "none"
     if args.no_proxy:
         return {}
-    existing = environ.get("https_proxy") or environ.get("HTTPS_PROXY")
+    existing = env.get("https_proxy") or env.get("HTTPS_PROXY")
     if existing and not args.proxy_from_cli and not ignore_shell:
         _log(f"Proxy déjà exporté dans le shell, réutilisé : {proxy_host(existing)} (--proxy pour l'ignorer)")
         args.proxy_origin = "shell"
         args.proxy_display = proxy_host(existing)
-        return {"http_proxy": environ.get("http_proxy") or environ.get("HTTP_PROXY") or existing,
+        return {"http_proxy": env.get("http_proxy") or env.get("HTTP_PROXY") or existing,
                 "https_proxy": existing,
-                "no_proxy": environ.get("no_proxy") or environ.get("NO_PROXY") or args.no_proxy_hosts}
+                "no_proxy": env.get("no_proxy") or env.get("NO_PROXY") or args.no_proxy_hosts}
     args.proxy_origin = "asked"
     user = args.proxy_user or load_setting("proxy_user")
     password = args.proxy_password or (load_proxy_password(user) if user and not args.new_proxy_password else "")

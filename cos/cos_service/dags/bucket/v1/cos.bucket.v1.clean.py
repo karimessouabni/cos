@@ -152,8 +152,9 @@ def _fail_closed(bucket: dict, tf, vault, reader, state_manager: StateManager, s
     _mark_failed(bucket["subscription_id"], state_manager, session)
 
 
-def lock_policy(bucket: dict) -> tuple[str, relativedelta] | None:
+def lock_policy(bucket: dict) -> tuple[str, relativedelta | None] | None:
     """Politique de verrouillage du bucket et sa durée maximale, ou None.
+    Rétention sans borne connue : ``("retention", None)``, l'appelant refuse.
 
     Rétention IBM : ``retention_maximum`` en jours (bucket non versionné).
     Object Lock : ``object_lock_duration_days`` ou ``_years`` (bucket versionné,
@@ -161,7 +162,7 @@ def lock_policy(bucket: dict) -> tuple[str, relativedelta] | None:
     """
     if bucket.get("retention_enabled"):
         days = bucket.get("retention_maximum") or bucket.get("retention_default")
-        return "retention", relativedelta(days=int(days)) if days else None
+        return "retention", (relativedelta(days=int(days)) if days else None)
     if bucket.get("object_lock_duration_days"):
         return "object lock", relativedelta(days=int(bucket["object_lock_duration_days"]))
     if bucket.get("object_lock_duration_years"):

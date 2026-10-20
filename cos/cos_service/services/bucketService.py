@@ -144,7 +144,7 @@ def get_buckets_with_expired_clean_policy(session: SASession) -> list:
         session.query(Bucket)
         .filter(
             Bucket.has_expiration_rule.is_(True),
-            Bucket.expiration_rule_created_at + timedelta(days=1) <= now,
+            Bucket.expiration_rule_created_at <= now - timedelta(days=1),
         )
         .options(joinedload(Bucket.cos).joinedload(Cos.context))
         .all()
@@ -217,6 +217,8 @@ def latest_object_modification(access_token: str, bucket: dict, versions: bool =
     while True:
         query = "&".join(f"{k}={v}" if v != "" else k for k, v in params.items())
         root = _s3_get_xml(f"{base}?{query}", headers)
+        if root is None:  # jamais sans not_found_ok : _s3_get_xml lève sur un 404
+            return latest
         entries = root.findall("s3:Version", S3_NAMESPACES) if versions else root.findall("s3:Contents", S3_NAMESPACES)
         for entry in entries:
             modified = entry.find("s3:LastModified", S3_NAMESPACES)
@@ -269,6 +271,8 @@ def bucket_config_metadata(access_token: str, bucket: dict, endpoint: str = COS_
 
 def is_versioning_enabled(access_token: str, bucket_vpe: str) -> bool:
     root = _s3_get_xml(f"{bucket_vpe}?versioning", _s3_headers(access_token))
+    if root is None:  # jamais sans not_found_ok : _s3_get_xml lève sur un 404
+        return False
     status = root.find("s3:Status", S3_NAMESPACES)
     logger.info("versioning status of %s: %s", bucket_vpe, None if status is None else status.text)
     return status is not None and status.text == "Enabled"

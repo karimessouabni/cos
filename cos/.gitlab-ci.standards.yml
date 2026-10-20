@@ -33,3 +33,18 @@ unit_tests:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(main|preprod|prod)$/'
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /^(main|preprod|prod)$/'
+
+# Typage statique du code projet (services, DAGs, script toolchain). Les libs
+# internes (bp2i_airflow_library, airflow) ne sont pas installées ici :
+# --ignore-missing-imports ; --explicit-package-bases évite que
+# cos_service/services/bucketService.py soit vu deux fois (sys.path).
+mypy:
+  extends: [.base_job]
+  stage: standards_check
+  script:
+    - poetry run pip install -r requirements-test.txt
+    - poetry run mypy cos_service tests/toolchain_tests/toolchain_env.py cos-subscriptions/subscriptions_cleanup.py
+        --ignore-missing-imports --explicit-package-bases
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(main|preprod|prod)$/'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /^(main|preprod|prod)$/'
