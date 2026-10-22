@@ -51,8 +51,21 @@ for _key, _value in {
 
 from tests.unit.stubs import bp2i, orm as orm_stubs, schemas as schema_stubs  # noqa: E402
 
-DAGS_DIR = ROOT / "cos_service" / "dags" / "bucket" / "v1"
+DAGS_ROOT = ROOT / "cos_service" / "dags"
+DAGS_DIR = DAGS_ROOT / "bucket" / "v1"
 DAG_PATH = DAGS_DIR / "cos.bucket.v1.create.py"
+
+
+def dag_path(filename: str) -> Path:
+    """Fichier d'un DAG par son nom : sous bucket/v1 d'abord, sinon n'importe où
+    sous cos_service/dags (backup_vault/v1, ...)."""
+    candidate = DAGS_DIR / filename
+    if candidate.exists():
+        return candidate
+    found = sorted(DAGS_ROOT.rglob(filename))
+    if not found:
+        raise FileNotFoundError(f"{filename} introuvable sous {DAGS_ROOT}")
+    return found[0]
 
 
 FORCE_STUBS = os.environ.get("COS_TESTS_FORCE_STUBS", "1") != "0"
@@ -248,7 +261,7 @@ def _load_dag_with_real_library(monkeypatch, filename: str) -> SimpleNamespace:
     monkeypatch.setattr(real_dag_cls, "__init__", recording_init)
 
     module_name = filename.replace(".", "_")
-    spec = importlib.util.spec_from_file_location(module_name, DAGS_DIR / filename)
+    spec = importlib.util.spec_from_file_location(module_name, dag_path(filename))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
@@ -305,7 +318,7 @@ def load_dag(monkeypatch):
 
     def loader(filename: str):
         registry.clear()
-        spec = importlib.util.spec_from_file_location(filename.replace(".", "_"), DAGS_DIR / filename)
+        spec = importlib.util.spec_from_file_location(filename.replace(".", "_"), dag_path(filename))
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         steps = {name: step.fn for name, step in registry.items()}
