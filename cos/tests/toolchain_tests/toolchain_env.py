@@ -485,7 +485,7 @@ def service_token(base_url: str, uid: str, namespace: str, timeout: int = DEFAUL
     if socket.AF_INET6 in families and socket.AF_INET in families:
         routes.append(("direct en IPv4 seulement", None))
     if proxy:
-        routes.append((f"via le proxy {proxy_host(proxy)}", {"https": proxy, "http": proxy}))
+        routes.append(("via le proxy", {"https": proxy, "http": proxy}))  # URL jamais journalisée
     if not resolves:
         routes.reverse()
     attempt_timeout = max(5, min(timeout, 15))
@@ -1507,9 +1507,10 @@ def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
         return {}
     existing = env.get("https_proxy") or env.get("HTTPS_PROXY")
     if existing and not args.proxy_from_cli and not ignore_shell:
-        _log(f"Proxy déjà exporté dans le shell, réutilisé : {proxy_host(existing)} (--proxy pour l'ignorer)")
+        # Rien de l'URL du shell n'est journalisé : elle porte les identifiants.
+        _log("Proxy déjà exporté dans le shell (https_proxy), réutilisé (--proxy pour l'ignorer)")
         args.proxy_origin = "shell"
-        args.proxy_display = proxy_host(existing)
+        args.proxy_display = "celui du shell (https_proxy)"
         return {"http_proxy": env.get("http_proxy") or env.get("HTTP_PROXY") or existing,
                 "https_proxy": existing,
                 "no_proxy": env.get("no_proxy") or env.get("NO_PROXY") or args.no_proxy_hosts}
@@ -1568,7 +1569,9 @@ def apply_proxy(proxy_vars: dict[str, str]) -> None:
 
 def check_proxy(proxy_vars: dict[str, str], url: str = PROXY_CHECK_URL, timeout: int = 15) -> str:
     """Vérifie que le proxy laisse passer vers `url`. Retourne "" si oui, sinon
-    la raison ("identifiants refusés" pour un 407, ou l'erreur réseau)."""
+    la raison ("identifiants refusés" pour un 407, ou la classe de l'erreur
+    réseau). Le texte de l'erreur n'est jamais repris : il peut citer l'URL du
+    proxy, identifiants compris."""
     if not proxy_vars:
         return ""
     request = urllib.request.Request(url, method="HEAD")
@@ -1580,13 +1583,16 @@ def check_proxy(proxy_vars: dict[str, str], url: str = PROXY_CHECK_URL, timeout:
             pass
     except urllib.error.HTTPError as exc:
         if exc.code == 407:
-            return f"identifiants refusés (HTTP 407 {exc.reason})"
+            return "identifiants refusés (HTTP 407)"
         _log(f"Proxy OK ({url} répond HTTP {exc.code}).")
     except (urllib.error.URLError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
         if "407" in str(reason) or "authenticationrequired" in str(reason).lower():
-            return f"identifiants refusés ({reason})"
-        return f"{url} injoignable via ce proxy : {reason}"
+            return "identifiants refusés (407 renvoyé par le proxy)"
+        # Seul le code HTTP (un entier) est repris du message, jamais son texte.
+        code = re.search(r"\b(\d{3})\b", str(reason))
+        detail = f"HTTP {int(code.group(1))}" if code else type(reason).__name__
+        return f"{url} injoignable via ce proxy ({detail})"
     else:
         _log(f"Proxy OK ({url} joignable).")
     return ""

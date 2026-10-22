@@ -35,9 +35,10 @@ PW_SPECIAL_ENCODED = te.urllib.parse.quote(PW_SPECIAL, safe="")
 PW_BANG = _secrets.token_hex(3) + "!"
 PW_BANG_ENCODED = te.urllib.parse.quote(PW_BANG, safe="")
 
-TOKEN_OK = "hvs.CAESIEKO1gxUBXCdPSqoxyv5kr8P0bG4Mc5lgJEOsaVtqeTq"
-TOKEN_BAD = "hvs.CAESIFXQc9s9BYB1K9iDoRwwugBc3iFctwrVl30RdM9Ml4au"
-API_KEY = "YqGLLC6QTdV46Usp0ITQAuXGYAeKNRLRhnf9WH4G9KmK"
+# Tokens et API key au format attendu (hvs. + 20 caractères ou plus), générés eux aussi.
+TOKEN_OK = "hvs." + _secrets.token_urlsafe(36)
+TOKEN_BAD = "hvs." + _secrets.token_urlsafe(36)
+API_KEY = _secrets.token_urlsafe(33)
 SECRET_PATH = "ibm_ac002i000263/creds/rl002i000138_buhub"
 UID = "lh90871"
 
@@ -143,14 +144,14 @@ class ExtractApiKeyTest(unittest.TestCase):
 
 class EnvVarsTest(unittest.TestCase):
     def test_build_and_export(self):
-        proxy = {"http_proxy": "http://u:p@ncproxy:8080", "https_proxy": "http://u:p@ncproxy:8080",
+        proxy = {"http_proxy": f"http://u:{PW}@ncproxy:8080", "https_proxy": f"http://u:{PW}@ncproxy:8080",
                  "no_proxy": te.DEFAULT_NO_PROXY}
         variables = te.build_env_vars("k'1", tf_log="debug", proxy_vars=proxy)
         self.assertEqual(variables["IBM_CLOUD_API_KEY"], "k'1")
         self.assertEqual(variables["ORCHESTRATOR_IBMCLOUD_API_KEY"], "k'1")
         self.assertEqual(variables["TF_LOG"], "debug")
-        self.assertEqual(variables["https_proxy"], "http://u:p@ncproxy:8080")
-        self.assertEqual(variables["HTTPS_PROXY"], "http://u:p@ncproxy:8080")
+        self.assertEqual(variables["https_proxy"], f"http://u:{PW}@ncproxy:8080")
+        self.assertEqual(variables["HTTPS_PROXY"], f"http://u:{PW}@ncproxy:8080")
         self.assertEqual(variables["no_proxy"], te.DEFAULT_NO_PROXY)
         self.assertEqual(variables["NO_PROXY"], te.DEFAULT_NO_PROXY)
         lines = te.export_lines(variables)
@@ -343,10 +344,10 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(proxy["https_proxy"], f"http://u:{PW}@p:1")
 
     def test_existing_shell_proxy_reused(self):
-        environ = {"https_proxy": "http://u:p@old:8080", "no_proxy": "a,b"}
+        environ = {"https_proxy": f"http://u:{PW}@old:8080", "no_proxy": "a,b"}
         proxy = te.resolve_proxy(te.parse_args([]), ask=lambda q: self.fail("prompt"),
                                  ask_secret=lambda q: self.fail("prompt"), environ=environ)
-        self.assertEqual(proxy, {"http_proxy": "http://u:p@old:8080", "https_proxy": "http://u:p@old:8080",
+        self.assertEqual(proxy, {"http_proxy": f"http://u:{PW}@old:8080", "https_proxy": f"http://u:{PW}@old:8080",
                                  "no_proxy": "a,b"})
 
     def test_non_interactive_without_credentials(self):
@@ -367,7 +368,7 @@ class ProxyTest(unittest.TestCase):
         return mock.patch.object(te.urllib.request, "build_opener", return_value=opener)
 
     def test_check_proxy(self):
-        proxy = {"http_proxy": "http://u:p@px:1", "https_proxy": "http://u:p@px:1", "no_proxy": ""}
+        proxy = {"http_proxy": f"http://u:{PW}@px:1", "https_proxy": f"http://u:{PW}@px:1", "no_proxy": ""}
         import urllib.error
         self.assertEqual(te.check_proxy({}), "")  # aucun proxy : rien à vérifier
         with self._opener(urllib.error.HTTPError("u", 407, "authenticationrequired", {}, None)):

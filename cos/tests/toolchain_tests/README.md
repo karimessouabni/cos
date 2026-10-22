@@ -442,7 +442,7 @@ Journal complet : .../terraform/logs/20261002-140200-int-test.log
 | Message | Cause | Quoi faire |
 |---|---|---|
 | `Cannot init client API … iam.cloud.ibm.com … authenticationrequired` | tofu sort vers IBM via un proxy sans identifiants valides (407) | laisser le script exporter le proxy ; à la main, vérifier `env \| grep -i proxy` (majuscules et minuscules) |
-| `Proxy du shell inutilisable (… 503 Service Unavailable)` | un `https_proxy` du profil shell pointe sur un proxy local arrêté (ex. `127.0.0.1:8079`) | rien : le script bascule sur ncproxy ; ou `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY` |
+| `Proxy du shell inutilisable (… injoignable via ce proxy …)` | un `https_proxy` du profil shell pointe sur un proxy local arrêté (ex. `127.0.0.1:8079`) | rien : le script bascule sur ncproxy ; ou `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY` |
 | `proxy … : identifiants refusés (HTTP 407)` | user ou mot de passe ncproxy faux, ou compte bloqué | le mot de passe mémorisé est oublié et redemandé ; `--new-proxy-password` pour forcer |
 | `fichier de scénario introuvable … contient : …` | le `-filter` ne correspond à aucun fichier de `terraform/tests/` ; un nom listé avec une espace avant la virgule a un caractère parasite | le script prend le fichier quand même et le signale : renommer le fichier proprement |
 | `service token injoignable` + sondage TCP | l'hôte `s02vl9956141` n'est pas joignable depuis le poste (VPN, DNS) | `--probe` pour le détail ; nom complet via `--token-service` ; `--browser-token` en attendant |
