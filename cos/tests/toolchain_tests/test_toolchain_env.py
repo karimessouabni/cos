@@ -315,7 +315,7 @@ class ProxyTest(unittest.TestCase):
                                                ask_secret=lambda q: (asked.append(q), PW)[1], check=lambda pv: "")
             self.assertEqual(proxy["https_proxy"], f"http://h90871:{PW}@{te.DEFAULT_PROXY}")
             self.assertEqual(len(asked), 1)
-            self.assertEqual(te.load_proxy_password("h90871"), PW)
+            self.assertEqual(te.stored_proxy_credential("h90871"), PW)
             # second lancement : rien n'est redemandé
             proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: self.fail("prompt"),
                                                ask_secret=lambda q: self.fail("prompt"), check=lambda pv: "")
@@ -325,17 +325,17 @@ class ProxyTest(unittest.TestCase):
             proxy = te.resolve_and_check_proxy(te.parse_args([]), ask=lambda q: "",
                                                ask_secret=lambda q: PW2, check=lambda pv: next(checks))
             self.assertEqual(proxy["https_proxy"], f"http://h90871:{PW2}@{te.DEFAULT_PROXY}")
-            self.assertEqual(te.load_proxy_password("h90871"), PW2)
+            self.assertEqual(te.stored_proxy_credential("h90871"), PW2)
             # --new-proxy-password force la saisie ; --forget-proxy-password oublie
             proxy = te.resolve_and_check_proxy(te.parse_args(["--new-proxy-password"]), ask=lambda q: "",
                                                ask_secret=lambda q: PW3, check=lambda pv: "")
-            self.assertEqual(te.load_proxy_password("h90871"), PW3)
+            self.assertEqual(te.stored_proxy_credential("h90871"), PW3)
             self.assertEqual(te.main(["--forget-proxy-password"]), 0)
-            self.assertEqual(te.load_proxy_password("h90871"), "")
+            self.assertEqual(te.stored_proxy_credential("h90871"), "")
             # un mot de passe non vérifié (check sauté) n'est pas mémorisé
             te.resolve_and_check_proxy(te.parse_args(["--skip-proxy-check"]), ask=lambda q: "",
                                        ask_secret=lambda q: PW4, check=lambda pv: self.fail("check"))
-            self.assertEqual(te.load_proxy_password("h90871"), "")
+            self.assertEqual(te.stored_proxy_credential("h90871"), "")
 
     def test_cli_credentials_without_prompt(self):
         args = te.parse_args(["--proxy-user", "u", "--proxy-password", PW, "--proxy", "p:1"])
@@ -695,8 +695,8 @@ class SecretStoreTest(unittest.TestCase):
             self.assertEqual(te.load_cached_api_key("https://v", "p"), API_KEY)
             self.assertEqual(set(te._read_state()["api_key_leases"]), {"https://v/v1/p"})
             self.assertNotIn(API_KEY, json.dumps(te._read_state()))
-            te.save_proxy_password("h90871", PW)
-            self.assertEqual(te.load_proxy_password("h90871"), PW)
+            te.remember_proxy_credential("h90871", PW)
+            self.assertEqual(te.stored_proxy_credential("h90871"), PW)
             te.forget_all()
             self.assertEqual(keychain.items, {})
             self.assertFalse(os.path.exists(te.state_path()))

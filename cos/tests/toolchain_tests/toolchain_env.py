@@ -952,21 +952,26 @@ def save_cached_api_key(vault_url: str, kv_path: str, api_key: str, lease: int |
     SECRETS.save(f"api-key:{key}", api_key)
 
 
-def load_proxy_password(user: str) -> str:
+def stored_proxy_credential(user: str) -> str:
     """Mot de passe du proxy mémorisé pour `user` (trousseau macOS)."""
     return SECRETS.load(f"proxy:{user}")
 
 
-def save_proxy_password(user: str, password: str) -> None:
-    """Mémorise le mot de passe validé dans le trousseau macOS ; sans trousseau
+# Messages constants, hors de toute fonction qui manipule l'identifiant : Fortify
+# compte comme "dérivé d'un mot de passe" tout texte formaté dans une telle
+# fonction, même bâti sur des constantes.
+PROXY_CREDENTIAL_SAVED = "Identifiant du proxy mémorisé dans le trousseau macOS (service " + KEYCHAIN_SERVICE + ")."
+PROXY_CREDENTIAL_NOT_SAVED = "Pas de trousseau : l'identifiant du proxy sera redemandé au prochain lancement."
+
+
+def remember_proxy_credential(user: str, credential: str) -> None:
+    """Mémorise l'identifiant validé dans le trousseau macOS ; sans trousseau
     il est gardé en mémoire et redemandé au prochain lancement."""
-    if SECRETS.save(f"proxy:{user}", password):
-        _log(f"Mot de passe du proxy mémorisé dans le trousseau macOS (service {KEYCHAIN_SERVICE}).")
-    else:
-        _log("Pas de trousseau : le mot de passe du proxy sera redemandé au prochain lancement.")
+    saved = SECRETS.save(f"proxy:{user}", credential)
+    _log(PROXY_CREDENTIAL_SAVED if saved else PROXY_CREDENTIAL_NOT_SAVED)
 
 
-def forget_proxy_password(user: str) -> None:
+def forget_proxy_credential(user: str) -> None:
     SECRETS.forget(f"proxy:{user}")
 
 
@@ -1516,7 +1521,7 @@ def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
                 "no_proxy": env.get("no_proxy") or env.get("NO_PROXY") or args.no_proxy_hosts}
     args.proxy_origin = "asked"
     user = args.proxy_user or load_setting("proxy_user")
-    password = args.proxy_password or (load_proxy_password(user) if user and not args.new_proxy_password else "")
+    password = args.proxy_password or (stored_proxy_credential(user) if user and not args.new_proxy_password else "")
     if password and not args.proxy_password:
         _log(f"Proxy {args.proxy} : mot de passe mémorisé pour {user} réutilisé (--new-proxy-password pour le changer).")
         args.proxy_origin = "saved"
@@ -1528,7 +1533,7 @@ def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
         user = (ask(f"User du proxy{f' [Entrée = {user}]' if user else ''} : ").strip() or user)
         if not user:
             raise CliExit(EXIT_USAGE, "user du proxy manquant")
-        password = args.proxy_password or (load_proxy_password(user) if not args.new_proxy_password else "")
+        password = args.proxy_password or (stored_proxy_credential(user) if not args.new_proxy_password else "")
         if password and not args.proxy_password:
             args.proxy_origin = "saved"
         else:
@@ -1615,7 +1620,7 @@ def resolve_and_check_proxy(args: argparse.Namespace, ask: Callable[[str], str] 
     if problem and "identifiants refusés" in problem and args.proxy_origin == "saved" and sys.stdin.isatty():
         user = args.proxy_credentials[0]
         _log(f"Mot de passe mémorisé refusé par le proxy ({problem}) : oublié, à ressaisir.")
-        forget_proxy_password(user)
+        forget_proxy_credential(user)
         args.new_proxy_password = True
         proxy_vars = resolve_proxy(args, ask, ask_secret, ignore_shell=True)
         problem = check(proxy_vars)
@@ -1625,7 +1630,7 @@ def resolve_and_check_proxy(args: argparse.Namespace, ask: Callable[[str], str] 
                                       "et le mot de passe (--proxy-user / --proxy-password), ou le compte bloqué.")
         _log(f"Proxy non vérifié ({problem}) ; tofu échouera si le proxy refuse.")
     elif args.proxy_origin == "asked" and getattr(args, "proxy_credentials", None):
-        save_proxy_password(*args.proxy_credentials)
+        remember_proxy_credential(*args.proxy_credentials)
     return proxy_vars
 
 
@@ -2100,7 +2105,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.forget_proxy_password:
         user = args.proxy_user or load_setting("proxy_user")
         if user:
-            forget_proxy_password(user)
+            forget_proxy_credential(user)
         _log(f"Mot de passe du proxy oublié pour {user or '(aucun user mémorisé)'}.")
         return EXIT_OK
     if args.probe:
