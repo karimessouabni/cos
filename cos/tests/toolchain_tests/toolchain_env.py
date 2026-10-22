@@ -1629,6 +1629,17 @@ def resolve_and_check_proxy(args: argparse.Namespace, ask: Callable[[str], str] 
     return proxy_vars
 
 
+# Ordre d'affichage des variables exportées. Les noms affichés viennent de ces
+# constantes, jamais du dict de variables : il porte les secrets, et un nom lu
+# dedans serait compté par Fortify comme dérivé d'un secret (Privacy Violation).
+EXPORTED_NAMES = (*API_KEY_VARS, "TF_LOG", *PROXY_ENV_VARS, *(v.upper() for v in PROXY_ENV_VARS), "TF_VAR_prefix")
+
+
+def exported_names(variables: dict[str, str]) -> list[str]:
+    """Noms des variables présentes, pris dans EXPORTED_NAMES (constantes)."""
+    return [name for name in EXPORTED_NAMES if name in variables]
+
+
 def build_env_vars(api_key: str, tf_log: str | None = None,
                    proxy_vars: dict[str, str] | None = None) -> dict[str, str]:
     variables = {name: api_key for name in API_KEY_VARS}
@@ -1676,7 +1687,7 @@ SECRET_VARIABLES = (*API_KEY_VARS, *PROXY_ENV_VARS[:2], *(v.upper() for v in PRO
 def secret_export_parts(variables: dict[str, str], api_key_ref: str, proxy_user: str,
                         proxy_from_shell: bool, store: "SecretStore | None" = None) -> dict[str, Sequence[str]]:
     """Comment exporter chaque variable secrète SANS écrire le secret : l'API key
-    et le mot de passe du proxy sont lus dans le trousseau par le shell au
+    et l'identifiant du proxy sont lus dans le trousseau par le shell au
     moment de l'eval ; un proxy repris du shell est re-référencé tel quel.
     Les variables secrètes absentes du résultat n'ont pas de forme sûre."""
     store = store or SECRETS
@@ -2033,7 +2044,7 @@ def prepare(args: argparse.Namespace, acquire: Callable[[str], str] | None = Non
     proxy_vars = with_no_proxy(resolve_and_check_proxy(args), args.token_service)
     apply_proxy(proxy_vars)
     if proxy_vars:
-        _log(f"Proxy : {getattr(args, 'proxy_display', args.proxy)}  no_proxy : {proxy_vars['no_proxy']}")
+        _log(f"Proxy : {getattr(args, 'proxy_display', args.proxy)}")
     client = VaultClient(args.vault_url, args.namespace, args.timeout, args.ca_bundle)
     try:
         api_key = resolve_api_key(args, client, acquire)
@@ -2106,7 +2117,7 @@ def main(argv: list[str] | None = None) -> int:
 
     env = {**os.environ, **variables}
     if args.run:
-        _log("Variables exportées : " + ", ".join(variables))  # valeurs non affichées
+        _log("Variables exportées : " + ", ".join(exported_names(variables)))  # valeurs non affichées
         try:
             command = with_var_file(args.run, args.dir, args.env)
             if command[0] == "test":
@@ -2137,7 +2148,7 @@ def main(argv: list[str] | None = None) -> int:
             return exc.code
     if args.shell:
         shell = os.environ.get("SHELL") or os.environ.get("COMSPEC") or "/bin/sh"
-        _log(f"Sous-shell {shell} dans {args.dir} avec " + ", ".join(variables)
+        _log(f"Sous-shell {shell} dans {args.dir} avec " + ", ".join(exported_names(variables))
              + " exportées (exit pour revenir).")
         return subprocess.call([shell], cwd=args.dir, env=env)
     # Sortie sur stdout (eval / --json) : jamais un secret. Les secrets sont
@@ -2150,13 +2161,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.as_json:
         print(json.dumps(public_variables(variables, parts), indent=2))
     else:
-        unsafe = [n for n in variables if n in SECRET_VARIABLES and n not in parts]
+        unsafe = [n for n in SECRET_VARIABLES if n in variables and n not in parts]
         if unsafe:
             _log(f"Pas de trousseau pour {', '.join(unsafe)} : rien n'est imprimé. Utiliser --run "
                  "ou --shell (secrets passés en mémoire au processus).")
             return EXIT_USAGE
         sys.stdout.write(export_lines(variables, parts))
-        _log("Variables prêtes : " + ", ".join(variables)
+        _log("Variables prêtes : " + ", ".join(exported_names(variables))
              + f"\nDans le shell courant : eval \"$(python {os.path.basename(__file__)} --env {args.env})\""
              + f"\nPuis : terraform -chdir={shlex.quote(args.dir)} plan"
              + (f" -var-file={ENV_TFVARS_DIR}/{args.env}.tfvars" if env_tfvars_path(args.dir, args.env) else ""))
