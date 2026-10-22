@@ -23,7 +23,9 @@ TF_OUTPUTS = {
 
 @pytest.fixture
 def vault_dag(load_dag):
-    return load_dag("cos.backup_vault.v1.create.py")
+    # Chemin relatif à dags/bucket/v1 : fonctionne aussi avec un conftest qui ne
+    # cherche les DAGs que sous bucket/v1.
+    return load_dag("../../backup_vault/v1/cos.backup_vault.v1.create.py")
 
 
 @pytest.fixture

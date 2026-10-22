@@ -32,7 +32,9 @@ def vault_row(**overrides) -> dict:
 
 @pytest.fixture
 def delete_dag(load_dag):
-    return load_dag("cos.backup_vault.v1.delete.py")
+    # Chemin relatif à dags/bucket/v1 : fonctionne aussi avec un conftest qui ne
+    # cherche les DAGs que sous bucket/v1.
+    return load_dag("../../backup_vault/v1/cos.backup_vault.v1.delete.py")
 
 
 @pytest.fixture
