@@ -426,7 +426,7 @@ Vault : https://hvault-dev.fr.net.intra (namespace AP85135)  secret : ibm_ac002i
 tofu login : credentials déjà enregistrés pour repo.artifactory-dogen.group.echonet.
 versions.tf : provider orchestrator 2.3.0-int (inchangé).
 tofu init : déjà fait dans ... (--reinit pour refaire).
-Proxy ncproxy.fr.net.intra:8080 : identifiants de ton compte (le mot de passe n'est pas sauvegardé).
+Proxy : identifiants de ton compte (mémorisés après vérification).
 Proxy OK (https://iam.cloud.ibm.com/... joignable).
 Token Vault sauvegardé valide encore 29 jours.        (ou : Service token joint direct.)
 API key sauvegardée réutilisée (...).                 (ou : API key lue dans Vault (..., lease 2 h).)

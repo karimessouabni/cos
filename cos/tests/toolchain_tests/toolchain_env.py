@@ -226,7 +226,7 @@ API_KEY_VARS = ("IBM_CLOUD_API_KEY", "ORCHESTRATOR_IBMCLOUD_API_KEY")
 DEFAULT_PROXY = "ncproxy.fr.net.intra:8080"
 DEFAULT_NO_PROXY = "localhost,127.0.0.1,.echonet,0.0.0.0"
 PROXY_USER_ENV = "PROXY_USER"
-PROXY_PASSWORD_ENV = "PROXY_PASSWORD"
+PROXY_CREDENTIAL_ENV = "PROXY_PASSWORD"
 PROXY_ENV_VARS = ("http_proxy", "https_proxy", "no_proxy")
 # URL publique appelée à travers le proxy pour vérifier les identifiants avant
 # terraform (c'est l'hôte que le provider ibm joint en premier).
@@ -1490,12 +1490,20 @@ def with_var_file(command: Sequence[str], cwd: str, env: str) -> list[str]:
 # Variables d'environnement
 # --------------------------------------------------------------------------- #
 
-def proxy_url(host_port: str, user: str, password: str) -> str:
+# Messages de resolve_proxy, constants et définis hors de la fonction qui tient
+# l'identifiant du proxy (voir PROXY_CREDENTIAL_SAVED).
+PROXY_CREDENTIAL_REUSED = "Proxy : identifiant mémorisé réutilisé (--new-proxy-password pour le changer)."
+PROXY_CREDENTIAL_ASKED = "Proxy : identifiants de ton compte (mémorisés après vérification)."
+PROXY_CREDENTIAL_MISSING = ("proxy : passer --proxy-user / --proxy-password (ou $" + PROXY_USER_ENV + " / $"
+                            + PROXY_CREDENTIAL_ENV + "), ou --no-proxy")
+
+
+def proxy_url(host_port: str, user: str, credential: str) -> str:
     """http://<user>:<mot de passe>@<host:port>, identifiants encodés (ex: ! -> %21)."""
     host_port = re.sub(r"^https?://", "", host_port).rstrip("/")
     if not user:
         return f"http://{host_port}"
-    return f"http://{urllib.parse.quote(user, safe='')}:{urllib.parse.quote(password, safe='')}@{host_port}"
+    return f"http://{urllib.parse.quote(user, safe='')}:{urllib.parse.quote(credential, safe='')}@{host_port}"
 
 
 def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
@@ -1521,30 +1529,29 @@ def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
                 "no_proxy": env.get("no_proxy") or env.get("NO_PROXY") or args.no_proxy_hosts}
     args.proxy_origin = "asked"
     user = args.proxy_user or load_setting("proxy_user")
-    password = args.proxy_password or (stored_proxy_credential(user) if user and not args.new_proxy_password else "")
-    if password and not args.proxy_password:
-        _log(f"Proxy {args.proxy} : mot de passe mémorisé pour {user} réutilisé (--new-proxy-password pour le changer).")
+    credential = args.proxy_credential or (stored_proxy_credential(user) if user and not args.new_proxy_credential else "")
+    if credential and not args.proxy_credential:
+        _log(PROXY_CREDENTIAL_REUSED)
         args.proxy_origin = "saved"
-    if not user or not password:
+    if not user or not credential:
         if not sys.stdin.isatty():
-            raise CliExit(EXIT_USAGE, f"proxy {args.proxy} : passer --proxy-user / --proxy-password "
-                                      f"(ou ${PROXY_USER_ENV} / ${PROXY_PASSWORD_ENV}), ou --no-proxy")
-        _log(f"Proxy {args.proxy} : identifiants de ton compte (mémorisés après vérification).")
+            raise CliExit(EXIT_USAGE, PROXY_CREDENTIAL_MISSING)
+        _log(PROXY_CREDENTIAL_ASKED)
         user = (ask(f"User du proxy{f' [Entrée = {user}]' if user else ''} : ").strip() or user)
         if not user:
             raise CliExit(EXIT_USAGE, "user du proxy manquant")
-        password = args.proxy_password or (stored_proxy_credential(user) if not args.new_proxy_password else "")
-        if password and not args.proxy_password:
+        credential = args.proxy_credential or (stored_proxy_credential(user) if not args.new_proxy_credential else "")
+        if credential and not args.proxy_credential:
             args.proxy_origin = "saved"
         else:
-            password = ask_secret(f"Mot de passe du proxy pour {user} : ")
-            if not password:
+            credential = ask_secret(f"Mot de passe du proxy pour {user} : ")
+            if not credential:
                 raise CliExit(EXIT_USAGE, "mot de passe du proxy manquant")
     if user != load_setting("proxy_user"):
         save_setting("proxy_user", user)
-    args.proxy_credentials = (user, password)
+    args.proxy_credentials = (user, credential)
     args.proxy_display = f"{args.proxy} (user {user})"
-    url = proxy_url(args.proxy, user, password)
+    url = proxy_url(args.proxy, user, credential)
     return {"http_proxy": url, "https_proxy": url, "no_proxy": args.no_proxy_hosts}
 
 
@@ -1621,7 +1628,7 @@ def resolve_and_check_proxy(args: argparse.Namespace, ask: Callable[[str], str] 
         user = args.proxy_credentials[0]
         _log(f"Mot de passe mémorisé refusé par le proxy ({problem}) : oublié, à ressaisir.")
         forget_proxy_credential(user)
-        args.new_proxy_password = True
+        args.new_proxy_credential = True
         proxy_vars = resolve_proxy(args, ask, ask_secret, ignore_shell=True)
         problem = check(proxy_vars)
     if problem:
@@ -1898,11 +1905,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                        help=f"proxy d'entreprise (défaut: {DEFAULT_PROXY}, ou https_proxy déjà exporté)")
     proxy.add_argument("--proxy-user", default=os.environ.get(PROXY_USER_ENV),
                        help=f"user du proxy (défaut: ${PROXY_USER_ENV}, sinon mémorisé ou demandé)")
-    proxy.add_argument("--proxy-password", default=os.environ.get(PROXY_PASSWORD_ENV),
-                       help=f"mot de passe du proxy (défaut: ${PROXY_PASSWORD_ENV}, sinon demandé sans écho)")
-    proxy.add_argument("--new-proxy-password", action="store_true",
+    proxy.add_argument("--proxy-password", dest="proxy_credential", default=os.environ.get(PROXY_CREDENTIAL_ENV),
+                       help=f"mot de passe du proxy (défaut: ${PROXY_CREDENTIAL_ENV}, sinon demandé sans écho)")
+    proxy.add_argument("--new-proxy-password", dest="new_proxy_credential", action="store_true",
                        help="ignorer le mot de passe du proxy mémorisé et le redemander")
-    proxy.add_argument("--forget-proxy-password", action="store_true",
+    proxy.add_argument("--forget-proxy-password", dest="forget_proxy_credential", action="store_true",
                        help="oublier le mot de passe du proxy mémorisé (trousseau / cache), puis quitter")
     proxy.add_argument("--no-proxy", action="store_true", help="aucun proxy")
     proxy.add_argument("--no-proxy-hosts", default=DEFAULT_NO_PROXY, metavar="HOSTS",
@@ -2102,7 +2109,7 @@ def main(argv: list[str] | None = None) -> int:
         forget_all()
         _log(f"Cache supprimé ({state_path()}), secrets oubliés (trousseau {KEYCHAIN_SERVICE}).")
         return EXIT_OK
-    if args.forget_proxy_password:
+    if args.forget_proxy_credential:
         user = args.proxy_user or load_setting("proxy_user")
         if user:
             forget_proxy_credential(user)
