@@ -2,6 +2,9 @@
 [run]
 source = cos_service
 branch = True
+# Chemins relatifs dans coverage-report.xml : SonarQube rattache les lignes aux fichiers
+# quel que soit le dossier de travail du runner (/builds/...).
+relative_files = True
 omit =
     */__pycache__/*
     */tests/*
