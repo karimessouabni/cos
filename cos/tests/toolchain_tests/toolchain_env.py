@@ -1549,7 +1549,11 @@ def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
                 raise CliExit(EXIT_USAGE, "mot de passe du proxy manquant")
     if user != load_setting("proxy_user"):
         save_setting("proxy_user", user)
-    args.proxy_credentials = (user, credential)
+    # Le user et le secret ne voyagent jamais dans le même objet : un tuple qui
+    # porte le secret contaminerait le user, repris dans les journaux et les
+    # lignes export (Privacy Violation Fortify).
+    args.proxy_user_name = user
+    args.proxy_pending_credential = credential
     args.proxy_display = f"{args.proxy} (user {user})"
     url = proxy_url(args.proxy, user, credential)
     return {"http_proxy": url, "https_proxy": url, "no_proxy": args.no_proxy_hosts}
@@ -1625,7 +1629,7 @@ def resolve_and_check_proxy(args: argparse.Namespace, ask: Callable[[str], str] 
         proxy_vars = resolve_proxy(args, ask, ask_secret, ignore_shell=True)
         problem = check(proxy_vars)
     if problem and "identifiants refusés" in problem and args.proxy_origin == "saved" and sys.stdin.isatty():
-        user = args.proxy_credentials[0]
+        user = args.proxy_user_name
         _log(f"Mot de passe mémorisé refusé par le proxy ({problem}) : oublié, à ressaisir.")
         forget_proxy_credential(user)
         args.new_proxy_credential = True
@@ -1636,8 +1640,8 @@ def resolve_and_check_proxy(args: argparse.Namespace, ask: Callable[[str], str] 
             raise CliExit(EXIT_USAGE, f"proxy {args.proxy} : {problem}. Vérifier le user "
                                       "et le mot de passe (--proxy-user / --proxy-password), ou le compte bloqué.")
         _log(f"Proxy non vérifié ({problem}) ; tofu échouera si le proxy refuse.")
-    elif args.proxy_origin == "asked" and getattr(args, "proxy_credentials", None):
-        remember_proxy_credential(*args.proxy_credentials)
+    elif args.proxy_origin == "asked" and getattr(args, "proxy_pending_credential", None):
+        remember_proxy_credential(args.proxy_user_name, args.proxy_pending_credential)
     return proxy_vars
 
 
@@ -2169,7 +2173,7 @@ def main(argv: list[str] | None = None) -> int:
     # mémoire au processus).
     parts = secret_export_parts(
         variables, getattr(args, "api_key_ref", ""),
-        (getattr(args, "proxy_credentials", None) or ("", ""))[0], args.proxy_origin == "shell")
+        getattr(args, "proxy_user_name", ""), args.proxy_origin == "shell")
     if args.as_json:
         print(json.dumps(public_variables(variables, parts), indent=2))
     else:
