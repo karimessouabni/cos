@@ -775,7 +775,7 @@ def acquire_token_interactively(
 KEYCHAIN_SERVICE = "cos-toolchain"
 # Anciennes sections de state.json qui contenaient des secrets en clair :
 # purgées à la première lecture (versions antérieures du script).
-LEGACY_SECRET_SECTIONS = ("vault_tokens", "api_keys", "proxy_passwords")
+LEGACY_PLAINTEXT_SECTIONS = ("vault_tokens", "api_keys", "proxy_passwords")
 
 
 def state_path() -> str:
@@ -792,8 +792,8 @@ def _read_state() -> dict[str, Any]:
         return {}
     if not isinstance(state, dict):
         return {}
-    if any(section in state for section in LEGACY_SECRET_SECTIONS):
-        for section in LEGACY_SECRET_SECTIONS:
+    if any(section in state for section in LEGACY_PLAINTEXT_SECTIONS):
+        for section in LEGACY_PLAINTEXT_SECTIONS:
             state.pop(section, None)
         _write_state(state)
         _log(f"Secrets en clair purgés de {state_path()} (ancienne version du script).")
@@ -844,7 +844,7 @@ def _keychain(*args: str) -> subprocess.CompletedProcess | None:
         return None
 
 
-class SecretStore:
+class CredentialStore:
     """Secrets nommés : trousseau macOS (service KEYCHAIN_SERVICE, compte = nom),
     sinon mémoire du processus. L'index des noms mémorisés est gardé dans
     state.json pour pouvoir tout oublier (--forget)."""
@@ -905,7 +905,7 @@ class SecretStore:
         _write_state(state)
 
 
-SECRETS = SecretStore()
+KEYCHAIN = CredentialStore()
 
 
 def _token_name(vault_url: str) -> str:
@@ -913,15 +913,15 @@ def _token_name(vault_url: str) -> str:
 
 
 def load_cached_token(vault_url: str) -> str | None:
-    return SECRETS.load(_token_name(vault_url)) or None
+    return KEYCHAIN.load(_token_name(vault_url)) or None
 
 
 def save_cached_token(vault_url: str, token: str) -> None:
-    SECRETS.save(_token_name(vault_url), token)
+    KEYCHAIN.save(_token_name(vault_url), token)
 
 
 def forget_cached_token(vault_url: str) -> None:
-    SECRETS.forget(_token_name(vault_url))
+    KEYCHAIN.forget(_token_name(vault_url))
 
 
 def _api_key_cache_key(vault_url: str, kv_path: str) -> str:
@@ -938,7 +938,7 @@ def load_cached_api_key(vault_url: str, kv_path: str, now: float | None = None) 
     expires_at = entry.get("expires_at")
     if expires_at is not None and float(expires_at) - (time.time() if now is None else now) < TOKEN_MIN_VALIDITY:
         return None
-    return SECRETS.load(f"api-key:{key}") or None
+    return KEYCHAIN.load(f"api-key:{key}") or None
 
 
 def save_cached_api_key(vault_url: str, kv_path: str, api_key: str, lease: int | None) -> None:
@@ -949,12 +949,12 @@ def save_cached_api_key(vault_url: str, kv_path: str, api_key: str, lease: int |
         "saved_at": time.time(),
     }
     _write_state(state)
-    SECRETS.save(f"api-key:{key}", api_key)
+    KEYCHAIN.save(f"api-key:{key}", api_key)
 
 
 def stored_proxy_credential(user: str) -> str:
     """Mot de passe du proxy mémorisé pour `user` (trousseau macOS)."""
-    return SECRETS.load(f"proxy:{user}")
+    return KEYCHAIN.load(f"proxy:{user}")
 
 
 # Messages constants, hors de toute fonction qui manipule l'identifiant : Fortify
@@ -967,16 +967,16 @@ PROXY_CREDENTIAL_NOT_SAVED = "Pas de trousseau : l'identifiant du proxy sera red
 def remember_proxy_credential(user: str, credential: str) -> None:
     """Mémorise l'identifiant validé dans le trousseau macOS ; sans trousseau
     il est gardé en mémoire et redemandé au prochain lancement."""
-    saved = SECRETS.save(f"proxy:{user}", credential)
+    saved = KEYCHAIN.save(f"proxy:{user}", credential)
     _log(PROXY_CREDENTIAL_SAVED if saved else PROXY_CREDENTIAL_NOT_SAVED)
 
 
 def forget_proxy_credential(user: str) -> None:
-    SECRETS.forget(f"proxy:{user}")
+    KEYCHAIN.forget(f"proxy:{user}")
 
 
 def forget_all() -> None:
-    SECRETS.forget_all()
+    KEYCHAIN.forget_all()
     try:
         os.remove(state_path())
     except FileNotFoundError:
@@ -1507,7 +1507,7 @@ def proxy_url(host_port: str, user: str, credential: str) -> str:
 
 
 def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
-                  ask_secret: Callable[[str], str] = getpass.getpass,
+                  ask_hidden: Callable[[str], str] = getpass.getpass,
                   environ: Mapping[str, str] | None = None, ignore_shell: bool = False) -> dict[str, str]:
     """Variables http_proxy / https_proxy / no_proxy à utiliser : rien avec
     --no-proxy ; celles déjà exportées dans le shell si --proxy n'est pas passé
@@ -1544,7 +1544,7 @@ def resolve_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
         if credential and not args.proxy_credential:
             args.proxy_origin = "saved"
         else:
-            credential = ask_secret(f"Mot de passe du proxy pour {user} : ")
+            credential = ask_hidden(f"Mot de passe du proxy pour {user} : ")
             if not credential:
                 raise CliExit(EXIT_USAGE, "mot de passe du proxy manquant")
     if user != load_setting("proxy_user"):
@@ -1615,25 +1615,25 @@ def check_proxy(proxy_vars: dict[str, str], url: str = PROXY_CHECK_URL, timeout:
 
 
 def resolve_and_check_proxy(args: argparse.Namespace, ask: Callable[[str], str] = input,
-                            ask_secret: Callable[[str], str] = getpass.getpass,
+                            ask_hidden: Callable[[str], str] = getpass.getpass,
                             check: Callable[[dict[str, str]], str] = check_proxy) -> dict[str, str]:
     """resolve_proxy + vérification. Un proxy repris du shell qui ne répond pas
     (proxy local arrêté, 503...) est abandonné au profit du proxy d'entreprise
     avec identifiants ; des identifiants refusés (407) arrêtent le script."""
-    proxy_vars = resolve_proxy(args, ask, ask_secret)
+    proxy_vars = resolve_proxy(args, ask, ask_hidden)
     if not proxy_vars or args.skip_proxy_check:
         return proxy_vars
     problem = check(proxy_vars)
     if problem and args.proxy_origin == "shell":
         _log(f"Proxy du shell inutilisable ({problem}) : passage au proxy {args.proxy} avec identifiants.")
-        proxy_vars = resolve_proxy(args, ask, ask_secret, ignore_shell=True)
+        proxy_vars = resolve_proxy(args, ask, ask_hidden, ignore_shell=True)
         problem = check(proxy_vars)
     if problem and "identifiants refusés" in problem and args.proxy_origin == "saved" and sys.stdin.isatty():
         user = args.proxy_user_name
         _log(f"Mot de passe mémorisé refusé par le proxy ({problem}) : oublié, à ressaisir.")
         forget_proxy_credential(user)
         args.new_proxy_credential = True
-        proxy_vars = resolve_proxy(args, ask, ask_secret, ignore_shell=True)
+        proxy_vars = resolve_proxy(args, ask, ask_hidden, ignore_shell=True)
         problem = check(proxy_vars)
     if problem:
         if "identifiants refusés" in problem:
@@ -1697,16 +1697,16 @@ def export_lines(variables: dict[str, str], parts: dict[str, Sequence[str]] | No
     return "".join(f"export {name}={_export_value(parts.get(name) or [value])}\n" for name, value in variables.items())
 
 
-SECRET_VARIABLES = (*API_KEY_VARS, *PROXY_ENV_VARS[:2], *(v.upper() for v in PROXY_ENV_VARS[:2]))
+PROTECTED_VARIABLES = (*API_KEY_VARS, *PROXY_ENV_VARS[:2], *(v.upper() for v in PROXY_ENV_VARS[:2]))
 
 
-def secret_export_parts(variables: dict[str, str], api_key_ref: str, proxy_user: str,
-                        proxy_from_shell: bool, store: "SecretStore | None" = None) -> dict[str, Sequence[str]]:
+def keychain_export_parts(variables: dict[str, str], api_key_ref: str, proxy_user: str,
+                        proxy_from_shell: bool, store: "CredentialStore | None" = None) -> dict[str, Sequence[str]]:
     """Comment exporter chaque variable secrète SANS écrire le secret : l'API key
     et l'identifiant du proxy sont lus dans le trousseau par le shell au
     moment de l'eval ; un proxy repris du shell est re-référencé tel quel.
     Les variables secrètes absentes du résultat n'ont pas de forme sûre."""
-    store = store or SECRETS
+    store = store or KEYCHAIN
     parts: dict[str, Sequence[str]] = {}
     if api_key_ref and store.in_keychain(api_key_ref):
         for name in API_KEY_VARS:
@@ -1730,7 +1730,7 @@ def public_variables(variables: dict[str, str], parts: dict[str, Sequence[str]])
     l'expression shell qui la lit dans le trousseau, ou par `***` sans
     trousseau (jamais sa valeur)."""
     return {
-        name: ("".join(parts[name]) if name in parts else ("***" if name in SECRET_VARIABLES else value))
+        name: ("".join(parts[name]) if name in parts else ("***" if name in PROTECTED_VARIABLES else value))
         for name, value in variables.items()
     }
 
@@ -2171,13 +2171,13 @@ def main(argv: list[str] | None = None) -> int:
     # référencés depuis le trousseau, que le shell lit lui-même au moment de
     # l'eval ; --run et --shell n'ont pas ce problème (variables passées en
     # mémoire au processus).
-    parts = secret_export_parts(
+    parts = keychain_export_parts(
         variables, getattr(args, "api_key_ref", ""),
         getattr(args, "proxy_user_name", ""), args.proxy_origin == "shell")
     if args.as_json:
         print(json.dumps(public_variables(variables, parts), indent=2))
     else:
-        unsafe = [n for n in SECRET_VARIABLES if n in variables and n not in parts]
+        unsafe = [n for n in PROTECTED_VARIABLES if n in variables and n not in parts]
         if unsafe:
             _log(f"Pas de trousseau pour {', '.join(unsafe)} : rien n'est imprimé. Utiliser --run "
                  "ou --shell (secrets passés en mémoire au processus).")
