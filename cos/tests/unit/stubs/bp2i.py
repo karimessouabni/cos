@@ -25,18 +25,19 @@ from enum import Enum
 # le module qui lève.
 import os
 
+
+class _StubDeclineDemandException(Exception):
+    """Refus fonctionnel d'une demande (doublure)."""
+
+
+DeclineDemandException: type[Exception] = _StubDeclineDemandException
 if os.environ.get("COS_TESTS_FORCE_STUBS", "1") == "0":
     try:
-        from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
+        from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException as _real_decline
+
+        DeclineDemandException = _real_decline
     except Exception:  # pragma: no cover - dépend de l'environnement
-        DeclineDemandException = None
-else:
-    DeclineDemandException = None
-
-if DeclineDemandException is None:
-
-    class DeclineDemandException(Exception):
-        """Refus fonctionnel d'une demande."""
+        pass
 
 
 def mark_task_as_declined(*args, **kwargs):
@@ -52,7 +53,7 @@ class LazyResult:
     def __init__(self, step_name: str):
         self.step_name = step_name
         self.operator = types.SimpleNamespace(task_id=step_name)
-        self.downstream = []
+        self.downstream: list = []
 
     def __rshift__(self, other):
         self.downstream.append(other)
@@ -69,7 +70,7 @@ class DateTimeSensorAsync:
         self.task_id = task_id
         self.target_time = target_time
         self.kwargs = kwargs
-        self.downstream = []
+        self.downstream: list = []
 
     def __rshift__(self, other):
         self.downstream.append(other)
@@ -104,13 +105,13 @@ def Field(default=None, **extra):
 class ProductCreatePayload:
     """Payload sans validation : les champs annotés prennent le kwarg ou le défaut."""
 
-    realm: str = None
-    apcode: str = None
-    environment: str = None
-    region: str = None
-    subscription_id: str = None
+    realm: str | None = None
+    apcode: str | None = None
+    environment: str | None = None
+    region: str | None = None
+    subscription_id: str | None = None
     # Branche du produit donnée à la gateway de l'orchestrateur pour cette demande.
-    product_branch: str = None
+    product_branch: str | None = None
 
     def __init__(self, **kwargs):
         for cls in reversed(type(self).__mro__):
@@ -185,6 +186,12 @@ class TriggerRule(str, Enum):
     ALWAYS = "always"
 
 
+def _fill(module: types.ModuleType, **attrs: object) -> None:
+    """Pose des attributs sur un module doublure (mypy refuse ``module.x = ...``)."""
+    for key, value in attrs.items():
+        setattr(module, key, value)
+
+
 def build_modules() -> dict[str, types.ModuleType]:
     """Construit un jeu frais de modules doublures, indexé par nom qualifié."""
     registry: dict[str, Step] = {}
@@ -197,7 +204,8 @@ def build_modules() -> dict[str, types.ModuleType]:
         fn.sensor_options = options.pop("sensor_options", None)
         return Step(fn, registry)
 
-    step.sensor = lambda **options: step(sensor_options=options)
+    # ``step.sensor`` : attribut posé sur la fonction, comme le fait la vraie lib.
+    setattr(step, "sensor", lambda **options: step(sensor_options=options))  # noqa: B010
 
     def product_action(name=None, tags=None, payload=None, config=None, *, action_id=None, **_ignored):
         """Accepte l'ancienne forme positionnelle et la forme ``action_id=`` du vrai DAG."""
@@ -224,34 +232,46 @@ def build_modules() -> dict[str, types.ModuleType]:
         return None
 
     root = types.ModuleType("bp2i_airflow_library")
-    root.__path__ = []  # paquet : un sous-module inconnu donne "No module named" et non "is not a package"
-    root.add_project_to_path = lambda: None
+    _fill(
+        root,
+        __path__=[],  # paquet : un sous-module inconnu donne "No module named" et non "is not a package"
+        add_project_to_path=lambda: None,
+    )
 
     config = types.ModuleType("bp2i_airflow_library.config")
-    config.ENVIRONMENT = OrchestratorEnvironment.INT.value
-    config.OrchestratorEnvironment = OrchestratorEnvironment
+    _fill(
+        config,
+        ENVIRONMENT=OrchestratorEnvironment.INT.value,
+        OrchestratorEnvironment=OrchestratorEnvironment,
+    )
 
     # Le vrai DAG teste la version d'Airflow pour choisir ses imports ; en
     # doublure on reste sur la branche Airflow 2 (airflow.decorators, airflow.utils).
     version_compat = types.ModuleType("bp2i_airflow_library.version_compat")
-    version_compat.AIRFLOW_V_3_0_PLUS = False
+    _fill(version_compat, AIRFLOW_V_3_0_PLUS=False)
 
     connectors = types.ModuleType("bp2i_airflow_library.connectors")
-    connectors.__path__ = []
+    _fill(connectors, __path__=[])
     reader = types.ModuleType("bp2i_airflow_library.connectors.reader")
-    reader.ReaderConnector = ReaderConnector
+    _fill(reader, ReaderConnector=ReaderConnector)
 
     dag = types.ModuleType("bp2i_airflow_library.dag")
-    dag.step = step
-    dag.product_action = product_action
-    dag.registry = registry
+    _fill(
+        dag,
+        step=step,
+        product_action=product_action,
+        registry=registry,
+    )
 
     dependencies = types.ModuleType("bp2i_airflow_library.dependencies")
-    dependencies.SASession = SASession
-    dependencies.SchematicsBackend = SchematicsBackend
-    dependencies.StateManager = StateManager
-    dependencies.Vault = Vault
-    dependencies.depends = depends
+    _fill(
+        dependencies,
+        SASession=SASession,
+        SchematicsBackend=SchematicsBackend,
+        StateManager=StateManager,
+        Vault=Vault,
+        depends=depends,
+    )
     for marker in (
         "airflow_context_dependency",
         "payload_dependency",
@@ -265,53 +285,71 @@ def build_modules() -> dict[str, types.ModuleType]:
 
     exceptions = types.ModuleType("bp2i_airflow_library.exceptions")
     flow_control = types.ModuleType("bp2i_airflow_library.exceptions.flow_control")
-    flow_control.DeclineDemandException = DeclineDemandException
-    flow_control.mark_task_as_declined = mark_task_as_declined
+    _fill(
+        flow_control,
+        DeclineDemandException=DeclineDemandException,
+        mark_task_as_declined=mark_task_as_declined,
+    )
 
     schemas = types.ModuleType("bp2i_airflow_library.schemas")
-    schemas.Field = Field
-    schemas.ProductCreatePayload = ProductCreatePayload
-    schemas.ProductActionPayload = ProductActionPayload
-    schemas.ProductActionConfig = ProductActionConfig
+    _fill(
+        schemas,
+        Field=Field,
+        ProductCreatePayload=ProductCreatePayload,
+        ProductActionPayload=ProductActionPayload,
+        ProductActionConfig=ProductActionConfig,
+    )
 
     terraform = types.ModuleType("bp2i_terraform")
-    terraform.__path__ = []
+    _fill(terraform, __path__=[])
     backends = types.ModuleType("bp2i_terraform.backends")
-    backends.__path__ = []
+    _fill(backends, __path__=[])
     schematics = types.ModuleType("bp2i_terraform.backends.schematics")
-    schematics.TerraformVar = TerraformVar
-    schematics.VCS = VCS
+    _fill(
+        schematics,
+        TerraformVar=TerraformVar,
+        VCS=VCS,
+    )
     # le vrai schematics_service importe VCS depuis bp2i_terraform.schemas
     tf_schemas = types.ModuleType("bp2i_terraform.schemas")
-    tf_schemas.TerraformVar = TerraformVar
-    tf_schemas.VCS = VCS
+    _fill(
+        tf_schemas,
+        TerraformVar=TerraformVar,
+        VCS=VCS,
+    )
     components = types.ModuleType("bp2i_terraform.components")
-    components.__path__ = []
+    _fill(components, __path__=[])
     cooldown = types.ModuleType("bp2i_terraform.components.cooldown_policies")
-    cooldown.LinearCooldownPolicy = LinearCooldownPolicy
+    _fill(cooldown, LinearCooldownPolicy=LinearCooldownPolicy)
 
     airflow = types.ModuleType("airflow")
-    airflow.__path__ = []
+    _fill(airflow, __path__=[])
     sensors = types.ModuleType("airflow.sensors")
-    sensors.__path__ = []
+    _fill(sensors, __path__=[])
     date_time = types.ModuleType("airflow.sensors.date_time")
-    date_time.DateTimeSensorAsync = DateTimeSensorAsync
+    _fill(date_time, DateTimeSensorAsync=DateTimeSensorAsync)
     # Imports du bloc de compatibilité du vrai DAG (branche Airflow 2).
     decorators = types.ModuleType("airflow.decorators")
-    decorators.task = passthrough_decorator
-    decorators.task_group = passthrough_decorator
+    _fill(
+        decorators,
+        task=passthrough_decorator,
+        task_group=passthrough_decorator,
+    )
     utils = types.ModuleType("airflow.utils")
-    utils.__path__ = []
+    _fill(utils, __path__=[])
     trigger_rule = types.ModuleType("airflow.utils.trigger_rule")
-    trigger_rule.TriggerRule = TriggerRule
+    _fill(trigger_rule, TriggerRule=TriggerRule)
     context = types.ModuleType("airflow.utils.context")
-    context.Context = dict
+    _fill(context, Context=dict)
     # Branche Airflow 3 (airflow.sdk) : fournie aussi, au cas où AIRFLOW_V_3_0_PLUS serait forcé.
     sdk = types.ModuleType("airflow.sdk")
-    sdk.Context = dict
-    sdk.TriggerRule = TriggerRule
-    sdk.task = passthrough_decorator
-    sdk.task_group = passthrough_decorator
+    _fill(
+        sdk,
+        Context=dict,
+        TriggerRule=TriggerRule,
+        task=passthrough_decorator,
+        task_group=passthrough_decorator,
+    )
 
     return {
         "airflow": airflow,

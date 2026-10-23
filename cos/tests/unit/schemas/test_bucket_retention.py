@@ -24,7 +24,7 @@ from cos_service.schemas.bucket_retention import (
 )
 
 
-def errors_of(exc: ValidationError) -> str:
+def errors_of(exc: pytest.ExceptionInfo[ValidationError]) -> str:
     return str(exc.value)
 
 

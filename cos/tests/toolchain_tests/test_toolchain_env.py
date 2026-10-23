@@ -93,6 +93,9 @@ def _args(server_url: str, *extra: str, tests_dir: str | None = None) -> "te.arg
 
 
 class VaultServerTest(unittest.TestCase):
+    server: http.server.HTTPServer
+    url: str
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.server = http.server.HTTPServer(("127.0.0.1", 0), FakeVault)

@@ -569,6 +569,7 @@ dépôt. Les services et les étapes de DAG testés sont toujours le vrai code.
 pip install -r requirements-test.txt
 python -m pytest                 # unitaires
 python -m pytest --cov           # avec couverture
+mypy .                           # typage statique de tout le dépôt (options dans mypy.ini)
 ```
 
 Ce que la suite couvre :

@@ -52,9 +52,7 @@ class Model:
 
 
 def _model(name: str, *columns: str) -> type:
-    cls = type(name, (Model,), {col: Column(col) for col in columns})
-    cls.columns = columns
-    return cls
+    return type(name, (Model,), {**{col: Column(col) for col in columns}, "columns": columns})
 
 
 Bucket = _model(

@@ -107,7 +107,7 @@ _install_if_missing("cos_service.utils.constants", _constants)
 _sqlalchemy = _schema_module("sqlalchemy", update=orm_stubs.update)
 _sqlalchemy.__path__ = []
 _sqlalchemy_orm = _schema_module("sqlalchemy.orm", joinedload=orm_stubs.joinedload)
-_sqlalchemy.orm = _sqlalchemy_orm
+setattr(_sqlalchemy, "orm", _sqlalchemy_orm)  # noqa: B010
 _install_forced("sqlalchemy", _sqlalchemy)
 _install_forced("sqlalchemy.orm", _sqlalchemy_orm)
 
@@ -262,6 +262,7 @@ def _load_dag_with_real_library(monkeypatch, filename: str) -> SimpleNamespace:
 
     module_name = filename.replace(".", "_")
     spec = importlib.util.spec_from_file_location(module_name, dag_path(filename))
+    assert spec is not None and spec.loader is not None, filename
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
@@ -319,6 +320,7 @@ def load_dag(monkeypatch):
     def loader(filename: str):
         registry.clear()
         spec = importlib.util.spec_from_file_location(filename.replace(".", "_"), dag_path(filename))
+        assert spec is not None and spec.loader is not None, filename
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         steps = {name: step.fn for name, step in registry.items()}

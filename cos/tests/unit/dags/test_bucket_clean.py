@@ -29,8 +29,8 @@ def bucket_row(**overrides) -> dict:
     return row
 
 
-def utc(*args) -> datetime:
-    return datetime(*args, tzinfo=timezone.utc)
+def utc(year: int, month: int, day: int, hour: int = 0, minute: int = 0, second: int = 0) -> datetime:
+    return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
 
 
 class S3Error(Exception):

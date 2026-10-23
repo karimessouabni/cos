@@ -9,6 +9,7 @@ chargées.
 """
 import importlib
 import sys
+from typing import Any
 from datetime import datetime, timezone
 
 import pytest
@@ -27,7 +28,7 @@ def _load_real_models() -> dict:
     orm = importlib.import_module("sqlalchemy.orm")
     models = importlib.import_module("cos_service.models")
     bucket_module = importlib.import_module("cos_service.models.Bucket")
-    Base = models.Base
+    Base: Any = models.Base  # base déclarative chargée dynamiquement : Any pour mypy
     Column, String, ForeignKey = sqlalchemy.Column, sqlalchemy.String, sqlalchemy.ForeignKey
 
     class Cos(Base):
