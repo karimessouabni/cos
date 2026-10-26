@@ -124,6 +124,58 @@ def _env_values(settings: EnvSettings) -> list[dict]:
     return [{"TF_LOG": settings.tf_log}]
 
 
+class ForeignWorkspaceError(RuntimeError):
+    """Un workspace homonyme existe déjà dans Schematics et n'est pas le nôtre."""
+
+
+def _field(obj, name: str):
+    """Attribut ou clé ``name`` d'un objet de la librairie Schematics (objet ou dict)."""
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def workspace_template_folder(workspace) -> str | None:
+    """Dossier Terraform (``template_data[0].folder``) d'un workspace, ``None`` si inconnu."""
+    templates = _field(workspace, "template_data") or []
+    for template in templates:
+        folder = _field(template, "folder")
+        if folder:
+            return str(folder).strip("/")
+    return None
+
+
+def ensure_workspace_is_free(tf: SchematicsBackend, workspace_name: str, tf_directory: str) -> None:
+    """Refuse de réutiliser un workspace homonyme qui ne porte pas notre template.
+
+    ``create_or_update`` retrouve un workspace par son nom : s'il en existe
+    déjà un (créé par un autre produit, un test, ou re-pointé à la main dans
+    la console), il serait silencieusement rebranché sur notre dossier tout
+    en gardant son state. Au destroy, Terraform tomberait alors sur des
+    ressources orphelines ("Provider configuration not present"). Un
+    workspace homonyme n'est toléré que s'il pointe déjà sur ``tf_directory``
+    (reprise d'une création interrompue avant l'écriture en base).
+    """
+    try:
+        existing = tf.workspaces.get_by_name(workspace_name) or []
+    except Exception as exc:
+        if getattr(exc, "code", None) == 404:
+            return
+        raise
+    expected = tf_directory.strip("/")
+    for workspace in existing:
+        folder = workspace_template_folder(workspace)
+        if folder == expected:
+            continue
+        workspace_id = _field(workspace, "id")
+        raise ForeignWorkspaceError(
+            f"workspace '{workspace_name}' (id {workspace_id}) already exists in Schematics with "
+            f"template folder {folder!r} instead of {expected!r}: it is not attached to this "
+            "subscription and may hold another product's state. Delete it in Schematics, or "
+            "attach its id to the subscription's workspace row if it really is this bucket's."
+        )
+
+
 def create_or_update_ws(
     tf: SchematicsBackend,
     workspace_name: str,
@@ -138,8 +190,12 @@ def create_or_update_ws(
 
     ``product_branch`` : branche de la demande (``payload.product_branch``),
     clonée par Schematics à la place du défaut de l'environnement.
+
+    Un workspace homonyme qui ne porte pas ``tf_directory`` est refusé
+    (``ForeignWorkspaceError``) plutôt que récupéré avec son state.
     """
     settings = settings_for(orchestrator_env, product_branch)
+    ensure_workspace_is_free(tf, workspace_name, tf_directory)
     create_ws_result = tf.workspaces.create_or_update(
         workspace_name,
         tags=settings.tags,

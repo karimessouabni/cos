@@ -14,7 +14,22 @@ from cos_service.utils import constants
 def tf():
     backend = MagicMock(name="tf")
     backend.workspaces.create_or_update.return_value = {"id": "ws-1", "name": "ws_bucket_sub-1"}
+    backend.workspaces.get_by_name.return_value = []  # aucun homonyme dans Schematics
     return backend
+
+
+def existing_workspace(ws_id="ws-old", folder="terraform/v1.12/bucket", as_dict=False):
+    """Workspace tel que renvoyé par ``get_by_name`` : objet à attributs, ou dict."""
+    if as_dict:
+        return {"id": ws_id, "template_data": [{"folder": folder}]}
+    ws = MagicMock(name=ws_id)
+    ws.id = ws_id
+    ws.template_data = [MagicMock(folder=folder)]
+    return ws
+
+
+class _NotFound(Exception):
+    code = 404
 
 
 @pytest.fixture
@@ -199,6 +214,77 @@ class TestCreateOrUpdateWs:
             svc.create_or_update_ws(tf, "ws", "staging", "dir", {}, "d", "t")
 
         tf.workspaces.create_or_update.assert_not_called()
+
+    def test_a_foreign_workspace_of_the_same_name_blocks_the_creation(self, tf, no_overrides):
+        tf.workspaces.get_by_name.return_value = [existing_workspace("ws-roks", folder="terraform/roks")]
+
+        with pytest.raises(svc.ForeignWorkspaceError, match="ws-roks"):
+            svc.create_or_update_ws(tf, "ws_bucket_sub-1", "int", "terraform/v1.12/bucket", {}, "d", "t")
+
+        tf.workspaces.get_by_name.assert_called_once_with("ws_bucket_sub-1")
+        tf.workspaces.create_or_update.assert_not_called()
+
+
+class TestEnsureWorkspaceIsFree:
+    DIR = "terraform/v1.12/bucket"
+
+    def test_no_workspace_of_that_name_is_free(self, tf):
+        svc.ensure_workspace_is_free(tf, "ws_bucket_sub-1", self.DIR)
+
+    def test_not_found_from_schematics_is_free(self, tf):
+        tf.workspaces.get_by_name.side_effect = _NotFound("no such workspace")
+
+        svc.ensure_workspace_is_free(tf, "ws_bucket_sub-1", self.DIR)
+
+    def test_other_schematics_errors_are_raised(self, tf):
+        tf.workspaces.get_by_name.side_effect = RuntimeError("schematics down")
+
+        with pytest.raises(RuntimeError, match="schematics down"):
+            svc.ensure_workspace_is_free(tf, "ws_bucket_sub-1", self.DIR)
+
+    @pytest.mark.parametrize("as_dict", [False, True])
+    def test_a_workspace_already_on_our_template_is_reused(self, tf, as_dict):
+        """Reprise d'une création interrompue avant l'écriture du workspace_id en base."""
+        tf.workspaces.get_by_name.return_value = [existing_workspace(as_dict=as_dict)]
+
+        svc.ensure_workspace_is_free(tf, "ws_bucket_sub-1", self.DIR)
+
+    def test_trailing_slashes_do_not_matter(self, tf):
+        tf.workspaces.get_by_name.return_value = [existing_workspace(folder="/terraform/v1.12/bucket/")]
+
+        svc.ensure_workspace_is_free(tf, "ws_bucket_sub-1", self.DIR + "/")
+
+    @pytest.mark.parametrize("as_dict", [False, True])
+    def test_a_workspace_on_another_template_is_refused(self, tf, as_dict):
+        foreign = existing_workspace("ws-roks", folder="terraform/roks", as_dict=as_dict)
+        tf.workspaces.get_by_name.return_value = [foreign]
+
+        with pytest.raises(svc.ForeignWorkspaceError) as exc_info:
+            svc.ensure_workspace_is_free(tf, "ws_bucket_sub-1", self.DIR)
+
+        message = str(exc_info.value)
+        assert "ws_bucket_sub-1" in message and "ws-roks" in message
+        assert "'terraform/roks'" in message and "'terraform/v1.12/bucket'" in message
+        assert "another product's state" in message
+
+    def test_a_workspace_without_known_template_is_refused(self, tf):
+        """Dossier illisible : on ne devine pas, l'opérateur tranche."""
+        unknown = MagicMock(name="ws-unknown", spec=["id"])
+        unknown.id = "ws-unknown"
+        tf.workspaces.get_by_name.return_value = [unknown]
+
+        with pytest.raises(svc.ForeignWorkspaceError, match="template folder None"):
+            svc.ensure_workspace_is_free(tf, "ws_bucket_sub-1", self.DIR)
+
+    def test_one_foreign_workspace_among_ours_is_enough_to_refuse(self, tf):
+        ours, foreign = existing_workspace(), existing_workspace("ws-roks", folder="terraform/roks")
+        tf.workspaces.get_by_name.return_value = [ours, foreign]
+
+        with pytest.raises(svc.ForeignWorkspaceError, match="ws-roks"):
+            svc.ensure_workspace_is_free(tf, "ws_bucket_sub-1", self.DIR)
+
+    def test_foreign_workspace_error_is_a_runtime_error(self):
+        assert issubclass(svc.ForeignWorkspaceError, RuntimeError)
 
 
 class TestUpdateWs:
