@@ -267,9 +267,15 @@ def validate_immutability_for_update_bucket(
         enable_versioning: bool | None,
         has_contents: bool,
         backup: BucketBackup | None,
-        session: SASession
+        session: SASession,
+        immutability_choice: Immutability | None = None,
 ) -> dict:
     """Orchestration de l'update : valide la demande contre l'état actuel du bucket.
+
+    ``immutability_choice`` est le choix envoyé par le client (le provider le
+    renvoie à chaque update). Sur un bucket sans immutabilité il guide le calcul
+    comme à la création (unité comprise) ; sur un bucket qui en a déjà une, il
+    ne peut pas changer de famille, et ``none`` ou absent vaut « inchangé ».
 
     [RECONSTITUTION] Docstring repliée sur la photo (lignes 203-208) :
     seule la première ligne était visible. Le corps ci-dessous est complet.
@@ -278,10 +284,21 @@ def validate_immutability_for_update_bucket(
     existing_immutability_choice = compute_bucket_immutability_choice(bucket)
     errors = []
 
+    requested_choice = immutability_choice if immutability_choice is not Immutability.NONE else None
+    if (
+        requested_choice is not None
+        and existing_immutability_choice is not Immutability.NONE
+        and requested_choice.is_retention != existing_immutability_choice.is_retention
+    ):
+        raise DeclineDemandException(
+            f"The immutability choice of the bucket cannot change: it is "
+            f"{existing_immutability_choice.value}, the request says {requested_choice.value}."
+        )
+
     if existing_immutability_choice is Immutability.NONE:
         logging.info("validate_immutability2")
         existing_immutability = compute_bucket_new_immutability(
-            existing_immutability_choice,
+            requested_choice,
             retention,
             object_lock_duration_days,
             object_lock_duration_years,

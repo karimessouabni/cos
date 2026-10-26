@@ -94,6 +94,7 @@ def test_payload_defaults(make_payload):
 
     assert payload.retention is None
     assert payload.backup is None
+    assert payload.immutability_choice is None  # envoyé par le provider à chaque update (updatable à la création)
     assert payload.enable_custom_permissions is None
     assert payload.scheduling_update_date_time == "2025-06-03T12:13:02.000"
 

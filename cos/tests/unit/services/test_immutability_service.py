@@ -364,10 +364,45 @@ class TestComputeBucketImmutabilityForUpdate:
 
 class TestValidateImmutabilityForUpdate:
     def validate(self, row, retention=None, days=None, years=None, versioning=None,
-                 has_contents=False, backup=None):
+                 has_contents=False, backup=None, choice=None):
         return svc.validate_immutability_for_update_bucket(
-            row, retention, days, years, versioning, has_contents, backup, session=None
+            row, retention, days, years, versioning, has_contents, backup, session=None,
+            immutability_choice=choice,
         )
+
+    # --- immutability_choice envoyé par le provider à chaque update ----------------
+
+    def test_explicit_choice_on_a_plain_bucket_drives_the_unit(self):
+        result = self.validate(bucket_row(), retention=retention_years(), choice=Immutability.RETENTION_YEARLY)
+
+        assert result["immutability_choice"] == Immutability.RETENTION_YEARLY.value
+        assert result["retention"]["retention_enabled"] is True
+
+    def test_explicit_choice_in_the_wrong_unit_is_declined(self):
+        with pytest.raises(DeclineDemandException, match="must be set in years"):
+            self.validate(bucket_row(), retention=retention_days(), choice=Immutability.RETENTION_YEARLY)
+
+    @pytest.mark.parametrize("choice", [None, Immutability.NONE])
+    def test_none_or_absent_choice_means_unchanged(self, choice):
+        """Le provider renvoie le défaut ``none`` du code client, même sur un bucket en rétention."""
+        row = bucket_row(retention_enabled=True, retention_default=30, retention_minimum=10, retention_maximum=60)
+
+        result = self.validate(row, choice=choice)
+
+        assert result["immutability_choice"] == Immutability.RETENTION.value
+        assert result["retention"]["retention_enabled"] is True
+
+    @pytest.mark.parametrize("choice", [Immutability.RETENTION, Immutability.RETENTION_DAILY])
+    def test_same_family_is_accepted_on_a_retention_bucket(self, choice):
+        row = bucket_row(retention_enabled=True, retention_default=30, retention_minimum=10, retention_maximum=60)
+
+        assert self.validate(row, choice=choice)["immutability_choice"] == Immutability.RETENTION.value
+
+    def test_changing_family_is_declined(self):
+        row = bucket_row(object_lock_duration_days=30, object_versioning_enabled=True)
+
+        with pytest.raises(DeclineDemandException, match="cannot change: it is object_lock, the request says retention"):
+            self.validate(row, choice=Immutability.RETENTION)
 
     def test_plain_bucket_only_toggles_versioning(self):
         result = self.validate(bucket_row(), versioning=True)

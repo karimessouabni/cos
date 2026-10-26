@@ -33,6 +33,7 @@ from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException 
 from bp2i_airflow_library.schemas import Field, ProductActionPayload  # noqa: E402 - après add_project_to_path()
 
 from cos_service.schemas.clean_status import CleanStatus  # noqa: E402 - après add_project_to_path()
+from cos_service.schemas.immutability import Immutability  # noqa: E402 - après add_project_to_path()
 from cos_service.schemas.bucket_backup import BucketBackup  # noqa: E402 - après add_project_to_path()
 from cos_service.schemas.bucket_retention import BucketRetention  # noqa: E402 - après add_project_to_path()
 from cos_service.schemas.payload_object import provided  # noqa: E402 - après add_project_to_path()
@@ -47,6 +48,11 @@ SCHEDULING_DEFAULT = "2025-06-03T12:13:02.000"
 
 
 class BucketUpdatePayload(ProductActionPayload):
+    # Déclaré ``updatable`` à la création : le provider l'envoie à chaque update,
+    # et l'orchestrateur refuse tout paramètre absent du schéma du DAG
+    # ("DagParameterNotInSchema"). Il ne peut pas changer de famille (rétention,
+    # object lock) sur un bucket qui en a déjà une.
+    immutability_choice: Immutability | None = Field(default=None, updatable=True)
     retention: BucketRetention | None = Field(default=None, updatable=True)
     object_lock_duration_days: int | None = Field(default=None, updatable=True)
     object_lock_duration_years: int | None = Field(default=None, updatable=True)
@@ -129,6 +135,7 @@ def bucket_update():
                     has_contents,
                     backup,
                     session,
+                    immutability_choice=payload.immutability_choice,
                 )
             except DeclineDemandException as exc:
                 # Le service joint déjà ses erreurs avec " | " : on les fusionne
