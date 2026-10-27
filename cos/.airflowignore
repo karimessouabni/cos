@@ -1,0 +1,20 @@
+# Fichiers que le scheduler Airflow ne doit pas importer comme DAGs.
+# L'orchestrateur clone tout le dépôt sous /opt/airflow/dags/cos.<branche>/ ;
+# sans ce fichier, chaque test_*.py (qui contient les mots "airflow" et "dag")
+# est importé et casse sur `import pytest` ("Broken DAG").
+# Syntaxe : expressions régulières (DAG_IGNORE_FILE_SYNTAX=regexp, défaut Airflow 2).
+tests/
+tets/
+docs/
+alembic/
+terraform/
+cos-subscriptions/
+cos_service/services/
+cos_service/schemas/
+cos_service/models/
+cos_service/repository/
+cos_service/utils/
+cos_service/dependencies/
+cos_service/sql/
+conftest\.py
+__pycache__/
