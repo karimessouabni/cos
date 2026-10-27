@@ -11,11 +11,26 @@ from bp2i_airflow_library import add_project_to_path
 
 add_project_to_path()
 
+try:
+    from bp2i_airflow_library.version_compat import AIRFLOW_V_3_0_PLUS
+except ImportError:
+    AIRFLOW_V_3_0_PLUS = False
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import Context as AirflowContext  # noqa: F401
+    from airflow.sdk import TriggerRule, task, task_group  # noqa: F401
+else:
+    from airflow.decorators import task, task_group  # noqa: F401, AIR301
+    from airflow.utils.trigger_rule import TriggerRule  # noqa: F401, AIR301
+    from airflow.utils.context import Context as AirflowContext  # noqa: F401, AIR301
+
 import logging  # noqa: E402 - après add_project_to_path()
 from pathlib import Path  # noqa: E402 - après add_project_to_path()
 
 from airflow.sensors.date_time import DateTimeSensorAsync  # Airflow 2.x  # noqa: E402 - après add_project_to_path()
 
+from bp2i_airflow_library.config import ENVIRONMENT  # noqa: E402 - après add_project_to_path()
+from bp2i_airflow_library.connectors.reader import ReaderConnector  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.dag import product_action, step  # noqa: E402 - après add_project_to_path()
 from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_project_to_path()
     SASession,
@@ -24,6 +39,7 @@ from bp2i_airflow_library.dependencies import (  # noqa: E402 - après add_proje
     Vault,
     depends,
     payload_dependency,
+    reader_dependency,
     smart_schematics_backend_dependency,
     sqlalchemy_session_dependency,
     state_manager_dependency,
@@ -62,12 +78,21 @@ class BucketUpdatePayload(ProductActionPayload):
     scheduling_update_date_time: str = Field(default=SCHEDULING_DEFAULT)
 
 
-@product_action(Path(__file__).stem, tags=["cos"], payload=BucketUpdatePayload)
+@product_action(
+    # Sous Airflow 3 hors prod, le DAG s'enregistre en ".v2." pour cohabiter
+    # avec l'instance Airflow 2 pendant la migration.
+    action_id=Path(__file__).stem.replace(".v1.", ".v2.")
+    if AIRFLOW_V_3_0_PLUS and not ENVIRONMENT.endswith("prod")
+    else Path(__file__).stem,
+    tags=["cos"],
+    payload=BucketUpdatePayload,
+)
 def bucket_update():
     @step
     def validate_request(
         session: SASession = depends(sqlalchemy_session_dependency),
         payload: BucketUpdatePayload = depends(payload_dependency),
+        reader: ReaderConnector = depends(reader_dependency),
         vault: Vault = depends(vault_dependency),
     ) -> dict:
         """Checks everything the update refers to and declines with all the errors at once.
@@ -123,7 +148,7 @@ def bucket_update():
         # --- immutability rules, against the current bucket and its contents ---
         immutability = None
         if bucket["virtual_server_endpoint"]:
-            access_token = get_iam_access_token(get_cos_api_key(bucket, vault))
+            access_token = get_iam_access_token(get_cos_api_key(bucket, vault, reader))
             has_contents = check_bucket_has_contents(access_token, bucket)
             try:
                 immutability = validate_immutability_for_update_bucket(
@@ -177,6 +202,7 @@ def bucket_update():
     def update_tf_workspace(
         validated: dict,
         state_manager: StateManager = depends(state_manager_dependency),
+        reader: ReaderConnector = depends(reader_dependency),
         payload: BucketUpdatePayload = depends(payload_dependency),
         tf: SchematicsBackend = depends(smart_schematics_backend_dependency),
         vault: Vault = depends(vault_dependency),
@@ -211,7 +237,9 @@ def bucket_update():
         try:
             update_bucket_status(payload.subscription_id, SubscriptionStatus.ACTIVE, session)
             update_bucket_workspace_status(payload.subscription_id, Status.INPROGRESS, session)
-            update_bucket_workspace(payload=payload, workspace_details=workspace_details, vault=vault, tf=tf)
+            update_bucket_workspace(
+                payload=payload, workspace_details=workspace_details, vault=vault, tf=tf, reader=reader
+            )
             run_workspace(tf, workspace_id)
             return True
         except Exception:

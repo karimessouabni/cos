@@ -4,7 +4,7 @@
 exercées à travers ``validate_request``.
 """
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 
@@ -108,7 +108,7 @@ def test_compute_target_time_is_iso8601_in_paris_time(update_dag, make_payload):
 
 class TestValidateRequest:
     def run(self, update_dag, payload):
-        return update_dag.steps["validate_request"](session="session", payload=payload, vault="vault")
+        return update_dag.steps["validate_request"](session="session", payload=payload, reader="reader", vault="vault")
 
     def errors_of(self, update_dag, payload) -> list[str]:
         with pytest.raises(DeclineDemandException) as excinfo:
@@ -222,7 +222,7 @@ class TestEmptyObjectsAreIgnored:
     demande rien : il est ignoré, et le reste du payload s'applique."""
 
     def run(self, update_dag, payload):
-        return update_dag.steps["validate_request"](session="session", payload=payload, vault="vault")
+        return update_dag.steps["validate_request"](session="session", payload=payload, reader="reader", vault="vault")
 
     EMPTY = [{}, {"retention_enabled": None, "default_days": None}, BucketRetention()]
 
@@ -302,7 +302,8 @@ def validated(**overrides) -> dict:
 class TestUpdateTfWorkspace:
     def run(self, update_dag, payload, state_manager):
         return update_dag.steps["update_tf_workspace"](
-            validated=validated(), state_manager=state_manager, payload=payload, tf="tf", vault="vault", session="session"
+            validated=validated(), state_manager=state_manager, reader="reader", payload=payload, tf="tf",
+            vault="vault", session="session",
         )
 
     def test_refreshes_the_workspace_then_runs_it(self, update_dag, services, make_payload, state_manager):
@@ -317,7 +318,10 @@ class TestUpdateTfWorkspace:
         assert details["description"] == "my bucket"
         services.bucketService.update_bucket_status.assert_called_once_with("sub-1", SubscriptionStatus.ACTIVE, "session")
         services.bucketService.update_bucket_workspace_status.assert_called_once_with("sub-1", Status.INPROGRESS, "session")
-        services.workspaceService.update_bucket_workspace.assert_called_once()
+        services.workspaceService.update_bucket_workspace.assert_called_once_with(
+            payload=ANY, workspace_details=services.workspaceService.build_bucket_workspace_details.return_value,
+            vault="vault", tf="tf", reader="reader",
+        )
         services.schematics_service.run_workspace.assert_called_once_with("tf", "ws-1")
         services.backup_vault_service.get_backup_vault_by_sub_id.assert_not_called()
 
