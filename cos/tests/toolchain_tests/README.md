@@ -254,7 +254,7 @@ Déroulé d'un `tofu test` :
 | `20_bucket_lifecycle` | bucket standard | create → update versioning → update permissions → destroy |
 | `21_storage_classes` | vault, cold, smart | create ×3 → destroy |
 | `30_retention` | rétention jours, années et format historique `default` / `minimum` / `maximum` (ADR 0001) | create ×3 → update des bornes en jours → destroy |
-| `31_retention_choice_update` | **incident prod** : `immutability_choice` renvoyé par le provider à chaque update (bucket sans immutabilité, rétention jours, rétention années) | create ×3 → update permissions → update des bornes, le choix envoyé à chaque run, sans recréation → destroy |
+| `31_retention_choice_update` | **incident prod** : `immutability_choice` renvoyé par le provider à chaque update | create (rétention) → update des permissions, le choix renvoyé, sans recréation → destroy |
 | `40_object_lock` | object lock en jours et en années | create ×2 → update des durées (5 ans = plafond) → destroy |
 | `50_backup` | backup vault, bucket sauvegardé | vault → bucket → update rétention backup → désactivation → destroy |
 | `60_refused_retention_over_five_years` | **refus** : 1900 jours > 5 ans | un run, doit être refusé |
