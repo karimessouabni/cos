@@ -107,6 +107,11 @@ dropdb cos_service && createdb cos_service && python -m alembic upgrade head
   lancé est celui du Python système 3.9, pas celui du venv. Installer Alembic
   dans `.venv` et lancer `python -m alembic ...`, qui ne peut pas se tromper
   d'interpréteur. `/usr/bin/python3 -m pip uninstall alembic` retire l'ancien.
+- **`ModuleNotFoundError: No module named 'pytz'`** (ou un autre paquet
+  importé par `cos_service/models/*.py`) : le venv n'a pas toutes les
+  dépendances transitives d'Airflow. `python -m pip install pytz` suffit pour
+  Alembic ; la vraie correction est de déclarer le paquet dans
+  `pyproject.toml` (`poetry add pytz`).
 - **`ModuleNotFoundError: bp2i_airflow_library`** : mauvais venv, activer
   `.venv` et non `.venv-tests`.
 - **`KeyError: 'DB_URL'`** : la variable n'est pas exportée dans ce shell.
