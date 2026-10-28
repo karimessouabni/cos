@@ -50,7 +50,9 @@ psql -d postgres -c "alter database cos_service owner to cos;"
 ```bash
 cd ~/PycharmProjects/cos
 source .venv/bin/activate
-pip show alembic psycopg2-binary >/dev/null || pip install alembic psycopg2-binary
+python --version                                    # 3.12.x attendu, pas le 3.9 système
+python -m pip install alembic psycopg2-binary       # ou : poetry add alembic psycopg2-binary
+which alembic                                       # doit pointer sur .venv/bin/alembic
 
 export PYTHONPATH="$PWD"          # rend cos_service.models.base importable depuis env.py (alembic.ini a aussi prepend_sys_path = .)
 
@@ -66,20 +68,20 @@ Pour ne pas retaper ces exports à chaque fois, les mettre dans un fichier
 ## 3. Appliquer les migrations
 
 ```bash
-alembic heads            # doit afficher UNE seule tête (voir « Pièges »)
-alembic upgrade head     # applique toutes les révisions
-alembic current          # révision appliquée sur la base
+python -m alembic heads            # doit afficher UNE seule tête (voir « Pièges »)
+python -m alembic upgrade head     # applique toutes les révisions
+python -m alembic current          # révision appliquée sur la base
 psql -d cos_service -c '\dt'
 ```
 
 ## 4. Commandes du quotidien
 
 ```bash
-alembic history --verbose                              # chaîne des révisions
-alembic revision --autogenerate -m "description"       # nouvelle révision à partir du diff modèles / base
-alembic upgrade head                                   # l'appliquer
-alembic downgrade -1                                   # revenir d'un cran
-alembic upgrade head --sql > /tmp/migration.sql        # SQL seul, sans l'exécuter (revue)
+python -m alembic history --verbose                              # chaîne des révisions
+python -m alembic revision --autogenerate -m "description"       # nouvelle révision à partir du diff modèles / base
+python -m alembic upgrade head                                   # l'appliquer
+python -m alembic downgrade -1                                   # revenir d'un cran
+python -m alembic upgrade head --sql > /tmp/migration.sql        # SQL seul, sans l'exécuter (revue)
 ```
 
 Toujours relire une révision générée par `--autogenerate` avant de la
@@ -90,7 +92,7 @@ table à supprimer.
 ## 5. Repartir de zéro
 
 ```bash
-dropdb cos_service && createdb cos_service && alembic upgrade head
+dropdb cos_service && createdb cos_service && python -m alembic upgrade head
 ```
 
 ## Pièges
@@ -101,6 +103,10 @@ dropdb cos_service && createdb cos_service && alembic upgrade head
   refuse. Supprimer la révision vide, ou la chaîner sur l'autre.
 - **`ModuleNotFoundError: cos_service`** : `PYTHONPATH` n'est pas positionné,
   ou la commande n'est pas lancée depuis la racine du projet.
+- **Traceback dans `/Users/<login>/Library/Python/3.9/...`** : le `alembic`
+  lancé est celui du Python système 3.9, pas celui du venv. Installer Alembic
+  dans `.venv` et lancer `python -m alembic ...`, qui ne peut pas se tromper
+  d'interpréteur. `/usr/bin/python3 -m pip uninstall alembic` retire l'ancien.
 - **`ModuleNotFoundError: bp2i_airflow_library`** : mauvais venv, activer
   `.venv` et non `.venv-tests`.
 - **`KeyError: 'DB_URL'`** : la variable n'est pas exportée dans ce shell.
