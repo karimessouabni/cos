@@ -4,6 +4,7 @@ Ce dossier contient la configuration Alembic du schéma PostgreSQL `cos_service`
 
 | Fichier | Rôle |
 |---|---|
+| `../alembic.ini` | Configuration Alembic, à la racine du projet : `script_location = alembic`, `prepend_sys_path = .`, `sqlalchemy.url` vide |
 | `env.py` | Charge `cos_service.models.base.Base` (`target_metadata`) et lit l'URL de la base dans la variable d'environnement `DB_URL` quand `sqlalchemy.url` est vide dans `alembic.ini` |
 | `script.py.mako` | Gabarit des fichiers de révision |
 | `versions/` | Les révisions, une par changement de schéma |
@@ -22,7 +23,9 @@ SQLAlchemy et la lib `bp2i`. Le venv de tests ne suffit pas.
 
 ## 1. Base PostgreSQL locale
 
-Postgres.app démarre un serveur « PostgreSQL 17 » sur le port 5432. Ne pas
+Installer Postgres.app (glisser l'application dans `Applications`, pas de droits
+admin nécessaires), l'ouvrir et cliquer sur **Initialize** si aucun serveur
+n'existe encore. Postgres.app démarre un serveur « PostgreSQL 17 » sur le port 5432. Ne pas
 créer un second serveur sur le même port : il ne démarrerait pas. Il suffit de
 créer une base dans le serveur existant.
 
@@ -42,14 +45,6 @@ psql -d postgres -c "create role cos with login password 'cos';"
 psql -d postgres -c "alter database cos_service owner to cos;"
 ```
 
-Sans Postgres.app, un conteneur fait le même travail :
-
-```bash
-docker run -d --name cos-pg -p 5432:5432 \
-  -e POSTGRES_USER=cos -e POSTGRES_PASSWORD=cos -e POSTGRES_DB=cos_service \
-  postgres:17
-```
-
 ## 2. Préparer le shell
 
 ```bash
@@ -57,13 +52,16 @@ cd ~/PycharmProjects/cos
 source .venv/bin/activate
 pip show alembic psycopg2-binary >/dev/null || pip install alembic psycopg2-binary
 
-export PYTHONPATH="$PWD"          # rend cos_service.models.base importable depuis env.py
+export PYTHONPATH="$PWD"          # rend cos_service.models.base importable depuis env.py (alembic.ini a aussi prepend_sys_path = .)
 
 # rôle de la session macOS (Postgres.app, sans mot de passe) :
 export DB_URL="postgresql+psycopg2://h90871@localhost:5432/cos_service"
-# ou rôle cos / docker :
+# ou avec le rôle cos créé à l'étape 1 :
 # export DB_URL="postgresql+psycopg2://cos:cos@localhost:5432/cos_service"
 ```
+
+Pour ne pas retaper ces exports à chaque fois, les mettre dans un fichier
+`.env.local` non versionné et le charger avec `source .env.local`.
 
 ## 3. Appliquer les migrations
 
