@@ -1,20 +1,26 @@
-# Incident prod : un bucket créé sans `immutability_choice` (ancien client,
-# rétention seule), puis un update fait avec un provider qui envoie désormais
-# `immutability_choice`, déclaré `updatable`. Tant que le DAG update ne le
-# déclarait pas, l'orchestrateur refusait la demande
-# ("DagParameterNotInSchema") : aucun update de ces buckets ne passait.
+# Incident prod : `immutability_choice` est déclaré `updatable` à la création,
+# donc le provider orchestrator le renvoie dans chaque update. Tant que le DAG
+# update ne le déclarait pas, l'orchestrateur refusait la demande
+# ("DagParameterNotInSchema") : aucun update de bucket ne passait.
 #
-# Un seul bucket : create en rétention sans choix, puis update des permissions
-# avec le choix ajouté au payload. L'update doit passer sans recréer le bucket.
+# Le choix doit être présent dès le create : une clé qui apparaît seulement à
+# l'update est vue par le provider comme un remplacement, qu'il interdit
+# ("Resource safety: replace is forbidden upon apply"), et l'orchestrateur
+# n'est jamais appelé. Ce cas-là, buckets d'un ancien client sans choix dans
+# leur payload d'origine, est un sujet provider, pas DAG.
+#
+# Un seul bucket en rétention, créé avec son choix, puis un update des
+# permissions où le choix est renvoyé tel quel. L'update doit passer sans
+# recréer le bucket.
 
 variables {
   scenario = "retention-choice-update"
 }
 
-run "create_without_choice" {
+run "create" {
   variables {
     buckets = {
-      bucket = { retention = { minimum_days = 1, default_days = 2, maximum_days = 3 } }
+      bucket = { immutability_choice = "retention_daily", retention = { minimum_days = 1, default_days = 2, maximum_days = 3 } }
     }
   }
   assert {
@@ -23,14 +29,14 @@ run "create_without_choice" {
   }
 }
 
-run "update_adds_the_choice" {
+run "update_with_same_choice" {
   variables {
     buckets = {
       bucket = { immutability_choice = "retention_daily", enable_custom_permissions = true, retention = { minimum_days = 1, default_days = 2, maximum_days = 3 } }
     }
   }
   assert {
-    condition     = orchestrator_subscription_cosbucket_v1.bucket["bucket"].name == run.create_without_choice.bucket_names["bucket"]
-    error_message = "L'update qui ajoute immutability_choice a recréé le bucket."
+    condition     = orchestrator_subscription_cosbucket_v1.bucket["bucket"].name == run.create.bucket_names["bucket"]
+    error_message = "L'update avec immutability_choice a recréé le bucket."
   }
 }
