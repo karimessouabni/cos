@@ -71,7 +71,11 @@ def _legacy_field(key: str):
 
 
 class BucketRetention(BaseModel):
-    retention_enabled: bool = False
+    # Nullable dans le contrat : le provider renvoie à l'update toutes les
+    # propriétés du schéma, null comprise, et un bool strict y serait refusé par
+    # l'orchestrateur. Un null est retiré par _auto_enable_retention : après
+    # validation la valeur est toujours un bool.
+    retention_enabled: bool | None = False
     default_days: int | None = None
     default_years: int | None = None
     minimum_days: int | None = None

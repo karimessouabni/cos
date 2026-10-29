@@ -225,6 +225,14 @@ class TestLegacyFormat:
         assert "legacy_format" not in legacy.model_dump(by_alias=True, exclude_none=True)
         assert "legacy_format" not in BucketRetention.model_json_schema()["properties"]
 
+    def test_retention_enabled_is_nullable_in_the_contract(self):
+        """Même raison que legacy_format : le provider peut renvoyer null à l'update."""
+        schema = BucketRetention.model_json_schema()["properties"]["retention_enabled"]
+
+        assert {"type": "null"} in schema["anyOf"]
+        assert BucketRetention.model_validate({"retention_enabled": None}).retention_enabled is False
+        assert BucketRetention.model_validate({"retention_enabled": None, "default_days": 2}).retention_enabled is True
+
     def test_a_null_legacy_format_sent_back_by_the_provider_is_ignored(self):
         """À l'update, le provider renvoie le payload complet, legacy_format: null compris."""
         r = BucketRetention.model_validate(
