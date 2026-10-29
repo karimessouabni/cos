@@ -493,6 +493,19 @@ class TestSaveBucketInDb:
             "unit": "years", "default_years": 1, "minimum_years": 1, "maximum_years": 2,
         }
 
+    def test_the_choice_sent_by_the_client_is_echoed_as_is(self, dag, happy_services, make_payload, state_manager):
+        """Le provider compare le choix envoyé à celui du state : même valeur, pas la famille."""
+        immutability = fresh_immutability(choice=Immutability.RETENTION)  # famille calculée
+        immutability["retention"] = {"retention_enabled": True, "default": 2, "minimum": 1, "maximum": 3}
+        payload = make_payload(
+            immutability_choice=Immutability.RETENTION_DAILY,
+            retention=BucketRetention(retention_enabled=True, default_days=2, minimum_days=1, maximum_days=3),
+        )
+
+        self.run(dag, payload, state_manager, immutability)
+
+        assert state_manager.push_state.call_args.args[0]["immutability_choice"] == "retention_daily"
+
     def test_defaults_are_pushed_even_when_the_client_sent_nothing(self, dag, happy_services, make_payload, state_manager):
         self.run(dag, make_payload(), state_manager)
 

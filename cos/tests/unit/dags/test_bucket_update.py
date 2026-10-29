@@ -12,6 +12,7 @@ from bp2i_airflow_library.exceptions.flow_control import DeclineDemandException
 from cos_service.schemas.bucket_backup import BucketBackup
 from cos_service.schemas.bucket_retention import BucketRetention
 from cos_service.schemas.clean_status import CleanStatus
+from cos_service.schemas.immutability import Immutability
 from cos_service.schemas.status import Status
 from cos_service.schemas.subscription_status import SubscriptionStatus
 
@@ -357,6 +358,32 @@ class TestSaveBucketInDb:
             retention_unit=services.bucketService.retention_unit_of.return_value,
         )
         services.bucketService.update_bucket_workspace_status.assert_called_once_with("sub-1", Status.SUCCESS, "session")
+
+    def test_the_choice_sent_by_the_client_is_echoed_as_is(self, update_dag, services, make_payload, state_manager):
+        """Le provider compare le choix qu'il a envoyé à celui du state : retention_daily
+        envoyé sur un bucket dont le service calcule la famille "retention" doit
+        relire retention_daily ("Provider produced inconsistent result after apply" sinon)."""
+        data = validated()
+        data["immutability"]["immutability_choice"] = "retention"
+
+        update_dag.steps["save_bucket_in_db"](
+            validated=data, is_update_ws_done=True, payload=make_payload(immutability_choice=Immutability.RETENTION_DAILY),
+            state_manager=state_manager, session="session",
+        )
+
+        assert state_manager.push_state.call_args.args[0]["immutability_choice"] == "retention_daily"
+
+    @pytest.mark.parametrize("sent", [None, Immutability.NONE, "none"])
+    def test_without_a_choice_the_state_carries_the_effective_one(self, update_dag, services, make_payload, state_manager, sent):
+        data = validated()
+        data["immutability"]["immutability_choice"] = "retention"
+
+        update_dag.steps["save_bucket_in_db"](
+            validated=data, is_update_ws_done=True, payload=make_payload(immutability_choice=sent),
+            state_manager=state_manager, session="session",
+        )
+
+        assert state_manager.push_state.call_args.args[0]["immutability_choice"] == "retention"
 
     def test_legacy_retention_format_pushes_a_deprecation_notice(self, update_dag, services, make_payload, state_manager):
         data = validated()

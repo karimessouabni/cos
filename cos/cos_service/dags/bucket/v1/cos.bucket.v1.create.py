@@ -380,7 +380,11 @@ def bucket_create():
     ) -> dict | None:
         from cos_service.services.bucketService import complete_bucket_create
         from cos_service.services.contextService import get_account_sub_type
-        from cos_service.services.immutability_service import deprecations_for_client, retention_state_for_client
+        from cos_service.services.immutability_service import (
+            deprecations_for_client,
+            immutability_choice_for_client,
+            retention_state_for_client,
+        )
 
         bucket_name = apply_tf_result["bucket_name"]["value"]
         wkld_account_sub_type = get_account_sub_type(reader=reader)
@@ -411,7 +415,11 @@ def bucket_create():
             "enable_custom_permissions": payload.enable_custom_permissions,
             "clean_status": Status.SUCCESS.value,
             "lifecycle_policy_rule_enabled": False,
-            "immutability_choice": immutability["immutability_choice"],
+            # Le choix tel que le client l'a envoyé (le provider le compare au sien),
+            # le choix effectif sinon.
+            "immutability_choice": immutability_choice_for_client(
+                payload.immutability_choice, immutability["immutability_choice"]
+            ),
             # Clés historiques en jours conservées, unité et bornes saisies ajoutées.
             "retention": retention_state_for_client(payload.retention, immutability["retention"]),
             "object_locking_enabled": immutability["object_locking_enabled"],
