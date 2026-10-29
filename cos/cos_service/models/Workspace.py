@@ -10,10 +10,10 @@ clé étrangère par type, une seule renseignée).
 """
 import logging
 
-from sqlalchemy import JSON, Column, ForeignKey, Integer, Sequence, Text
+from sqlalchemy import JSON, Column, ForeignKey, Sequence, Text
 
 from cos_service.models._dict import row_to_dict
-from cos_service.models.base import Base
+from cos_service.models.base import Base, BigId
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class Workspace(Base):
     __tablename__ = "workspace"
 
-    id = Column(Integer, Sequence("workspace_id_seq"), primary_key=True)
+    id = Column(BigId, Sequence("workspace_id_seq"), primary_key=True)
     workspace_id = Column(Text, nullable=True)
     cos_subscription_id = Column(Text, ForeignKey("cos_instance.subscription_id"))
     bucket_subscription_id = Column(Text, ForeignKey("bucket.subscription_id"))

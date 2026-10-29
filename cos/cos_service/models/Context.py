@@ -3,10 +3,10 @@ d'une instance COS. ``to_dict()`` expose désormais toutes les colonnes, ``id`` 
 ``cos_subscription_id`` compris (l'original les omettait)."""
 import logging
 
-from sqlalchemy import Column, ForeignKey, Integer, Sequence, Text
+from sqlalchemy import Column, ForeignKey, Sequence, Text
 
 from cos_service.models._dict import row_to_dict
-from cos_service.models.base import Base
+from cos_service.models.base import Base, BigId
 
 logger = logging.getLogger(__name__)
 
@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 class Context(Base):
     __tablename__ = "context"
 
-    id = Column(Integer, Sequence("context_id_seq"), primary_key=True)
+    id = Column(BigId, Sequence("context_id_seq"), primary_key=True)
     cos_subscription_id = Column(Text, ForeignKey("cos_instance.subscription_id"))
-    realm = Column(Text, nullable=False)
-    app_code = Column(Text, nullable=False)
-    code_bu = Column(Text, nullable=False)
+    realm = Column(Text, nullable=True)
+    app_code = Column(Text, nullable=True)
+    code_bu = Column(Text, nullable=True)
     buhub_account_id = Column(Text, nullable=True)
     buhub_account_number = Column(Text, nullable=True)
     buhub_account_name = Column(Text, nullable=True)

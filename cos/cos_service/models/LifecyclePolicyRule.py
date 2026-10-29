@@ -5,7 +5,7 @@ from sqlalchemy import TIMESTAMP, Column, ForeignKey, Integer, Sequence, Text
 from sqlalchemy.orm import relationship
 
 from cos_service.models._dict import row_to_dict
-from cos_service.models.base import Base
+from cos_service.models.base import Base, BigId
 
 logger = logging.getLogger(__name__)
 
@@ -13,15 +13,15 @@ logger = logging.getLogger(__name__)
 class LifecyclePolicyRule(Base):
     __tablename__ = "lifecycle_policy_rule"
 
-    id = Column(Integer, Sequence("lifecycle_policy_rule_id_seq"), primary_key=True)
+    id = Column(BigId, Sequence("lifecycle_policy_rule_id_seq"), primary_key=True)
     bucket_subscription_id = Column(Text, ForeignKey("bucket.subscription_id"))
-    rule_id = Column(Text, nullable=False)
+    rule_id = Column(Text, nullable=True)
     filter_prefix = Column(Text, nullable=True)
-    status = Column(Text, nullable=False)
-    expiration_days = Column(Integer, nullable=False)
+    status = Column(Text, nullable=True)
+    expiration_days = Column(Integer, nullable=True)
     non_current_version_expiration_days = Column(Integer, nullable=True)
-    created_at = Column(TIMESTAMP, nullable=False)
-    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP, nullable=True)
+    created_by = Column(Text, nullable=True)
     deleted_at = Column(TIMESTAMP, nullable=True)
     deleted_by = Column(Text, nullable=True)
 

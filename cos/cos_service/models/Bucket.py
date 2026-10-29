@@ -12,6 +12,9 @@ Améliorations par rapport au modèle d'origine :
 - une relation absente vaut None, jamais une exception ;
 - colonnes de la période de grâce du clean (ADR 0003) et unité de rétention
   saisie par le client (ADR 0001) ;
+- ``nullable=True`` partout sauf la clé : les scripts SQL manuels n'ont posé
+  aucun ``NOT NULL`` (``alembic check`` contre pprod), et SQLAlchemy ne vérifie
+  pas ``nullable`` à l'insertion, seule la base le fait ;
 - colonnes texte en ``Text`` : la base réelle (tables créées par les scripts SQL
   manuels) n'a jamais eu de ``varchar(n)``, et ``String(n)`` dans le modèle
   faisait générer à chaque autogenerate des ``ALTER COLUMN ... TYPE`` indésirables.
@@ -33,44 +36,43 @@ class Bucket(Base):
     __tablename__ = "bucket"
 
     subscription_id = Column(Text, nullable=False, primary_key=True)
-    name = Column(Text, nullable=False)
+    name = Column(Text, nullable=True)
     bucket_crn = Column(Text, nullable=True)
-    storage_class = Column(Text, nullable=False)
-    region = Column(Text, nullable=False)
-    action = Column(Text, nullable=False)
-    status = Column(Text, nullable=False)
-    # Déclarée NOT NULL dans l'original alors que son constructeur l'écrivait à
-    # None à l'insertion : aligné sur ce que la base accepte réellement.
+    bucket_etag = Column(Text, nullable=True)  # présente en pprod, absente de l'ancien modèle
+    storage_class = Column(Text, nullable=True)
+    region = Column(Text, nullable=True)
+    action = Column(Text, nullable=True)
+    status = Column(Text, nullable=True)
     clean_status = Column(Text, nullable=True)
     description = Column(Text, nullable=True)
     activity_tracker_crn = Column(Text, nullable=True)
     monitoring_crn = Column(Text, nullable=True)
     kms_crn = Column(Text, nullable=True)
-    created_at = Column(TIMESTAMP, nullable=False)
-    created_by = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP, nullable=True)
+    created_by = Column(Text, nullable=True)
     updated_at = Column(TIMESTAMP, nullable=True)
     updated_by = Column(Text, nullable=True)
     cos_subscription_id = Column(Text, ForeignKey("cos_instance.subscription_id"))
     cos = relationship("Cos", uselist=False, backref="bucket")
     workspace = relationship("Workspace", uselist=False, backref="bucket")
-    virtual_server_endpoint = Column(Text, nullable=False)
-    environment = Column(Text, nullable=False)
+    virtual_server_endpoint = Column(Text, nullable=True)
+    environment = Column(Text, nullable=True)
 
     # Rétention : le jour est l'unité canonique (ADR 0001). ``retention_unit``
     # garde l'unité saisie par le client ("days" / "years") pour la lui rendre.
-    retention_enabled = Column(Boolean, nullable=False)
+    retention_enabled = Column(Boolean, nullable=True)
     retention_default = Column(Integer, nullable=True)
     retention_minimum = Column(Integer, nullable=True)
     retention_maximum = Column(Integer, nullable=True)
     retention_unit = Column(Text, nullable=True)
 
-    enable_custom_permissions = Column(Boolean, nullable=False)
+    enable_custom_permissions = Column(Boolean, nullable=True)
     object_lock_duration_days = Column(Integer, nullable=True)
     object_lock_duration_years = Column(Integer, nullable=True)
-    has_expiration_rule = Column(Boolean, nullable=False)
+    has_expiration_rule = Column(Boolean, nullable=True)
     expiration_rule_created_at = Column(TIMESTAMP, nullable=True)
-    object_versioning_enabled = Column(Boolean, nullable=False)
-    backup_enabled = Column(Boolean, nullable=False)
+    object_versioning_enabled = Column(Boolean, nullable=True)
+    backup_enabled = Column(Boolean, nullable=True)
     backup_vault_subscription_id = Column(Text, ForeignKey("backup_vault.subscription_id"))
     backup_vault = relationship("BackupVault", uselist=False, backref="bucket")
     backup_retention_days = Column(Integer, nullable=True)

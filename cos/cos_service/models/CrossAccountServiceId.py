@@ -22,11 +22,11 @@ class CrossAccountServiceId(Base):
     action = Column(Text, nullable=True)
     vault_api_key_path = Column(Text, nullable=True)
     secret_name = Column(Text, nullable=True)
-    created_at = Column(TIMESTAMP, nullable=False)
-    created_by = Column(Text, nullable=False)
-    status = Column(Text, nullable=False)
-    region = Column(Text, nullable=False)
-    environment = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP, nullable=True)
+    created_by = Column(Text, nullable=True)
+    status = Column(Text, nullable=True)
+    region = Column(Text, nullable=True)
+    environment = Column(Text, nullable=True)
 
     workspace = relationship("Workspace", uselist=False, backref="cross_account_service_id")
 
