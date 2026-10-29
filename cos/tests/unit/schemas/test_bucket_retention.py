@@ -194,7 +194,9 @@ class TestLegacyFormat:
             assert f"{key}_days" in properties[key]["description"]
             assert "2027-03-31" in properties[key]["description"]
         assert "legacy_default" not in properties  # pas de préfixe legacy_ ni d'alias
-        assert "legacy_format" in properties  # champ interne, sans alias : documenté tel quel
+        # Marqueur interne, hors contrat : le provider renvoie chaque propriété du
+        # schéma à l'update (null si inconnue), un bool non nullable y serait refusé.
+        assert "legacy_format" not in properties
 
     def test_legacy_values_are_type_checked_under_their_own_name(self):
         with pytest.raises(ValidationError, match="default"):
@@ -221,6 +223,17 @@ class TestLegacyFormat:
         assert current.legacy_format is False
         assert "legacy_format" not in legacy.model_dump()
         assert "legacy_format" not in legacy.model_dump(by_alias=True, exclude_none=True)
+        assert "legacy_format" not in BucketRetention.model_json_schema()["properties"]
+
+    def test_a_null_legacy_format_sent_back_by_the_provider_is_ignored(self):
+        """À l'update, le provider renvoie le payload complet, legacy_format: null compris."""
+        r = BucketRetention.model_validate(
+            {"retention_enabled": True, "default_days": 30, "minimum_days": 10, "maximum_days": 60,
+             "legacy_format": None}
+        )
+
+        assert r.legacy_format is False
+        assert r.value("default") == 30
 
     def test_raw_dict_like_the_orchestrator_payload(self):
         r = BucketRetention.model_validate({"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 60})
