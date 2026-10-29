@@ -362,6 +362,69 @@ class TestComputeBucketImmutabilityForUpdate:
         assert "no backup vault attached" in caplog.text
 
 
+class TestResolveStateEcho:
+    """Payload reçu avec les deux formats et des valeurs différentes (jours)."""
+    STORED = dict(retention_enabled=True, retention_default=30, retention_minimum=10, retention_maximum=60)
+
+    def payload(self, **suffixed):
+        bounds = {"default_days": 30, "minimum_days": 10, "maximum_days": 60, **suffixed}
+        return BucketRetention.model_validate({"retention_enabled": True, "default": 30, "minimum": 10, "maximum": 60, **bounds})
+
+    def test_no_echo_is_returned_untouched(self):
+        r = retention_days()
+        assert svc.resolve_state_echo(r, bucket_row(**self.STORED)) is r
+        assert svc.resolve_state_echo(None, bucket_row()) is None
+
+    def test_legacy_keys_equal_to_the_stored_retention_are_the_state_echo(self):
+        """Le client (format suffixé) a changé default_days ; default est l'écho du state."""
+        resolved = svc.resolve_state_echo(self.payload(default_days=40), bucket_row(**self.STORED))
+
+        assert resolved is not None
+        assert resolved.value("default") == 40
+        assert resolved.legacy_echo == {}
+        assert resolved.legacy_format is False
+
+    def test_suffixed_keys_equal_to_the_stored_retention_mean_a_legacy_client_changed_default(self):
+        """Le client (format historique) a changé default ; default_days est l'écho du state."""
+        payload = BucketRetention.model_validate(
+            {"retention_enabled": True, "default": 40, "minimum": 10, "maximum": 60,
+             "default_days": 30, "minimum_days": 10, "maximum_days": 60}
+        )
+
+        resolved = svc.resolve_state_echo(payload, bucket_row(**self.STORED))
+
+        assert resolved is not None
+        assert (resolved.value("minimum"), resolved.value("default"), resolved.value("maximum")) == (10, 40, 60)
+        assert resolved.legacy_format is True  # notice de dépréciation conservée pour ce client
+        assert resolved.legacy_echo == {}
+
+    def test_neither_side_matches_the_stored_retention_is_a_real_mix(self):
+        payload = BucketRetention.model_validate(
+            {"retention_enabled": True, "default": 45, "minimum": 10, "maximum": 60,
+             "default_days": 40, "minimum_days": 10, "maximum_days": 60}
+        )
+
+        with pytest.raises(DeclineDemandException, match="not both"):
+            svc.resolve_state_echo(payload, bucket_row(**self.STORED))
+
+    def test_at_creation_there_is_no_state_to_echo(self):
+        with pytest.raises(DeclineDemandException, match="not both"):
+            svc.resolve_state_echo(self.payload(default_days=40), None)
+
+    def test_update_validation_resolves_the_echo_before_the_rules(self):
+        row = bucket_row(**self.STORED)
+
+        result = svc.validate_immutability_for_update_bucket(
+            row, self.payload(default_days=40), None, None, None, False, None, session=None,
+        )
+
+        assert result["retention"]["default"] == 40
+
+    def test_creation_declines_a_divergent_payload(self):
+        with pytest.raises(DeclineDemandException, match="not both"):
+            compute(choice=Immutability.RETENTION, retention=self.payload(default_days=40))
+
+
 class TestValidateImmutabilityForUpdate:
     def validate(self, row, retention=None, days=None, years=None, versioning=None,
                  has_contents=False, backup=None, choice=None):

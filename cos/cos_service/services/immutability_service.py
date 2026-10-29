@@ -122,6 +122,7 @@ def compute_bucket_new_immutability(
     Un choix absent (None) est traité comme NONE : c'est le seul endroit où
     la valeur est normalisée, tout ce qui est appelé en dessous reçoit un enum.
     """
+    payload_retention = resolve_state_echo(payload_retention, None)
     if immutability_choice is None or immutability_choice is Immutability.NONE:
         immutability_choice = _infer_immutability_choice(
             payload_retention, object_lock_duration_days, object_lock_duration_years
@@ -259,6 +260,36 @@ def check_retention_bounds(unit, default, minimum, maximum, errors) -> None:
         )
 
 
+def resolve_state_echo(retention: BucketRetention | None, bucket: dict | None) -> BucketRetention | None:
+    """Tranche un payload de rétention reçu avec les deux formats et des valeurs différentes.
+
+    Le provider renvoie à l'update le state entier de la souscription : les clés
+    historiques (``default`` … en jours) et les bornes suffixées. Quand elles
+    divergent, l'une est l'écho du state, l'autre le changement du client :
+    - les clés historiques valent la rétention en base : écho, les bornes
+      suffixées sont le changement, le payload est gardé tel quel ;
+    - les bornes suffixées valent la rétention en base : un client au format
+      historique a modifié ``default`` … ; ses valeurs sont reprises en jours,
+      avec la notice de dépréciation ;
+    - ni l'une ni l'autre, ou pas de bucket (création) : vrai mélange, refusé.
+    """
+    if retention is None or not retention.legacy_echo:
+        return retention
+    echo = retention.legacy_echo
+    stored = {k: (bucket or {}).get(f"retention_{k}") for k in echo} if bucket else {}
+    if bucket and all(stored[k] == v for k, v in echo.items()):
+        return retention.without_legacy_echo()
+    if bucket and all(stored[k] == getattr(retention, f"{k}_{DAYS}") for k in echo):
+        legacy = {k: getattr(retention, f"{k}_{DAYS}") for k in _RETENTION_KEYS}
+        legacy.update(echo)
+        return BucketRetention.model_validate({"retention_enabled": retention.retention_enabled, **legacy})
+    raise DeclineDemandException(
+        "Retention must use either the legacy fields (default, minimum, maximum) "
+        "or the unit-suffixed fields (default_days, minimum_days, maximum_days), not both: "
+        f"the request carries {echo} and {retention.as_sent()}."
+    )
+
+
 def validate_immutability_for_update_bucket(
         bucket: dict,
         retention: BucketRetention | None,
@@ -280,6 +311,7 @@ def validate_immutability_for_update_bucket(
     [RECONSTITUTION] Docstring repliée sur la photo (lignes 203-208) :
     seule la première ligne était visible. Le corps ci-dessous est complet.
     """
+    retention = resolve_state_echo(retention, bucket)
     existing_immutability = compute_bucket_immutability_for_update_bucket(bucket, session)
     existing_immutability_choice = compute_bucket_immutability_choice(bucket)
     errors = []
