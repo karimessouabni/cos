@@ -24,9 +24,9 @@ depends_on = None
 def upgrade() -> None:
     op.add_column("bucket", sa.Column("clean_requested_at", sa.TIMESTAMP(timezone=True), nullable=True))
     op.add_column("bucket", sa.Column("clean_execute_at", sa.TIMESTAMP(timezone=True), nullable=True))
-    op.add_column("bucket", sa.Column("clean_cbr_workspace_id", sa.String(length=100), nullable=True))
-    op.add_column("bucket", sa.Column("retention_unit", sa.String(length=5), nullable=True))
-    op.alter_column("bucket", "clean_status", existing_type=sa.String(length=20), nullable=True)
+    op.add_column("bucket", sa.Column("clean_cbr_workspace_id", sa.Text(), nullable=True))
+    op.add_column("bucket", sa.Column("retention_unit", sa.Text(), nullable=True))
+    op.alter_column("bucket", "clean_status", existing_type=sa.Text(), nullable=True)
 
 
 def downgrade() -> None:

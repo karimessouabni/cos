@@ -20,17 +20,12 @@ import logging
 from sqlalchemy import TIMESTAMP, Column, ForeignKey, Text
 from sqlalchemy.orm import relationship
 
+from cos_service.models._dict import row_to_dict
 from cos_service.models.base import Base
 
 logger = logging.getLogger(__name__)
 
 RELATIONS = ("cos", "workspace")
-
-
-def _as_dict(row):
-    if row is None:
-        return None
-    return row.to_dict() if hasattr(row, "to_dict") else dict(row)
 
 
 class BackupVault(Base):
@@ -60,10 +55,7 @@ class BackupVault(Base):
         super().__init__(**columns)
 
     def to_dict(self) -> dict:
-        data = {column.name: getattr(self, column.name) for column in self.__table__.columns}
-        for name in RELATIONS:
-            data[name] = _as_dict(getattr(self, name))
-        return data
+        return row_to_dict(self, RELATIONS)
 
     def __iter__(self):
         yield from self.to_dict().items()

@@ -2,14 +2,12 @@
 
 Le reste de la suite tourne sur des doublures de ``sqlalchemy`` et des modèles
 (conftest) : cette fixture les écarte le temps du test et importe les vrais
-modules depuis le disque. Les modèles liés absents du dépôt (Cos, Workspace)
-sont déclarés ici a minima, sur la même Base : c'est aussi ce
-qui prouve que les ``relationship("Nom")`` se résolvent quand les classes sont
+modules depuis le disque. Tous les modèles sont réels : c'est aussi ce qui
+prouve que les ``relationship("Nom")`` se résolvent quand les classes sont
 chargées.
 """
 import importlib
 import sys
-from typing import Any
 from datetime import datetime, timezone
 
 import pytest
@@ -28,34 +26,13 @@ def _load_real_models() -> dict:
     orm = importlib.import_module("sqlalchemy.orm")
     models = importlib.import_module("cos_service.models")
     bucket_module = importlib.import_module("cos_service.models.Bucket")
-    Base: Any = models.Base  # base déclarative chargée dynamiquement : Any pour mypy
-    Column, String, ForeignKey = sqlalchemy.Column, sqlalchemy.String, sqlalchemy.ForeignKey
-
-    class Cos(Base):
-        __tablename__ = "cos_instance"
-        subscription_id = Column(String(50), primary_key=True)
-        name = Column(String(50))
-
-        def to_dict(self):
-            return {"subscription_id": self.subscription_id, "name": self.name}
-
-    class Workspace(Base):
-        __tablename__ = "workspace"
-        workspace_id = Column(String(50), primary_key=True)
-        bucket_subscription_id = Column(String(50), ForeignKey("bucket.subscription_id"))
-        backup_vault_subscription_id = Column(String(50), ForeignKey("backup_vault.subscription_id"))
-
-        def __iter__(self):  # comme le vrai : dict(workspace)
-            yield "workspace_id", self.workspace_id
-
-    BackupVault = models.BackupVault  # le vrai modèle, dans le dépôt depuis cette MR
-    BackupVaultRestore = models.BackupVaultRestore
+    Cos, Workspace = models.Cos, models.Workspace
+    BackupVault, BackupVaultRestore = models.BackupVault, models.BackupVaultRestore
 
     real_modules = {name: module for name, module in sys.modules.items()
                     if name == "sqlalchemy" or name.startswith(("sqlalchemy.", "cos_service.models"))}
-    return {"modules": real_modules, "sqlalchemy": sqlalchemy, "orm": orm, "Base": Base,
-            "Bucket": bucket_module.Bucket, "Cos": Cos, "Workspace": Workspace, "BackupVault": BackupVault,
-            "BackupVaultRestore": BackupVaultRestore}
+    return {"modules": real_modules, "sqlalchemy": sqlalchemy, "orm": orm, "Base": models.Base, "Bucket": bucket_module.Bucket, "Cos": Cos, "Workspace": Workspace,
+            "BackupVault": BackupVault, "BackupVaultRestore": BackupVaultRestore, "models": models}
 
 
 @pytest.fixture
@@ -71,7 +48,7 @@ def real_models(monkeypatch):
     engine = _REAL["sqlalchemy"].create_engine("sqlite://")
     _REAL["Base"].metadata.create_all(engine)
     namespace = type("Models", (), {})()
-    for key in ("Bucket", "Cos", "Workspace", "BackupVault", "BackupVaultRestore"):
+    for key in ("Bucket", "Cos", "Workspace", "BackupVault", "BackupVaultRestore", "models"):
         setattr(namespace, key, _REAL[key])
     namespace.select = _REAL["sqlalchemy"].select
     namespace.session = _REAL["orm"].sessionmaker(bind=engine)()
@@ -94,6 +71,13 @@ def minimal_restore(models, **overrides):
                    restore_type="point_in_time", status="REQUESTED", action="restore", created_by="karim")
     columns.update(overrides)
     return models.BackupVaultRestore(**columns)
+
+
+def minimal_cos(models, **overrides):
+    columns = dict(subscription_id="cos-sub", name="cos-a", description="instance", created_at=datetime(2026, 10, 8, 8, 0),
+                   created_by="karim", status="created", plan="standard", region="eu-de", environment="dev")
+    columns.update(overrides)
+    return models.Cos(**columns)
 
 
 def minimal_bucket(models, **overrides):
@@ -127,7 +111,7 @@ class TestConstruction:
 class TestRoundTrip:
     def test_insert_and_read_back_with_relations(self, real_models):
         m = real_models
-        cos = m.Cos(subscription_id="cos-sub", name="cos-a")
+        cos = minimal_cos(m)
         vault = minimal_vault(m, crn="crn:bv")
         bucket = minimal_bucket(
             m, retention_enabled=True, retention_default=365, retention_minimum=365, retention_maximum=730,
@@ -153,7 +137,7 @@ class TestDictViews:
     def test_to_dict_has_every_column_and_every_relation(self, real_models):
         m = real_models
         bucket = minimal_bucket(m, description="my bucket")
-        bucket.cos = m.Cos(subscription_id="cos-sub", name="cos-a")
+        bucket.cos = minimal_cos(m)
         bucket.workspace = m.Workspace(workspace_id="ws-1")
         m.session.add(bucket)
         m.session.commit()
@@ -161,8 +145,8 @@ class TestDictViews:
         data = bucket.to_dict()
 
         assert set(data) == {c.name for c in m.Bucket.__table__.columns} | {"cos", "workspace", "backup_vault"}
-        assert data["workspace"] == {"workspace_id": "ws-1"}  # manquait à l'original : les DAGs le lisent
-        assert data["cos"] == {"subscription_id": "cos-sub", "name": "cos-a"}
+        assert data["workspace"]["workspace_id"] == "ws-1"  # manquait à l'original : les DAGs le lisent
+        assert data["cos"]["subscription_id"] == "cos-sub" and data["cos"]["name"] == "cos-a"
         assert data["backup_vault"] is None
         assert data["created_by"] == "karim" and data["expiration_rule_created_at"] is None
         assert data["cos_subscription_id"] == "cos-sub"
@@ -192,7 +176,7 @@ class TestBackupVault:
     def test_round_trip_and_dict_views(self, real_models):
         m = real_models
         vault = minimal_vault(m, name="vault-a", kms_crn="crn:kms")
-        vault.cos = m.Cos(subscription_id="cos-sub", name="cos-a")
+        vault.cos = minimal_cos(m)
         m.session.add(vault)
         m.session.commit()
 
@@ -200,15 +184,27 @@ class TestBackupVault:
         data = row.to_dict()
 
         assert set(data) == {c.name for c in m.BackupVault.__table__.columns} | {"cos", "workspace"}
-        assert data["cos"] == {"subscription_id": "cos-sub", "name": "cos-a"} and data["workspace"] is None
+        assert data["cos"]["name"] == "cos-a" and data["cos"]["context"] is None and data["workspace"] is None
         assert data["kms_crn"] == "crn:kms" and dict(row) == data
         assert repr(row) == "<BackupVault bv-sub 'vault-a' status=created>"
 
     def test_columns_are_text_like_the_pprod_schema(self, real_models):
-        from sqlalchemy import Text
+        from sqlalchemy import JSON, Boolean, Integer, Text
 
-        text_columns = [c for c in real_models.BackupVault.__table__.columns if c.name not in ("created_at", "updated_at")]
-        assert all(isinstance(c.type, Text) for c in text_columns)
+        m = real_models.models
+        legacy = (m.BackupVault, m.Bucket, m.BucketMigration, m.Context, m.Cos, m.CrossAccountServiceId,
+                  m.LifecyclePolicyRule, m.Workspace)
+        for model in legacy:
+            for column in model.__table__.columns:
+                if column.name.endswith(("_at", "_time")):
+                    continue
+                assert isinstance(column.type, (Text, Integer, Boolean, JSON)), f"{model.__tablename__}.{column.name}"
+
+    def test_every_table_of_pprod_is_declared(self, real_models):
+        assert set(real_models.models.Base.metadata.tables) == {
+            "backup_vault", "backup_vault_restore", "bucket", "bucket_migration", "context", "cos_instance",
+            "cross_account_service_id", "lifecycle_policy_rule", "workspace",
+        }
 
 
 class TestBackupVaultRestore:
