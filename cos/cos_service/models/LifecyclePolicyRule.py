@@ -15,10 +15,10 @@ class LifecyclePolicyRule(Base):
 
     id = Column(BigId, Sequence("lifecycle_policy_rule_id_seq"), primary_key=True)
     bucket_subscription_id = Column(Text, ForeignKey("bucket.subscription_id"))
-    rule_id = Column(Text, nullable=True)
+    rule_id = Column(Text, nullable=False)
     filter_prefix = Column(Text, nullable=True)
-    status = Column(Text, nullable=True)
-    expiration_days = Column(Integer, nullable=True)
+    status = Column(Text, nullable=False)
+    expiration_days = Column(Integer, nullable=False)
     non_current_version_expiration_days = Column(Integer, nullable=True)
     created_at = Column(TIMESTAMP, nullable=True)
     created_by = Column(Text, nullable=True)

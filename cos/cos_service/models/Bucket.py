@@ -21,7 +21,7 @@ Améliorations par rapport au modèle d'origine :
 """
 import logging
 
-from sqlalchemy import TIMESTAMP, Boolean, Column, ForeignKey, Integer, Text
+from sqlalchemy import TIMESTAMP, Boolean, Column, ForeignKey, Integer, Text, text
 from sqlalchemy.orm import relationship
 
 from cos_service.models._dict import row_to_dict
@@ -55,24 +55,25 @@ class Bucket(Base):
     cos_subscription_id = Column(Text, ForeignKey("cos_instance.subscription_id"))
     cos = relationship("Cos", uselist=False, backref="bucket")
     workspace = relationship("Workspace", uselist=False, backref="bucket")
-    virtual_server_endpoint = Column(Text, nullable=True)
+    virtual_server_endpoint = Column(Text, nullable=False)
     environment = Column(Text, nullable=True)
 
     # Rétention : le jour est l'unité canonique (ADR 0001). ``retention_unit``
     # garde l'unité saisie par le client ("days" / "years") pour la lui rendre.
-    retention_enabled = Column(Boolean, nullable=True)
+    # Booléens NOT NULL avec défaut en base (alembic check contre pprod)
+    retention_enabled = Column(Boolean, nullable=False, server_default=text("false"))
     retention_default = Column(Integer, nullable=True)
     retention_minimum = Column(Integer, nullable=True)
     retention_maximum = Column(Integer, nullable=True)
     retention_unit = Column(Text, nullable=True)
 
-    enable_custom_permissions = Column(Boolean, nullable=True)
+    enable_custom_permissions = Column(Boolean, nullable=False, server_default=text("false"))
     object_lock_duration_days = Column(Integer, nullable=True)
     object_lock_duration_years = Column(Integer, nullable=True)
-    has_expiration_rule = Column(Boolean, nullable=True)
+    has_expiration_rule = Column(Boolean, nullable=False, server_default=text("false"))
     expiration_rule_created_at = Column(TIMESTAMP, nullable=True)
-    object_versioning_enabled = Column(Boolean, nullable=True)
-    backup_enabled = Column(Boolean, nullable=True)
+    object_versioning_enabled = Column(Boolean, nullable=False, server_default=text("false"))
+    backup_enabled = Column(Boolean, nullable=False, server_default=text("false"))
     backup_vault_subscription_id = Column(Text, ForeignKey("backup_vault.subscription_id"))
     backup_vault = relationship("BackupVault", uselist=False, backref="bucket")
     backup_retention_days = Column(Integer, nullable=True)
