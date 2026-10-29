@@ -21,7 +21,7 @@ import logging
 from datetime import date
 
 from dateutil.relativedelta import relativedelta
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +85,16 @@ class BucketRetention(BaseModel):
     minimum: int | None = _legacy_field("minimum")
     maximum: int | None = _legacy_field("maximum")
     # Posé par _accept_legacy_format quand le client a envoyé l'ancien format.
-    # Jamais exporté (state, Terraform) : sert à remonter une notice de dépréciation.
-    legacy_format: bool = Field(default=False, exclude=True)
+    # Attribut privé, donc hors du contrat JSON : le provider renvoie à chaque
+    # update toutes les propriétés du schéma, à null quand il ne les connaît pas,
+    # et un champ ``bool`` non nullable y serait refusé par l'orchestrateur
+    # ("None is not of type 'boolean'"). Jamais exporté (state, Terraform) :
+    # sert à remonter une notice de dépréciation.
+    _legacy_format: bool = PrivateAttr(default=False)
+
+    @property
+    def legacy_format(self) -> bool:
+        return self._legacy_format
 
     # -- helpers ------------------------------------------------------------
     @staticmethod
@@ -146,7 +154,7 @@ class BucketRetention(BaseModel):
         )
         for k, v in legacy.items():
             setattr(self, f"{k}_{DAYS}", v)
-        self.legacy_format = True
+        self._legacy_format = True
         return self
 
     # -- 2. Tous les contrôles du payload, erreurs accumulées -----------------
