@@ -36,7 +36,7 @@ class BucketMigration(Base):
     ecosystem = Column(Text, nullable=True)
     status = Column(Text, nullable=True)
     cron_expression = Column(Text, nullable=True)
-    initial_cron_schedule_date_time = Column(TIMESTAMP, nullable=True)
+    initial_cron_schedule_date_time = Column(TIMESTAMP(timezone=True), nullable=True)  # timestamptz en pprod
     sync_history = Column(JSON, nullable=True)
     cross_account_sid_api_key_vault_path = Column(Text, nullable=True)
     cross_account_sid_workspace_id = Column(Text, nullable=True)

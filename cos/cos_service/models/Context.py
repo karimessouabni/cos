@@ -25,6 +25,7 @@ class Context(Base):
     wklapp_account_id = Column(Text, nullable=True)
     wklapp_account_number = Column(Text, nullable=True)
     wklapp_account_name = Column(Text, nullable=True)
+    metier_n3 = Column(Text, nullable=True)  # présente en pprod, absente de l'ancien modèle
 
     def __init__(self, **columns):
         """Colonnes en mots-clés uniquement ; ce qui n'est pas donné reste à None."""

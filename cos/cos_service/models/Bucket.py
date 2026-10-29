@@ -50,7 +50,7 @@ class Bucket(Base):
     kms_crn = Column(Text, nullable=True)
     created_at = Column(TIMESTAMP, nullable=True)
     created_by = Column(Text, nullable=True)
-    updated_at = Column(TIMESTAMP, nullable=True)
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=True)  # timestamptz en pprod
     updated_by = Column(Text, nullable=True)
     cos_subscription_id = Column(Text, ForeignKey("cos_instance.subscription_id"))
     cos = relationship("Cos", uselist=False, backref="bucket")

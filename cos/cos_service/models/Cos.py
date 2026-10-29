@@ -6,7 +6,7 @@ scripts SQL manuels, jamais en ``varchar(n)``). Constructeur par mots-clés,
 """
 import logging
 
-from sqlalchemy import TIMESTAMP, Column, Text
+from sqlalchemy import JSON, TIMESTAMP, Column, Text
 from sqlalchemy.orm import relationship
 
 from cos_service.models._dict import row_to_dict
@@ -33,6 +33,12 @@ class Cos(Base):
     plan = Column(Text, nullable=True)
     region = Column(Text, nullable=True)
     environment = Column(Text, nullable=True)
+    # Présentes en pprod, absentes de l'ancien modèle : déclarées pour qu'Alembic ne
+    # propose plus de les supprimer. ``owership`` garde sa faute, c'est le nom en base.
+    code_bl = Column(Text, nullable=True)
+    code_bu = Column(Text, nullable=True)
+    owership = Column(Text, nullable=True)
+    payload = Column(JSON, nullable=True)
 
     context = relationship("Context", uselist=False, backref="cos_instance")
     workspace = relationship("Workspace", uselist=False, backref="cos_instance")
