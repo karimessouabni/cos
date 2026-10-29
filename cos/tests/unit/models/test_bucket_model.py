@@ -2,8 +2,8 @@
 
 Le reste de la suite tourne sur des doublures de ``sqlalchemy`` et des modèles
 (conftest) : cette fixture les écarte le temps du test et importe les vrais
-modules depuis le disque. Les modèles liés absents du dépôt (Cos, Workspace,
-BackupVault) sont déclarés ici a minima, sur la même Base : c'est aussi ce
+modules depuis le disque. Les modèles liés absents du dépôt (Cos, Workspace)
+sont déclarés ici a minima, sur la même Base : c'est aussi ce
 qui prouve que les ``relationship("Nom")`` se résolvent quand les classes sont
 chargées.
 """
@@ -41,24 +41,21 @@ def _load_real_models() -> dict:
 
     class Workspace(Base):
         __tablename__ = "workspace"
-        bucket_subscription_id = Column(String(50), ForeignKey("bucket.subscription_id"), primary_key=True)
-        workspace_id = Column(String(50))
+        workspace_id = Column(String(50), primary_key=True)
+        bucket_subscription_id = Column(String(50), ForeignKey("bucket.subscription_id"))
+        backup_vault_subscription_id = Column(String(50), ForeignKey("backup_vault.subscription_id"))
 
         def __iter__(self):  # comme le vrai : dict(workspace)
             yield "workspace_id", self.workspace_id
 
-    class BackupVault(Base):
-        __tablename__ = "backup_vault"
-        subscription_id = Column(String(50), primary_key=True)
-        crn = Column(String(255))
-
-        def to_dict(self):
-            return {"subscription_id": self.subscription_id, "crn": self.crn}
+    BackupVault = models.BackupVault  # le vrai modèle, dans le dépôt depuis cette MR
+    BackupVaultRestore = models.BackupVaultRestore
 
     real_modules = {name: module for name, module in sys.modules.items()
                     if name == "sqlalchemy" or name.startswith(("sqlalchemy.", "cos_service.models"))}
     return {"modules": real_modules, "sqlalchemy": sqlalchemy, "orm": orm, "Base": Base,
-            "Bucket": bucket_module.Bucket, "Cos": Cos, "Workspace": Workspace, "BackupVault": BackupVault}
+            "Bucket": bucket_module.Bucket, "Cos": Cos, "Workspace": Workspace, "BackupVault": BackupVault,
+            "BackupVaultRestore": BackupVaultRestore}
 
 
 @pytest.fixture
@@ -74,13 +71,29 @@ def real_models(monkeypatch):
     engine = _REAL["sqlalchemy"].create_engine("sqlite://")
     _REAL["Base"].metadata.create_all(engine)
     namespace = type("Models", (), {})()
-    for key in ("Bucket", "Cos", "Workspace", "BackupVault"):
+    for key in ("Bucket", "Cos", "Workspace", "BackupVault", "BackupVaultRestore"):
         setattr(namespace, key, _REAL[key])
     namespace.select = _REAL["sqlalchemy"].select
     namespace.session = _REAL["orm"].sessionmaker(bind=engine)()
     yield namespace
     namespace.session.close()
     engine.dispose()
+
+
+def minimal_vault(models, **overrides):
+    columns = dict(subscription_id="bv-sub", region="eu-de", status="created", created_at=datetime(2026, 10, 8, 9, 0),
+                   created_by="karim", environment="dev")
+    columns.update(overrides)
+    return models.BackupVault(**columns)
+
+
+def minimal_restore(models, **overrides):
+    # ``id`` est donné : SQLite n'a pas de séquence et n'auto-incrémente pas une clé composite (PostgreSQL le fait)
+    columns = dict(id=hash(overrides.get("subscription_id", "rst-1")) % 10_000, subscription_id="rst-1", backup_vault_subscription_id="bv-sub", backup_vault_name="vault-a",
+                   target_bucket_crn="crn:bucket-b", recovery_range_id="rr-1", restore_point_in_time="2026-10-01T00:00:00Z",
+                   restore_type="point_in_time", status="REQUESTED", action="restore", created_by="karim")
+    columns.update(overrides)
+    return models.BackupVaultRestore(**columns)
 
 
 def minimal_bucket(models, **overrides):
@@ -115,7 +128,7 @@ class TestRoundTrip:
     def test_insert_and_read_back_with_relations(self, real_models):
         m = real_models
         cos = m.Cos(subscription_id="cos-sub", name="cos-a")
-        vault = m.BackupVault(subscription_id="bv-sub", crn="crn:bv")
+        vault = minimal_vault(m, crn="crn:bv")
         bucket = minimal_bucket(
             m, retention_enabled=True, retention_default=365, retention_minimum=365, retention_maximum=730,
             retention_unit="years", clean_status="scheduled",
@@ -166,6 +179,88 @@ class TestDictViews:
 
     def test_repr_is_short_and_useful(self, real_models):
         assert repr(minimal_bucket(real_models, clean_status="scheduled")) == "<Bucket sub-1 'bucket-a' status=creating clean=scheduled>"
+
+
+class TestBackupVault:
+    def test_keyword_only_and_nullable_name_action(self, real_models):
+        vault = minimal_vault(real_models)
+
+        assert vault.name is None and vault.action is None and vault.crn is None
+        with pytest.raises(TypeError):
+            real_models.BackupVault("bv-sub", "desc")
+
+    def test_round_trip_and_dict_views(self, real_models):
+        m = real_models
+        vault = minimal_vault(m, name="vault-a", kms_crn="crn:kms")
+        vault.cos = m.Cos(subscription_id="cos-sub", name="cos-a")
+        m.session.add(vault)
+        m.session.commit()
+
+        row = m.session.execute(m.select(m.BackupVault).where(m.BackupVault.subscription_id == "bv-sub")).scalar_one()
+        data = row.to_dict()
+
+        assert set(data) == {c.name for c in m.BackupVault.__table__.columns} | {"cos", "workspace"}
+        assert data["cos"] == {"subscription_id": "cos-sub", "name": "cos-a"} and data["workspace"] is None
+        assert data["kms_crn"] == "crn:kms" and dict(row) == data
+        assert repr(row) == "<BackupVault bv-sub 'vault-a' status=created>"
+
+    def test_columns_are_text_like_the_pprod_schema(self, real_models):
+        from sqlalchemy import Text
+
+        text_columns = [c for c in real_models.BackupVault.__table__.columns if c.name not in ("created_at", "updated_at")]
+        assert all(isinstance(c.type, Text) for c in text_columns)
+
+
+class TestBackupVaultRestore:
+    def test_created_at_is_evaluated_per_row(self, real_models, monkeypatch):
+        """L'ancien ``default=datetime.now(...)`` figeait la date à l'import du module."""
+        module = sys.modules["cos_service.models.BackupVaultRestore"]  # l'attribut du package est la classe
+
+        clock = iter([datetime(2026, 10, 8, 10, 0), datetime(2026, 10, 8, 11, 0)])
+        monkeypatch.setattr(module, "_now_paris", lambda: next(clock))
+        m = real_models
+        m.session.add(minimal_vault(m))
+        m.session.add_all([minimal_restore(m, subscription_id="rst-1"),
+                           minimal_restore(m, subscription_id="rst-2", target_bucket_crn="crn:bucket-c")])
+        m.session.commit()
+
+        rows = m.session.execute(m.select(m.BackupVaultRestore).order_by(m.BackupVaultRestore.subscription_id)).scalars().all()
+
+        assert [r.created_at for r in rows] == [datetime(2026, 10, 8, 10, 0), datetime(2026, 10, 8, 11, 0)]
+
+    def test_same_request_twice_is_refused(self, real_models):
+        from sqlalchemy.exc import IntegrityError
+
+        m = real_models
+        m.session.add(minimal_vault(m))
+        m.session.add(minimal_restore(m, subscription_id="rst-1"))
+        m.session.commit()
+        m.session.add(minimal_restore(m, subscription_id="rst-2"))
+
+        with pytest.raises(IntegrityError):
+            m.session.commit()
+        m.session.rollback()
+
+    def test_to_dict_serialises_dates_and_relation_works(self, real_models):
+        m = real_models
+        vault = minimal_vault(m, name="vault-a")
+        m.session.add(vault)
+        m.session.add(minimal_restore(m, created_at=datetime(2026, 10, 8, 10, 0), error_cause=None))
+        m.session.commit()
+
+        row = m.session.execute(m.select(m.BackupVaultRestore)).scalar_one()
+        data = row.to_dict()
+
+        assert data["created_at"] == "2026-10-08T10:00:00" and data["completed_at"] is None
+        assert set(data) == {c.name for c in m.BackupVaultRestore.__table__.columns}
+        assert row.backup_vault.name == "vault-a" and vault.restores == [row]
+        assert dict(row) == data
+
+    def test_index_and_unique_constraint_are_declared(self, real_models):
+        table = real_models.BackupVaultRestore.__table__
+
+        assert {i.name for i in table.indexes} == {"idx_restore_target_bucket"}
+        assert "uq_restore_request" in {c.name for c in table.constraints}
 
 
 def test_the_stubs_are_back_after_the_model_test():
