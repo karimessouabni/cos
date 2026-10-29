@@ -37,7 +37,23 @@ select r.id, r.backup_vault_subscription_id from backup_vault_restore r
 
 
 def upgrade() -> None:
+    # La séquence doit appartenir au même rôle que la table (contrainte PostgreSQL
+    # de OWNED BY). Le rôle qui exécute la migration n'est pas forcément celui qui
+    # possède la table : on la crée puis on l'aligne sur le propriétaire réel.
     op.execute(f"CREATE SEQUENCE IF NOT EXISTS {SEQUENCE}")
+    op.execute(
+        f"""
+        DO $$
+        DECLARE table_owner text;
+        BEGIN
+            SELECT pg_get_userbyid(c.relowner) INTO table_owner
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE c.relname = 'backup_vault_restore' AND n.nspname = current_schema();
+            EXECUTE format('ALTER SEQUENCE {SEQUENCE} OWNER TO %I', table_owner);
+        END $$
+        """
+    )
     op.alter_column(
         "backup_vault_restore", "id",
         existing_type=sa.String(length=50), type_=sa.BigInteger(), existing_nullable=False,
