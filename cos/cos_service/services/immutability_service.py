@@ -451,6 +451,23 @@ def compute_bucket_retention(payload_retention: BucketRetention, immutability: d
     logging.info(f"compute_bucket_retention2 {immutability}")
     return immutability
 
+def immutability_choice_for_client(requested: Immutability | str | None, computed: str) -> str:
+    """Valeur de ``immutability_choice`` poussée dans le state de la souscription.
+
+    Le provider Terraform compare chaque clé du payload qu'il a envoyée avec
+    celle qu'il relit dans le state : une différence est une erreur
+    ("Provider produced inconsistent result after apply"). Un client qui envoie
+    ``retention_daily`` doit donc relire ``retention_daily``, pas la famille
+    ``retention`` que le service calcule sur un bucket existant. Sans choix
+    envoyé (absent, ou ``none`` : le défaut que le provider renvoie quand le
+    client n'a rien saisi), le state porte le choix effectif calculé.
+    """
+    if requested is None:
+        return computed
+    choice = Immutability(requested)  # le payload livre l'enum ; une chaîne brute est acceptée aussi
+    return computed if choice is Immutability.NONE else choice.value
+
+
 def retention_state_for_client(payload_retention: BucketRetention | None, retention: dict) -> dict:
     """Bloc ``retention`` poussé dans le state de la souscription.
 

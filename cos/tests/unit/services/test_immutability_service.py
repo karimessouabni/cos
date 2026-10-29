@@ -362,6 +362,16 @@ class TestComputeBucketImmutabilityForUpdate:
         assert "no backup vault attached" in caplog.text
 
 
+class TestImmutabilityChoiceForClient:
+    @pytest.mark.parametrize("requested", [Immutability.RETENTION_DAILY, Immutability.RETENTION, Immutability.OBJECT_LOCK_YEARLY])
+    def test_a_sent_choice_is_echoed_as_is(self, requested):
+        assert svc.immutability_choice_for_client(requested, "retention") == requested.value
+
+    @pytest.mark.parametrize("requested", [None, Immutability.NONE])
+    def test_absent_or_none_gives_the_effective_choice(self, requested):
+        assert svc.immutability_choice_for_client(requested, "retention") == "retention"
+
+
 class TestResolveStateEcho:
     """Payload reçu avec les deux formats et des valeurs différentes (jours)."""
     STORED = dict(retention_enabled=True, retention_default=30, retention_minimum=10, retention_maximum=60)

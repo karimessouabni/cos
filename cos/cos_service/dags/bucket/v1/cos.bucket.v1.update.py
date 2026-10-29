@@ -260,7 +260,11 @@ def bucket_update():
             retention_unit_of,
             update_bucket_workspace_status,
         )
-        from cos_service.services.immutability_service import deprecations_for_client, retention_state_for_client
+        from cos_service.services.immutability_service import (
+            deprecations_for_client,
+            immutability_choice_for_client,
+            retention_state_for_client,
+        )
 
         immutability = validated["immutability"]
         enable_custom_permissions = validated["enable_custom_permissions"]
@@ -277,7 +281,11 @@ def bucket_update():
             "enable_versioning": immutability["object_versioning_enabled"],
             "backup": immutability["backup"],
             "enable_custom_permissions": enable_custom_permissions,
-            "immutability_choice": immutability["immutability_choice"],
+            # Le choix tel que le client l'a envoyé (le provider le compare au sien),
+            # le choix effectif sinon.
+            "immutability_choice": immutability_choice_for_client(
+                payload.immutability_choice, immutability["immutability_choice"]
+            ),
             # Notices de dépréciation (format historique de rétention…), relues par le provider.
             "deprecations": deprecations_for_client(retention),
         })
