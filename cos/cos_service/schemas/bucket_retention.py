@@ -147,10 +147,26 @@ class BucketRetention(BaseModel):
             if getattr(self, f"{k}_{unit}") is not None
         ]
         if suffixed:
-            raise ValueError(
-                "Retention must use either the legacy fields (default, minimum, maximum) "
-                f"or the unit-suffixed fields ({', '.join(suffixed)}), not both."
+            # Les deux formats ensemble : c'est l'écho du state de la souscription,
+            # que le provider renvoie entier à l'update (clés historiques en jours
+            # + bornes suffixées telles que saisies). Les bornes suffixées portent
+            # l'intention du client ; les clés historiques sont ignorées si chacune
+            # a sa contrepartie suffixée et, en jours, la même valeur. Sinon c'est
+            # un vrai mélange, refusé.
+            unit = self._unit_of(lambda name: getattr(self, name))
+            echo = all(
+                getattr(self, f"{k}_{unit}") is not None
+                and (unit != DAYS or getattr(self, f"{k}_{unit}") == v)
+                for k, v in legacy.items()
             )
+            if not echo:
+                raise ValueError(
+                    "Retention must use either the legacy fields (default, minimum, maximum) "
+                    f"or the unit-suffixed fields ({', '.join(suffixed)}), not both."
+                )
+            for k in legacy:
+                setattr(self, k, None)
+            return self
         logger.warning(
             "Legacy retention payload (implicit days) received: %s. "
             "Use default_days / minimum_days / maximum_days (or *_years) instead.",

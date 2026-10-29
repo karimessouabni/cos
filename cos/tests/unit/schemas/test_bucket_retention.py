@@ -267,9 +267,36 @@ class TestLegacyFormat:
 
     def test_mixing_legacy_and_suffixed_fields_is_rejected(self):
         with pytest.raises(ValidationError, match="not both"):
-            BucketRetention(default=30, default_days=30)
+            BucketRetention(default=30, default_days=31)  # même borne, valeurs différentes
         with pytest.raises(ValidationError, match="not both"):
-            BucketRetention(default=30, maximum_years=5)
+            BucketRetention(default=30, maximum_years=5)  # default sans default_years
+        with pytest.raises(ValidationError, match="not both"):
+            BucketRetention(default=2, minimum_days=1, maximum_days=3)  # cas 63_refused_bucket_inputs
+
+    def test_state_echo_in_days_is_accepted_as_the_suffixed_fields(self):
+        """Le provider renvoie à l'update le state entier : clés historiques (jours)
+        + bornes suffixées. Même valeurs : ce n'est pas un mélange, ni le format legacy."""
+        r = BucketRetention.model_validate(
+            {"retention_enabled": True, "default": 2, "minimum": 1, "maximum": 3,
+             "default_days": 2, "minimum_days": 1, "maximum_days": 3}
+        )
+
+        assert r.unit == DAYS
+        assert (r.value("minimum"), r.value("default"), r.value("maximum")) == (1, 2, 3)
+        assert r.legacy_format is False
+        assert r.default is None and r.minimum is None and r.maximum is None
+
+    def test_state_echo_in_years_is_accepted_whatever_the_day_conversion(self):
+        """En années, les clés historiques sont notre propre conversion en jours
+        (dépendante de la date) : elles sont ignorées dès que la borne suffixée existe."""
+        r = BucketRetention.model_validate(
+            {"retention_enabled": True, "default": 730, "minimum": 365, "maximum": 1826,
+             "default_years": 2, "minimum_years": 1, "maximum_years": 5}
+        )
+
+        assert r.unit == YEARS
+        assert (r.value("minimum"), r.value("default"), r.value("maximum")) == (1, 2, 5)
+        assert r.legacy_format is False
 
     def test_legacy_keys_set_to_null_are_ignored(self):
         r = BucketRetention.model_validate({"default": None, "minimum": None, "maximum": None, "maximum_years": 5})
