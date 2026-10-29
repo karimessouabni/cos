@@ -13,17 +13,17 @@ modèle d'origine :
 - ``RestoreStatus`` est importé dans les helpers, pas en tête de module : le
   modèle se charge même quand les schémas ne sont pas sur le chemin.
 
-L'index ``idx_restore_target_bucket`` est déclaré ici mais absent de pprod :
-il fait partie de la première révision Alembic réellement exécutée.
+L'index ``idx_restore_target_bucket``, la clé étrangère vers ``backup_vault`` et
+``id`` en bigint sont déclarés ici mais absents de pprod : révision 20261029.
 """
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import TIMESTAMP, Column, ForeignKey, Index, Integer, Sequence, String, UniqueConstraint
+from sqlalchemy import TIMESTAMP, Column, ForeignKey, Index, Sequence, String, UniqueConstraint
 from sqlalchemy.orm import relationship
 
-from cos_service.models.base import Base
+from cos_service.models.base import Base, BigId
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +38,11 @@ def _now_paris() -> datetime:
 class BackupVaultRestore(Base):
     __tablename__ = "backup_vault_restore"
 
-    id = Column(Integer, Sequence("backup_vault_restore_id_seq"), primary_key=True)
-    subscription_id = Column(String(50), nullable=False, primary_key=True)
+    # Clé primaire : ``id`` seul, comme en base. L'ancien modèle y ajoutait
+    # ``subscription_id``, la base ne l'a jamais fait. La colonne est ``varchar(50)``
+    # en pprod avec des valeurs numériques : la révision 20261029 la passe en bigint.
+    id = Column(BigId, Sequence("backup_vault_restore_id_seq"), primary_key=True)
+    subscription_id = Column(String(50), nullable=False)
 
     # lien avec le backup vault
     backup_vault_subscription_id = Column(String(50), ForeignKey("backup_vault.subscription_id"), nullable=False)

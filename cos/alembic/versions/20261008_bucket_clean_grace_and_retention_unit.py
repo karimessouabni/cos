@@ -5,18 +5,15 @@
 - retention_unit : unité saisie par le client ("days" / "years"), les bornes restent en jours
 - clean_status : accepte NULL (l'ORM l'écrivait déjà à None à l'insertion)
 
-[À COMPLÉTER] ``down_revision`` doit être la tête actuelle de votre chaîne
-(``alembic heads``) : ce dépôt ne contient pas vos autres migrations.
-
 Revision ID: 20261008_clean_grace
-Revises: <HEAD>
+Revises: 68d62b4ffe7c (schéma initial, stampé sur int / pprod / prod)
 Create Date: 2026-10-08
 """
 import sqlalchemy as sa
 from alembic import op
 
 revision = "20261008_clean_grace"
-down_revision = "<HEAD>"  # [À COMPLÉTER] alembic heads
+down_revision = "68d62b4ffe7c"
 branch_labels = None
 depends_on = None
 
