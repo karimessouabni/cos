@@ -95,10 +95,26 @@ class BucketRetention(BaseModel):
     # ("None is not of type 'boolean'"). Jamais exporté (state, Terraform) :
     # sert à remonter une notice de dépréciation.
     _legacy_format: bool = PrivateAttr(default=False)
+    # Clés historiques reçues en même temps que les bornes suffixées, avec des
+    # valeurs différentes (jours) : écho du state d'un bucket existant, ou
+    # changement voulu par un client au format historique. Le schéma ne peut
+    # pas trancher seul ; le service de l'update le fait contre la base
+    # (resolve_state_echo). À la création, un tel payload est refusé.
+    _legacy_echo: dict = PrivateAttr(default_factory=dict)
 
     @property
     def legacy_format(self) -> bool:
         return self._legacy_format
+
+    @property
+    def legacy_echo(self) -> dict:
+        return dict(self._legacy_echo)
+
+    def without_legacy_echo(self) -> "BucketRetention":
+        """Copie où l'écho historique est tranché : les bornes suffixées font foi."""
+        resolved = self.model_copy()
+        resolved._legacy_echo = {}
+        return resolved
 
     # -- helpers ------------------------------------------------------------
     @staticmethod
@@ -150,20 +166,21 @@ class BucketRetention(BaseModel):
             # Les deux formats ensemble : c'est l'écho du state de la souscription,
             # que le provider renvoie entier à l'update (clés historiques en jours
             # + bornes suffixées telles que saisies). Les bornes suffixées portent
-            # l'intention du client ; les clés historiques sont ignorées si chacune
-            # a sa contrepartie suffixée et, en jours, la même valeur. Sinon c'est
-            # un vrai mélange, refusé.
+            # l'intention du client. Une clé historique sans contrepartie suffixée
+            # est un vrai mélange, refusé. Avec contrepartie : ignorée si la valeur
+            # est la même (ou en années, où elle est notre conversion en jours) ;
+            # si elle diffère en jours, gardée de côté pour que le service de
+            # l'update tranche contre la base (legacy_echo).
             unit = self._unit_of(lambda name: getattr(self, name))
-            echo = all(
-                getattr(self, f"{k}_{unit}") is not None
-                and (unit != DAYS or getattr(self, f"{k}_{unit}") == v)
-                for k, v in legacy.items()
-            )
-            if not echo:
+            if any(getattr(self, f"{k}_{unit}") is None for k in legacy):
                 raise ValueError(
                     "Retention must use either the legacy fields (default, minimum, maximum) "
                     f"or the unit-suffixed fields ({', '.join(suffixed)}), not both."
                 )
+            if unit == DAYS:
+                self._legacy_echo = {
+                    k: v for k, v in legacy.items() if getattr(self, f"{k}_{DAYS}") != v
+                }
             for k in legacy:
                 setattr(self, k, None)
             return self
