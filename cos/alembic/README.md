@@ -197,19 +197,25 @@ python -m alembic downgrade 68d62b4ffe7c && python -m alembic upgrade head
 
 1. Régénérer `68d62b4ffe7c_schema_initial.py` depuis une base vide avec les
    modèles corrigés, en gardant son identifiant (c'est lui que les bases
-   connaîtront) :
+   connaîtront). Les révisions chaînées dessus doivent être écartées le temps
+   de la génération, sinon Alembic refuse de charger la chaîne :
    ```bash
-   dropdb cos_service && createdb cos_service
+   mkdir -p /tmp/rev_hold
+   mv alembic/versions/20261008_*.py alembic/versions/20261029_*.py /tmp/rev_hold/
+   dropdb cos_service; createdb cos_service
    psql -d cos_service -c 'create schema cos;' -c 'alter database cos_service set search_path to cos;'
    export DB_URL="postgresql+psycopg2://h90871@localhost:5432/cos_service"
    rm alembic/versions/68d62b4ffe7c_schema_initial.py
    python -m alembic upgrade de3255812781
    python -m alembic revision --autogenerate -m "schema initial" --rev-id 68d62b4ffe7c
+   mv /tmp/rev_hold/*.py alembic/versions/
+   python -m alembic history            # quatre lignes, 20261029_restore_id en tête
    ```
    Puis retirer à la main du fichier généré ce qui appartient aux révisions
    suivantes : les quatre colonnes `retention_unit` / `clean_*` de `bucket`,
-   l'index `idx_restore_target_bucket`, la FK `backup_vault_restore ->
-   backup_vault`, et remettre `backup_vault_restore.id` en `sa.String(50)`.
+   l'index `idx_restore_target_bucket` (upgrade et downgrade), la FK
+   `backup_vault_restore -> backup_vault`, et remettre `backup_vault_restore.id`
+   en `sa.String(length=50)`.
 2. Retirer le `print` de l'URL dans `env.py` : il affiche le mot de passe.
 3. Rejouer de zéro et vérifier : `dropdb` / `createdb`, `upgrade head`, `check` vide.
 
